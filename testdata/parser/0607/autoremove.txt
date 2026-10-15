@@ -1,0 +1,5 @@
+cups-2.4.19_1 remove x86_64 https://repo-default.voidlinux.org/current 13764009 5564250
+font-ibm-plex-ttf-6.4.0_2 remove x86_64 https://repo-default.voidlinux.org/current 61125016 20870770
+lsof-4.99.7_1 remove x86_64 https://repo-default.voidlinux.org/current 341414 140795
+steam-udev-rules-1.0.0.61+20260625_1 remove x86_64 https://repo-default.voidlinux.org/current 17649 3917
+zenity-4.0.5_1 remove x86_64 https://repo-default.voidlinux.org/current 11049130 3268625

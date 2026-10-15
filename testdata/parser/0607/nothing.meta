@@ -1,0 +1,3 @@
+CMD: xbps-install -Sun
+EXIT: 0
+INDUCED: xbps-install -yu xbps and xbps-install -Syu, in a throwaway voidlinux/voidlinux:latest container

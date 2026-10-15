@@ -105,7 +105,7 @@ func configHome() (string, error) {
 // userHome returns the home directory whose config applies to this run. When
 // xbpretty runs as root through sudo or doas, the calling user's config wins.
 func userHome() (string, error) {
-	if os.Geteuid() != 0 {
+	if euid() != 0 {
 		return os.UserHomeDir()
 	}
 	if name := os.Getenv("SUDO_USER"); name != "" {
@@ -118,7 +118,7 @@ func userHome() (string, error) {
 }
 
 func homeOfUser(name string) (string, error) {
-	u, err := user.Lookup(name)
+	u, err := lookupUser(name)
 	if err != nil {
 		return "", fmt.Errorf("looking up user %s: %w", name, err)
 	}
@@ -131,6 +131,10 @@ func homeOfUser(name string) (string, error) {
 // euid is the effective-user check, replaceable so the root path is testable
 // without running the suite as root.
 var euid = os.Geteuid
+
+// lookupUser resolves a user by name, replaceable so the sudo/doas home
+// resolution is testable without a second account on the machine.
+var lookupUser = user.Lookup
 
 // Invoker returns the uid and gid of the user behind sudo or doas when
 // xbpretty runs as root. State files written into that user's home belong to
@@ -147,7 +151,7 @@ func Invoker() (uid, gid int, ok bool) {
 	if name == "" {
 		return 0, 0, false
 	}
-	u, err := user.Lookup(name)
+	u, err := lookupUser(name)
 	if err != nil {
 		return 0, 0, false
 	}

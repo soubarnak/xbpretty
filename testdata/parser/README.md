@@ -7,7 +7,7 @@ failure, not a silent skip.
 
 | Directory | xbps version | Source |
 |---|---|---|
-| `0607/` | 0.60.7_1 | Host Void Linux box, plus the two state-dependent cases from a `voidlinux/voidlinux` container running 0.60.7 |
+| `0607/` | 0.60.7_1 | Host Void Linux box, plus the state-dependent cases (`hold`, `configure`, `nothing`) from a `voidlinux/voidlinux` container running 0.60.7 |
 | `0591/` | 0.59.1_5 | `voidlinux/voidlinux:latest` container, captured before its xbps was upgraded |
 
 Every capture was taken with `LC_ALL=C`, against the one repository
@@ -18,6 +18,8 @@ Every capture was taken with `LC_ALL=C`, against the one repository
 | `0607/install.txt` | `xbps-install -Sn figlet` |
 | `0607/upgrade.txt` | `xbps-install -Sun` |
 | `0607/remove.txt` | `xbps-remove -n wget` |
+| `0607/autoremove.txt` | `xbps-remove -on` |
+| `0607/nothing.txt` | `xbps-install -Sun`, on a system with nothing to upgrade |
 | `0607/reinstall.txt` | `xbps-install -Sfn curl` |
 | `0607/hold.txt` | `xbps-install -Sun`, with a package on hold |
 | `0607/configure.txt` | `xbps-install -Sun`, with a package left configurable |
@@ -36,6 +38,10 @@ appear in that state:
   the plan does not otherwise touch. Only 0.60.7 can produce one: 0.59.1
   refuses every transaction until xbps itself is updated, which is the case
   `testdata/hints/0591/xbps-unsigned-update.txt` captures.
+
+`0607/nothing.txt` is empty for the same reason: an empty plan needs a system
+with nothing pending. The container supplied it by bringing its own packages
+up to date first, so no host had to be upgraded for the capture.
 
 Two columns of the format are optional: `base-container-0.3_3` (in
 `0591/upgrade.txt`) carries an installed size but no download size, and

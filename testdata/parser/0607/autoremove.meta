@@ -1,0 +1,2 @@
+CMD: xbps-remove -on
+EXIT: 0

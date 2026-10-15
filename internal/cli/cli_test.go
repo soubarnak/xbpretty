@@ -171,6 +171,7 @@ func TestAC001NonRootSummaryHintAndExit(t *testing.T) {
 
 func TestAC004PipedStdinHintsYes(t *testing.T) {
 	e := newEnv(t)
+	e.root = true
 	e.tty = false
 	code, out, errs := e.run("xbpretty", "install", "figlet")
 	if code != 1 {
@@ -220,6 +221,87 @@ func TestAC011NothingToDo(t *testing.T) {
 	}
 	if strings.Contains(errs, "[Y/n]") {
 		t.Errorf("prompted with nothing to do:\n%s", errs)
+	}
+}
+
+// TestAC007UnprivilegedUpgradePlanOmitsSyncAndWarns is AC-007 for the command
+// it names: upgrade drops -S in an unprivileged plan and says why the cached
+// index may be stale.
+func TestAC007UnprivilegedUpgradePlanOmitsSyncAndWarns(t *testing.T) {
+	e := newEnv(t)
+	e.root = false
+	code, _, errs := e.run("xbpretty", "upgrade", "-n")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	cmds := e.transactionCalls()
+	if len(cmds) != 1 || cmds[0] != "-un" {
+		t.Errorf("commands = %q, want one -un dry run", cmds)
+	}
+	if !strings.Contains(errs, "stale") {
+		t.Errorf("missing the stale-index warning:\n%s", errs)
+	}
+}
+
+// planCapture reads a captured dry-run plan from the parser corpus.
+func planCapture(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("../../testdata/parser", path))
+	if err != nil {
+		t.Fatalf("reading capture %s: %v", path, err)
+	}
+	return string(raw)
+}
+
+// rowLine returns the summary line naming a package, or "" when the table
+// does not carry it.
+func rowLine(out, name string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), name+" ") {
+			return line
+		}
+	}
+	return ""
+}
+
+// TestAC009AutoremoveOrphansLandInRemoveGroup drives the captured
+// `xbps-remove -on` plan (testdata/parser/0607/autoremove.txt): the orphans
+// are the Remove group, each row carrying the bytes its removal frees.
+func TestAC009AutoremoveOrphansLandInRemoveGroup(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.set("XB_STUB_STDOUT", planCapture(t, "0607/autoremove.txt"))
+	code, out, errs := e.run("xbpretty", "autoremove", "-n")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if cmds := e.transactionCalls(); len(cmds) != 1 || cmds[0] != "-on" {
+		t.Errorf("commands = %q, want one -on dry run", cmds)
+	}
+	if !strings.Contains(out, "Remove") {
+		t.Errorf("no Remove group:\n%s", out)
+	}
+	for _, row := range []struct{ name, version, size string }{
+		{"cups", "2.4.19_1", "13.1 MiB"},
+		{"font-ibm-plex-ttf", "6.4.0_2", "58.3 MiB"},
+		{"lsof", "4.99.7_1", "333.4 KiB"},
+		{"steam-udev-rules", "1.0.0.61+20260625_1", "17.2 KiB"},
+		{"zenity", "4.0.5_1", "10.5 MiB"},
+	} {
+		line := rowLine(out, row.name)
+		if line == "" {
+			t.Errorf("%s is missing from the summary:\n%s", row.name, out)
+			continue
+		}
+		if !strings.Contains(line, row.version) || !strings.Contains(line, row.size) {
+			t.Errorf("%s row = %q, want version %s and size %s", row.name, line, row.version, row.size)
+		}
+	}
+	if !strings.Contains(out, "5 remove") {
+		t.Errorf("footer is missing the remove count:\n%s", out)
+	}
+	if !strings.Contains(out, "-82.3 MiB disk") {
+		t.Errorf("footer is missing the freed disk total:\n%s", out)
 	}
 }
 
@@ -289,11 +371,24 @@ func TestAC017FailedRemoveListsDependents(t *testing.T) {
 	}
 }
 
+// ranRealCommand reports whether a non-dry xbps command was executed.
+func ranRealCommand(e *env) bool {
+	for _, c := range e.commands() {
+		if strings.Contains(c, "-y") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAC019ConfigAssumeYesSkipsPrompt drives the config key, not a flag, at a
+// run that actually reaches the prompt: an empty plan returns at FR-015's
+// "Nothing to do." before the question is asked, so a test built on one can
+// never fail.
 func TestAC019ConfigAssumeYesSkipsPrompt(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.tty = true
-	e.set("XB_STUB_STDOUT", "")
 	cfg := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
 	data, err := os.ReadFile(cfg)
 	if err != nil {
@@ -302,12 +397,37 @@ func TestAC019ConfigAssumeYesSkipsPrompt(t *testing.T) {
 	if err := os.WriteFile(cfg, append(data, []byte("assume_yes = true\n")...), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	code, _, errs := e.run("xbpretty", "install", "figlet")
+	code, out, errs := e.run("xbpretty", "install", "figlet")
 	if code != 0 {
 		t.Errorf("exit = %d, want 0", code)
 	}
 	if strings.Contains(errs, "[Y/n]") {
 		t.Errorf("prompted despite assume_yes:\n%s", errs)
+	}
+	if !strings.Contains(out, "Install") {
+		t.Errorf("summary missing from stdout:\n%s", out)
+	}
+	if !ranRealCommand(e) {
+		t.Errorf("the transaction never ran past the prompt: %q", e.commands())
+	}
+}
+
+// TestAC018MissingXBPSBinaryExitsOne pins FR-018a: a configured binary that
+// is not there is a clear error with exit 1, and nothing is run.
+func TestAC018MissingXBPSBinaryExitsOne(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	missing := filepath.Join(e.dir, "no-such-xbps-install")
+	e.pointInstallAt(missing)
+	code, _, errs := e.run("xbpretty", "install", "figlet", "-y")
+	if code != 1 {
+		t.Errorf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(errs, missing) || !strings.Contains(errs, "not found") {
+		t.Errorf("stderr does not name the missing binary clearly:\n%s", errs)
+	}
+	if cmds := e.commands(); len(cmds) != 0 {
+		t.Errorf("something ran despite the missing binary: %q", cmds)
 	}
 }
 
@@ -369,13 +489,22 @@ func TestAC010RemovalFreesWithNoDownload(t *testing.T) {
 	}
 }
 
+// TestAC023PassthroughReachesBothRuns pins FR-022 for the real run too: the
+// pass-through has to survive into the command that executes, not just the
+// preview.
 func TestAC023PassthroughReachesBothRuns(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.set("XB_STUB_STDOUT", planFixture)
-	_, _, errs := e.run("xbpretty", "install", "figlet", "-n", "-v", "--", "-f", "figlet")
+	code, _, errs := e.run("xbpretty", "install", "figlet", "-y", "-v", "--", "-f", "figlet")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
 	if !strings.Contains(errs, "-Sn figlet -f figlet") {
 		t.Errorf("passthrough missing from the dry run:\n%s", errs)
+	}
+	if !strings.Contains(errs, "-y figlet -f figlet") {
+		t.Errorf("passthrough missing from the real run:\n%s", errs)
 	}
 }
 
@@ -586,6 +715,86 @@ func TestAC012TransactionLogIsWritten(t *testing.T) {
 	// ISO-8601 timestamp at the front: 2026-10-15T09:41:01Z
 	if len(line) < 20 || line[4] != '-' || line[10] != 'T' {
 		t.Errorf("log line does not start with an ISO-8601 timestamp: %q", line)
+	}
+}
+
+// TestAC012LogFollowsTheInvokersStateHome is AC-012's `alice` path: with no
+// XDG_STATE_HOME the log belongs in the invoking user's own state home, which
+// the sudo/doas lookup in internal/config resolves.
+func TestAC012LogFollowsTheInvokersStateHome(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	home := t.TempDir()
+	e.set("XDG_STATE_HOME", "")
+	e.set("HOME", home)
+	code, _, errs := e.run("xbpretty", "install", "figlet", "-y")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	path := filepath.Join(home, ".local", "state", "xbpretty", "transactions.log")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("transaction log missing from the invoker's state home: %v", err)
+	}
+	line := strings.TrimSpace(string(raw))
+	if !strings.Contains(line, "figlet-2.2.5_6") || !strings.Contains(line, "install") {
+		t.Errorf("log line = %q, want the command and the package with its version", line)
+	}
+	if _, err := os.Stat(filepath.Join(e.dir, "state")); err == nil {
+		t.Error("the log followed the state home it was given instead of the user's own")
+	}
+}
+
+// TestAC013RebootHint pins FR-015a: a successful install or upgrade that
+// changed a kernel package or glibc says so on stderr, and a transaction that
+// touched neither stays quiet.
+func TestAC013RebootHint(t *testing.T) {
+	tests := []struct {
+		name   string
+		cmd    string
+		plan   string
+		old    string
+		reboot bool
+	}{
+		{
+			name:   "a kernel update asks for a reboot",
+			cmd:    "upgrade",
+			plan:   "linux6.12-6.12.50_1 update x86_64 https://repo-default.voidlinux.org/current 210000000 32000000\n",
+			old:    "linux6.12-6.12.49_1\n205000000\n",
+			reboot: true,
+		},
+		{
+			name:   "a glibc update asks for a reboot",
+			cmd:    "upgrade",
+			plan:   "glibc-2.42_2 update x86_64 https://repo-default.voidlinux.org/current 21000000 3200000\n",
+			old:    "glibc-2.42_1\n20800000\n",
+			reboot: true,
+		},
+		{
+			name:   "an unrelated transaction stays quiet",
+			cmd:    "install",
+			plan:   planFixture,
+			old:    "figlet-2.2.5_6\n657KB\n",
+			reboot: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.root = true
+			e.set("XB_STUB_STDOUT", tt.plan)
+			e.set("XB_STUB_OLD", tt.old)
+			code, out, errs := e.run("xbpretty", tt.cmd, "-y")
+			if code != 0 {
+				t.Fatalf("exit = %d, want 0\n%s", code, errs)
+			}
+			if got := strings.Contains(errs, "reboot"); got != tt.reboot {
+				t.Errorf("reboot hint = %v, want %v\nstderr:\n%s", got, tt.reboot, errs)
+			}
+			if strings.Contains(out, "reboot") {
+				t.Errorf("the reboot hint leaked to stdout:\n%s", out)
+			}
+		})
 	}
 }
 
@@ -1090,5 +1299,91 @@ func TestAC014SignalledChildDecidesTheExitCode(t *testing.T) {
 			t.Fatalf("signalling the test process: %v", err)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// linkStamp is what a symlink looks like from the outside: its inode and the
+// time it was last written. A recreated link shows up as a change even when
+// it points at the same place and the filesystem reuses the freed inode.
+type linkStamp struct {
+	inode   uint64
+	modTime time.Time
+}
+
+func stamp(t *testing.T, path string) linkStamp {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("no inode for %s", path)
+	}
+	return linkStamp{inode: st.Ino, modTime: info.ModTime()}
+}
+
+// TestAC026LinkCreatesSixLinksAndLeavesThemAlone pins FR-025: the six link
+// names, a rerun that changes nothing and reports nothing, and a conflicting
+// file that is reported rather than overwritten.
+func TestAC026LinkCreatesSixLinksAndLeavesThemAlone(t *testing.T) {
+	target, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	var logged strings.Builder
+	st := &state{stdout: io.Discard, stderr: &logged}
+	opts := &options{args: []string{dir}}
+
+	names := []string{"xbp", "xbp-install", "xbp-remove", "xbp-upgrade", "xbp-autoremove", "xbp-update"}
+	if code := st.runLink(opts); code != 0 {
+		t.Fatalf("link exit = %d, want 0\n%s", code, logged.String())
+	}
+	created := make(map[string]linkStamp, len(names))
+	for _, name := range names {
+		link := filepath.Join(dir, name)
+		got, err := os.Readlink(link)
+		if err != nil || got != target {
+			t.Fatalf("%s -> %q, %v; want %q", name, got, err, target)
+		}
+		created[name] = stamp(t, link)
+	}
+
+	// A rerun changes nothing and errors nowhere.
+	logged.Reset()
+	if code := st.runLink(opts); code != 0 {
+		t.Errorf("rerun exit = %d, want 0\n%s", code, logged.String())
+	}
+	if logged.Len() != 0 {
+		t.Errorf("rerun wrote to stderr:\n%s", logged.String())
+	}
+	for _, name := range names {
+		link := filepath.Join(dir, name)
+		if got, err := os.Readlink(link); err != nil || got != target {
+			t.Errorf("rerun changed %s: %q, %v", name, got, err)
+		}
+		if stamp(t, link) != created[name] {
+			t.Errorf("rerun replaced the %s symlink", name)
+		}
+	}
+
+	// A conflicting file is reported, not overwritten.
+	conflict := filepath.Join(dir, "xbp-remove")
+	if err := os.Remove(conflict); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(conflict, []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logged.Reset()
+	if code := st.runLink(opts); code == 0 {
+		t.Errorf("conflict exit = 0, want non-zero\n%s", logged.String())
+	}
+	if !strings.Contains(logged.String(), conflict) {
+		t.Errorf("the conflict was not reported:\n%s", logged.String())
+	}
+	if raw, err := os.ReadFile(conflict); err != nil || string(raw) != "mine\n" {
+		t.Errorf("the conflicting file was overwritten: %q, %v", raw, err)
 	}
 }

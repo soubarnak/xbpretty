@@ -81,6 +81,25 @@ func TestParsePlanFixtures(t *testing.T) {
 			firstFull: true,
 		},
 		{
+			name:     "autoremove plan 0.60.7",
+			fixture:  fixtureDir + "0607/autoremove.txt",
+			wantRows: 5,
+			wantHist: map[string]int{ActionRemove: 5},
+			first: Row{
+				Name: "cups", Version: "2.4.19_1", Action: ActionRemove,
+				Arch: "x86_64", Repo: "https://repo-default.voidlinux.org/current",
+				InstalledSize: 13764009, HasInstalled: true,
+				DownloadSize: 5564250, HasDownload: true,
+			},
+			firstFull: true,
+		},
+		{
+			name:     "nothing-to-do plan 0.60.7 is empty",
+			fixture:  fixtureDir + "0607/nothing.txt",
+			wantRows: 0,
+			wantHist: map[string]int{},
+		},
+		{
 			name:     "reinstall plan reports the reinstall verb",
 			fixture:  fixtureDir + "0607/reinstall.txt",
 			wantRows: 1,

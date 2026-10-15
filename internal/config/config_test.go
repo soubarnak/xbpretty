@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -123,6 +124,68 @@ func TestPathHonoursXDG(t *testing.T) {
 	want := filepath.Join("/tmp/xdgtest", "xbpretty", "config.toml")
 	if path != want {
 		t.Errorf("got %q, want %q", path, want)
+	}
+}
+
+// TestUserHomeFollowsSudoAndDoas pins FR-019's home resolution, the half of
+// AC-012 and AC-019 the CLI cannot reach on its own: under sudo or doas the
+// config file and the state home belong to the invoking user, not to root.
+func TestUserHomeFollowsSudoAndDoas(t *testing.T) {
+	origEuid, origLookup := euid, lookupUser
+	t.Cleanup(func() { euid, lookupUser = origEuid, origLookup })
+
+	rootHome := t.TempDir()
+	aliceHome := t.TempDir()
+	lookupUser = func(name string) (*user.User, error) {
+		if name != "alice" {
+			return nil, fmt.Errorf("no such user %q", name)
+		}
+		return &user.User{Username: "alice", HomeDir: aliceHome}, nil
+	}
+
+	tests := []struct {
+		name     string
+		root     bool
+		sudoUser string
+		doasUser string
+		wantHome string
+	}{
+		{"sudo reads the invoking user's home", true, "alice", "", aliceHome},
+		{"doas reads the invoking user's home", true, "", "alice", aliceHome},
+		{"root outside sudo keeps root's own home", true, "", "", rootHome},
+		{"an unelevated run ignores SUDO_USER", false, "alice", "", rootHome},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			euid = func() int {
+				if tt.root {
+					return 0
+				}
+				return 1000
+			}
+			t.Setenv("SUDO_USER", tt.sudoUser)
+			t.Setenv("DOAS_USER", tt.doasUser)
+			t.Setenv("HOME", rootHome)
+			t.Setenv("XDG_CONFIG_HOME", "")
+			t.Setenv("XDG_STATE_HOME", "")
+
+			path, err := Path()
+			if err != nil {
+				t.Fatalf("Path: %v", err)
+			}
+			wantPath := filepath.Join(tt.wantHome, ".config", "xbpretty", "config.toml")
+			if path != wantPath {
+				t.Errorf("Path() = %q, want %q", path, wantPath)
+			}
+			logPath, err := TransactionLog()
+			if err != nil {
+				t.Fatalf("TransactionLog: %v", err)
+			}
+			wantLog := filepath.Join(tt.wantHome, ".local", "state", "xbpretty", "transactions.log")
+			if logPath != wantLog {
+				t.Errorf("TransactionLog() = %q, want %q", logPath, wantLog)
+			}
+		})
 	}
 }
 

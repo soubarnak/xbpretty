@@ -1,6 +1,9 @@
 package completion
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -47,6 +50,61 @@ func fishFlag(script, shell, flag string) bool {
 		return strings.Contains(script, "-l "+name)
 	default:
 		return strings.Contains(script, "-s "+name)
+	}
+}
+
+// TestAC025BashCompletionOffersInstalledNames runs the generated bash script
+// and asks it what it would offer after `xbp remove <TAB>`: the completion
+// has to read the installed list back, not merely name xbps-query.
+func TestAC025BashCompletionOffersInstalledNames(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is not installed")
+	}
+	script, err := Script("bash")
+	if err != nil {
+		t.Fatalf("Script(bash): %v", err)
+	}
+
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stub := "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *-l*) printf '%s\\n' 'ii figlet-2.2.5_6 A program' 'ii htop-3.5.3_1 A viewer' ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(binDir, "xbps-query"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(dir, "xbpretty.bash")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	probe := ". " + scriptPath + "\n" +
+		"COMP_WORDS=(xbp remove '')\n" +
+		"COMP_CWORD=2\n" +
+		"_xbpretty\n" +
+		"printf '%s\\n' \"${COMPREPLY[@]}\"\n"
+	cmd := exec.Command("bash", "-c", probe)
+	// Replace PATH rather than appending to it: a duplicate entry resolves to
+	// whichever copy the shell reads first, which is not worth relying on.
+	env := []string{"PATH=" + binDir + ":" + os.Getenv("PATH")}
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "PATH=") {
+			env = append(env, kv)
+		}
+	}
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running the completion: %v\n%s", err, out)
+	}
+	for _, name := range []string{"figlet", "htop"} {
+		if !strings.Contains(string(out), name) {
+			t.Errorf("the completion offered no %s:\n%s", name, out)
+		}
 	}
 }
 
