@@ -1,0 +1,1 @@
+curl-8.22.0_1 reinstall x86_64 https://repo-default.voidlinux.org/current 682921 274590

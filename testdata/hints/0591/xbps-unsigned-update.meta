@@ -1,0 +1,2 @@
+CMD: xbps-install -Sn htop curl wget
+EXIT: 16

@@ -1,0 +1,2 @@
+CMD: xbps-install -Sn figlet
+EXIT: 2

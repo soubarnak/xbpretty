@@ -1,0 +1,3 @@
+CMD: xbps-query -H
+EXIT: 0
+INDUCED: xbps-pkgdb -m hold glibc

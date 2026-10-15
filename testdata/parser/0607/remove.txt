@@ -1,0 +1,1 @@
+wget-1.25.0_1 remove x86_64 https://repo-default.voidlinux.org/current 3673038 824658

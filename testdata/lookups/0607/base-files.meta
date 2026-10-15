@@ -1,0 +1,2 @@
+CMD: xbps-query -p pkgver,installed_size base-files
+EXIT: 0

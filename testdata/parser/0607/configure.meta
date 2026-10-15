@@ -1,0 +1,3 @@
+CMD: xbps-install -Sun
+EXIT: 0
+INDUCED: the install of figlet wget curl htop was killed after unpacking

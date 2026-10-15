@@ -1,0 +1,19 @@
+#!/bin/sh
+# Stub xbps-query: records how it was called and answers from the fixture
+# variables. Queries succeed on their own terms - the transaction's exit
+# code never applies to them, matching real xbps.
+printf '%s\n' "$*" >> "${XB_STUB_LOG:-/dev/null}"
+case "$*" in
+  *"-H"*)
+    printf '%s' "${XB_STUB_HOLD:-}"
+    exit 0 ;;
+  *"-X"*)
+    printf '%s' "${XB_STUB_REVDEPS:-}"
+    exit 0 ;;
+  *installed_size*)
+    printf '%s' "${XB_STUB_OLD:-}"
+    exit 0 ;;
+  *)
+    printf '%s' "${XB_STUB_QUERY:-}"
+    exit 0 ;;
+esac

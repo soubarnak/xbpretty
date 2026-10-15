@@ -1,0 +1,8 @@
+libxcrypt-compat-4.4.38_1 install x86_64 https://repo-default.voidlinux.org/current 206920 89590
+glibc-2.41_1 update x86_64 https://repo-default.voidlinux.org/current 33363382 9170635
+libcrypto3-3.6.5_1 install x86_64 https://repo-default.voidlinux.org/current 6443040 2193502
+libssl3-3.6.5_1 install x86_64 https://repo-default.voidlinux.org/current 1065048 444864
+libxbps-0.60.7_1 update x86_64 https://repo-default.voidlinux.org/current 331408 146108
+xbps-0.60.7_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137
+base-container-0.3_3 install x86_64 https://repo-default.voidlinux.org/current 683
+base-minimal-0.3_3 update x86_64 https://repo-default.voidlinux.org/current 575

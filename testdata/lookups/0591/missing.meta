@@ -1,0 +1,2 @@
+CMD: xbps-query -p pkgver,installed_size this-package-does-not-exist-xyz
+EXIT: 2

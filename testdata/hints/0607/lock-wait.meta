@@ -1,0 +1,2 @@
+CMD: xbps-install -Syu
+EXIT: 0

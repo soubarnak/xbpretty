@@ -1,0 +1,2 @@
+ERROR: failed to open repodata: /var/db/xbps/https___repo-default_voidlinux_org_current/x86_64-repodata: Invalid or incomplete multibyte or wide character
+ERROR: Package 'figlet' not found in repository pool.

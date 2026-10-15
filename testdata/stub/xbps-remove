@@ -1,0 +1,15 @@
+#!/bin/sh
+# Stub xbps-remove: records how it was called and behaves like real xbps
+# enough for the acceptance tests - a dry run prints the plan, a real run
+# succeeds or fails according to the fixture variables.
+printf '%s\n' "$*" >> "${XB_STUB_LOG:-/dev/null}"
+case "$*" in
+  -*n*)
+    printf '%s' "${XB_STUB_STDOUT:-}"
+    printf '%s' "${XB_STUB_STDERR:-}" >&2
+    exit "${XB_STUB_PLAN_EXIT:-0}"
+    ;;
+esac
+printf '%s' "${XB_STUB_RUN_STDOUT:-${XB_STUB_STDOUT:-}}"
+printf '%s' "${XB_STUB_RUN_STDERR:-${XB_STUB_STDERR:-}}" >&2
+exit "${XB_STUB_EXIT:-0}"

@@ -1,0 +1,2 @@
+CMD: xbps-install -Sn this-package-does-not-exist-xyz
+EXIT: 2
