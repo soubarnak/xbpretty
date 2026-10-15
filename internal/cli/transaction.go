@@ -21,49 +21,65 @@ func (st *state) binaryFor(cmd string) string {
 	return st.r.cfg.XBPSInstall
 }
 
-// planCommand builds the dry-run command: `xbps-install [-S] -n <pkgs>`.
-// `-S` is only usable as root, so an unprivileged plan runs against the
-// cached index and says so (FR-007).
+// planCommand builds the dry run as one flag cluster followed by the package
+// arguments: `-Sn`/`-n` for install and remove, `-Sun`/`-un` for upgrade, `-on`
+// for autoremove. `-S` is only usable as root, so an unprivileged plan runs
+// against the cached index and says so (FR-007).
 func (st *state) planCommand(cmd string, opts *options) []string {
-	args := []string{}
 	wantsSync := st.sync && !opts.noSync && cmdUsesSync(cmd)
 	if wantsSync && euidFn() != 0 {
 		fmt.Fprintln(st.stderr, "warning: not running as root, so the repository index was not refreshed; it may be stale")
 		wantsSync = false
 	}
-	if wantsSync {
-		// Written as one token, the form xbps documents and AC-002 pins.
-		args = append(args, "-Sn")
-	} else {
-		args = append(args, "-n")
-	}
-	args = append(args, xbpsAction(cmd, opts)...)
+	args := []string{planFlags(cmd, wantsSync)}
 	args = append(args, opts.args...)
 	args = append(args, opts.passthru...)
 	return args
 }
 
-// xbpsAction returns the action arguments for a command.
-func xbpsAction(cmd string, opts *options) []string {
+// planFlags writes the dry run's flags as one token, the form xbps documents
+// and the acceptance criteria pin: -Sn, -un, -Sun, -on.
+func planFlags(cmd string, syncing bool) string {
+	flags := "-"
+	if syncing {
+		flags += "S"
+	}
+	return flags + actionLetters(cmd) + "n"
+}
+
+// actionLetters are the command's own action flags, without the leading dash:
+// upgrade updates every package, autoremove removes orphans.
+func actionLetters(cmd string) string {
 	switch cmd {
-	case "install":
-		return nil
-	case "remove", "autoremove":
-		if cmd == "autoremove" {
-			return []string{"-o"}
-		}
-		return nil
 	case "upgrade":
-		return []string{"-Su"}
+		return "u"
+	case "autoremove":
+		return "o"
+	}
+	return ""
+}
+
+// xbpsAction returns the action arguments for a command. The index refresh is
+// not one of them: FR-007 and FR-008 add and drop `-S` on the dry run and the
+// real run.
+func xbpsAction(cmd string) []string {
+	switch cmd {
+	case "upgrade":
+		return []string{"-u"}
+	case "autoremove":
+		return []string{"-o"}
 	case "update":
 		return []string{"-S"}
 	}
 	return nil
 }
 
+// cmdUsesSync reports whether a command's xbps binary understands `-S`.
+// xbps-remove takes no such flag, so remove and autoremove never carry it
+// (FR-005).
 func cmdUsesSync(cmd string) bool {
 	switch cmd {
-	case "install", "upgrade", "update", "autoremove":
+	case "install", "upgrade", "update":
 		return true
 	}
 	return false
@@ -77,7 +93,7 @@ func (st *state) realCommand(cmd string, opts *options, planSynced bool) []strin
 		args = append(args, "-S")
 	}
 	args = append(args, "-y")
-	args = append(args, xbpsAction(cmd, opts)...)
+	args = append(args, xbpsAction(cmd)...)
 	args = append(args, opts.args...)
 	args = append(args, opts.passthru...)
 	return args

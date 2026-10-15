@@ -670,3 +670,157 @@ func TestParseArgsErrors(t *testing.T) {
 		}
 	}
 }
+
+// upgradePlan runs an upgrade dry run and returns the flags xbps-install was
+// called with.
+func upgradePlan(t *testing.T, e *env, argv ...string) string {
+	t.Helper()
+	code, _, errs := e.run(argv...)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	cmds := e.commands()
+	if len(cmds) == 0 {
+		t.Fatal("xbps-install was never called")
+	}
+	return cmds[0]
+}
+
+// transactionCalls returns the command log without the `xbps-query -H` hold
+// lookup every summary makes.
+func (e *env) transactionCalls() []string {
+	e.t.Helper()
+	var out []string
+	for _, c := range e.commands() {
+		if c == "-H" {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// TestUpgradeHonoursTheSyncRules pins FR-004, FR-007 and FR-008 for upgrade:
+// the same -S rule as install, written as the single token the acceptance
+// criteria pin.
+func TestUpgradeHonoursTheSyncRules(t *testing.T) {
+	t.Run("root plan refreshes the index", func(t *testing.T) {
+		e := newEnv(t)
+		e.root = true
+		if got := upgradePlan(t, e, "xbpretty", "upgrade", "-n"); got != "-Sun" {
+			t.Errorf("plan = %q, want -Sun", got)
+		}
+	})
+	t.Run("unprivileged plan drops it", func(t *testing.T) {
+		e := newEnv(t)
+		e.root = false
+		if got := upgradePlan(t, e, "xbpretty", "upgrade", "-n"); got != "-un" {
+			t.Errorf("plan = %q, want -un (AC-007)", got)
+		}
+	})
+	t.Run("--no-sync drops it as root too", func(t *testing.T) {
+		e := newEnv(t)
+		e.root = true
+		if got := upgradePlan(t, e, "xbpretty", "upgrade", "-n", "--no-sync"); got != "-un" {
+			t.Errorf("plan = %q, want -un", got)
+		}
+	})
+	t.Run("the real run does not sync a second time", func(t *testing.T) {
+		e := newEnv(t)
+		e.root = true
+		e.tty = true
+		e.setAnswers("\n")
+		code, _, errs := e.run("xbpretty", "upgrade")
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0\n%s", code, errs)
+		}
+		cmds := e.transactionCalls()
+		if len(cmds) != 2 {
+			t.Fatalf("commands = %q, want a dry run and a real run", cmds)
+		}
+		if cmds[0] != "-Sun" {
+			t.Errorf("plan = %q, want -Sun", cmds[0])
+		}
+		if cmds[1] != "-y -u" {
+			t.Errorf("real run = %q, want -y -u (FR-008: no second -S)", cmds[1])
+		}
+	})
+}
+
+// TestAutoremoveNeverSyncs pins FR-005: xbps-remove has no -S, so autoremove
+// must never reach for one.
+func TestAutoremoveNeverSyncs(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.set("XB_STUB_STDOUT", removePlanFixture)
+	code, _, errs := e.run("xbpretty", "autoremove", "-n")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if cmds := e.transactionCalls(); len(cmds) != 1 || cmds[0] != "-on" {
+		t.Errorf("commands = %q, want one -on dry run", cmds)
+	}
+}
+
+// TestPassthruKeepsTheArgv0Command pins FR-022 against the form FR-018's own
+// hint recommends: with no positional argument left, the command named by
+// argv[0] must survive.
+func TestPassthruKeepsTheArgv0Command(t *testing.T) {
+	o, err := parseArgs([]string{"--", "-F", "figlet"}, "remove")
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if o.command != "remove" {
+		t.Errorf("command = %q, want remove", o.command)
+	}
+	if len(o.passthru) != 2 || o.passthru[0] != "-F" || o.passthru[1] != "figlet" {
+		t.Errorf("passthru = %v, want [-F figlet]", o.passthru)
+	}
+
+	// Without an argv[0] command the same form still means install.
+	o, err = parseArgs([]string{"--", "figlet"}, "")
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if o.command != "install" || len(o.args) != 1 || o.args[0] != "figlet" {
+		t.Errorf("command = %q args = %v, want install [figlet]", o.command, o.args)
+	}
+
+	// Through the link name the pass-through reaches xbps-remove unchanged.
+	e := newEnv(t)
+	e.root = true
+	e.set("XB_STUB_STDOUT", removePlanFixture)
+	code, _, errs := e.run("xbp-remove", "-n", "--", "-F", "figlet")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if cmds := e.transactionCalls(); len(cmds) != 1 || cmds[0] != "-n -F figlet" {
+		t.Errorf("commands = %q, want one -n -F figlet dry run", cmds)
+	}
+}
+
+// TestRevdepsLookupUsesThePinnedForm pins AC-017: the reverse-dependency
+// lookup is `xbps-query -X <pkg>`, not repository mode.
+func TestRevdepsLookupUsesThePinnedForm(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.set("XB_STUB_STDOUT", removePlanFixture)
+	e.set("XB_STUB_REVDEPS", "bar-2.0_1\n")
+	e.set("XB_STUB_RUN_STDERR", "ERROR: failed to remove wget\n")
+	e.set("XB_STUB_EXIT", "1")
+	code, _, errs := e.run("xbpretty", "remove", "wget", "-y")
+	if code == 0 {
+		t.Fatalf("exit = 0, want the failing xbps code")
+	}
+	if !strings.Contains(errs, "bar-2.0_1") {
+		t.Errorf("dependents not listed:\n%s", errs)
+	}
+	for _, c := range e.commands() {
+		if !strings.Contains(c, "-X") {
+			continue
+		}
+		if c != "-X wget" {
+			t.Errorf("reverse-dependency lookup = %q, want -X wget", c)
+		}
+	}
+}

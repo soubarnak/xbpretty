@@ -106,13 +106,16 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 	}
 
 	if len(rest) == 0 {
-		if len(o.passthru) > 0 {
+		if knownCommand == "" && len(o.passthru) > 0 {
 			// `xbpretty -- pkg` carries no command: treat it as an install.
 			o.command = "install"
 			o.args = o.passthru
 			o.passthru = nil
 			return o, nil
 		}
+		// A command from argv[0] survives a pass-through that leaves no
+		// positional argument, so `xbp-remove -- -F pkg` stays a remove
+		// (FR-018, FR-022).
 		return o, nil
 	}
 

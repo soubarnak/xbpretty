@@ -116,10 +116,12 @@ func optsArgs(rows []xbps.Row) []string {
 	return names
 }
 
-// revdepsHint prints the FR-018 follow-up after a failed remove.
+// revdepsHint prints the FR-018 follow-up after a failed remove: the
+// installed packages that depend on the target, not the repository-wide set
+// `-R` would name.
 func (st *state) revdepsHint(packages []string) {
 	for _, pkg := range packages {
-		res, err := st.r.run(st.r.cfg.XBPSQuery, "-R", "-X", pkg)
+		res, err := st.r.run(st.r.cfg.XBPSQuery, "-X", pkg)
 		if err != nil || res.exitCode != 0 {
 			continue
 		}

@@ -86,7 +86,7 @@ func containsExit(codes []int, want int) bool {
 	return false
 }
 
-// ParseRevdeps parses the output of `xbps-query -R -X <pkg>`: one package
+// ParseRevdeps parses the output of `xbps-query -X <pkg>`: one package
 // version per line. Blank lines are skipped; any line that is not a package
 // version is an error naming the line.
 func ParseRevdeps(r io.Reader) ([]string, error) {
