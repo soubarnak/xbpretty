@@ -121,6 +121,17 @@ func (st *state) plan(cmd string, opts *options, wantSync *bool) ([]xbps.Row, in
 		}
 		return nil, res.exitCode
 	}
+
+	// FR-017 and ADR-002 #1: a truncated index fails an install with exit 2
+	// but leaves an upgrade with an exit code of 0, an empty plan and the
+	// error still on stderr. A successful dry run is therefore checked too,
+	// so the breakage is never reported as a plain "Nothing to do."; the
+	// exit code stays xbps's own.
+	if h := hints.Lookup(res.exitCode, res.stderr); h != nil {
+		fmt.Fprint(st.stderr, res.stderr)
+		fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
+	}
+
 	rows, err := xbps.ParsePlan(strings.NewReader(res.stdout))
 	if err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: cannot read the xbps plan: %v\n", err)

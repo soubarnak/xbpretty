@@ -132,10 +132,13 @@ func splitArgv(argv []string) (cmd string, args []string) {
 
 // wantColor decides whether the summary carries ANSI colour, per FR-020.
 func wantColor(configValue string, opts *options) bool {
+	// FR-020: an explicit --color wins over the config key, and `auto` means
+	// what it says: colour only on a terminal with NO_COLOR unset.
+	value := configValue
 	if opts.explicit["color"] {
-		return opts.color == "always"
+		value = opts.color
 	}
-	switch configValue {
+	switch value {
 	case "always":
 		return true
 	case "never":

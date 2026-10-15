@@ -100,10 +100,16 @@ func (r *runner) echo(name string, args []string) {
 }
 
 func exitCode(err error) (int, bool) {
-	if ee, ok := err.(*exec.ExitError); ok {
-		return ee.ExitCode(), true
+	ee, ok := err.(*exec.ExitError)
+	if !ok {
+		return 0, false
 	}
-	return 0, false
+	// FR-014 / AC-014: a signalled child never had an exit code of its own,
+	// so report the one a shell would: 128 plus the signal.
+	if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return 128 + int(ws.Signal()), true
+	}
+	return ee.ExitCode(), true
 }
 
 // teeWriter writes to the underlying writer and remembers everything it saw.

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -125,6 +126,40 @@ func homeOfUser(name string) (string, error) {
 		return "", fmt.Errorf("user %s has no home directory", name)
 	}
 	return u.HomeDir, nil
+}
+
+// euid is the effective-user check, replaceable so the root path is testable
+// without running the suite as root.
+var euid = os.Geteuid
+
+// Invoker returns the uid and gid of the user behind sudo or doas when
+// xbpretty runs as root. State files written into that user's home belong to
+// them, not to root (FR-013, AC-012). ok is false when the process runs as
+// itself, or when no invoking user can be resolved; no chown is due then.
+func Invoker() (uid, gid int, ok bool) {
+	if euid() != 0 {
+		return 0, 0, false
+	}
+	name := os.Getenv("SUDO_USER")
+	if name == "" {
+		name = os.Getenv("DOAS_USER")
+	}
+	if name == "" {
+		return 0, 0, false
+	}
+	u, err := user.Lookup(name)
+	if err != nil {
+		return 0, 0, false
+	}
+	uidNum, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return 0, 0, false
+	}
+	gidNum, err := strconv.Atoi(u.Gid)
+	if err != nil {
+		return 0, 0, false
+	}
+	return uidNum, gidNum, true
 }
 
 // Parse reads TOML-shaped key/value pairs. Only the keys xbpretty understands

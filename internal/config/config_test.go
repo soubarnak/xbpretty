@@ -3,7 +3,9 @@ package config
 import (
 	"errors"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -155,5 +157,62 @@ func TestTransactionLogPath(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(path)); err != nil {
 		t.Errorf("state directory not created: %v", err)
+	}
+}
+
+// TestInvokerFollowsSudoAndDoas pins FR-013's ownership rule: state written
+// under a sudo or doas run belongs to the invoking user, and a run that is
+// not elevated owes nobody a chown.
+func TestInvokerFollowsSudoAndDoas(t *testing.T) {
+	me, err := user.Current()
+	if err != nil {
+		t.Skipf("cannot resolve the current user: %v", err)
+	}
+	wantUID, err := strconv.Atoi(me.Uid)
+	if err != nil {
+		t.Skipf("the current user has a non-numeric uid %q", me.Uid)
+	}
+	wantGID, err := strconv.Atoi(me.Gid)
+	if err != nil {
+		t.Skipf("the current user has a non-numeric gid %q", me.Gid)
+	}
+
+	orig := euid
+	t.Cleanup(func() { euid = orig })
+
+	tests := []struct {
+		name     string
+		root     bool
+		sudoUser string
+		doasUser string
+		wantOK   bool
+	}{
+		{name: "an unelevated run owes no chown", root: false, sudoUser: me.Username},
+		{name: "sudo names the invoking user", root: true, sudoUser: me.Username, wantOK: true},
+		{name: "doas names the invoking user", root: true, doasUser: me.Username, wantOK: true},
+		{name: "root outside sudo owes no chown", root: true},
+		{name: "an unknown invoking user owes no chown", root: true, sudoUser: "no-such-user-xbpretty"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			euid = func() int {
+				if tt.root {
+					return 0
+				}
+				return 1000
+			}
+			t.Setenv("SUDO_USER", tt.sudoUser)
+			t.Setenv("DOAS_USER", tt.doasUser)
+			uid, gid, ok := Invoker()
+			if ok != tt.wantOK {
+				t.Fatalf("Invoker ok = %v, want %v", ok, tt.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if uid != wantUID || gid != wantGID {
+				t.Errorf("Invoker = %d:%d, want %d:%d", uid, gid, wantUID, wantGID)
+			}
+		})
 	}
 }

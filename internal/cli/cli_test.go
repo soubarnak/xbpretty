@@ -3,9 +3,14 @@ package cli
 import (
 	"io"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/soubarnak/xbpretty/internal/config"
 )
@@ -600,24 +605,6 @@ func TestNoLogFlagSkipsTheLog(t *testing.T) {
 	}
 }
 
-func TestAC014SignalsAreForwarded(t *testing.T) {
-	// The forwarding path is exercised by the integration test in
-	// internal/cli: asserting it here would need a live child, so this
-	// only pins that stream is the entry point for a real run.
-	if _, err := os.Stat(filepath.Join("..", "..", "internal", "cli", "run.go")); err != nil {
-		t.Fatalf("run.go missing: %v", err)
-	}
-	raw, err := os.ReadFile("run.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"syscall.SIGINT", "syscall.SIGTERM", "cmd.Process.Signal"} {
-		if !strings.Contains(string(raw), want) {
-			t.Errorf("run.go does not reference %s", want)
-		}
-	}
-}
-
 func TestParseArgsFlags(t *testing.T) {
 	tests := []struct {
 		name string
@@ -848,5 +835,260 @@ func TestRevdepsLookupUsesThePinnedForm(t *testing.T) {
 		if c != "-X wget" {
 			t.Errorf("reverse-dependency lookup = %q, want -X wget", c)
 		}
+	}
+}
+
+// TestStaleIndexOnASuccessfulPlanIsExplained covers FR-017 as ADR-002
+// measured it: a truncated index leaves `xbps-install -Sun` exiting 0 with an
+// empty plan and the error still on stderr, so the plan step has to read
+// stderr on a successful exit too. Without this the user sees a bare
+// `Nothing to do.` over a broken index.
+func TestStaleIndexOnASuccessfulPlanIsExplained(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.set("XB_STUB_STDOUT", "")
+	e.set("XB_STUB_STDERR", "ERROR: failed to open repodata: /var/db/xbps/x86_64-repodata: "+
+		"Invalid or incomplete multibyte or wide character\n")
+	code, out, errs := e.run("xbpretty", "upgrade", "-n")
+	if code != 0 {
+		t.Errorf("exit = %d, want 0 (xbps's own code)", code)
+	}
+	if !strings.Contains(out, "Nothing to do.") {
+		t.Errorf("stdout = %q, want Nothing to do.", out)
+	}
+	if !strings.Contains(errs, "failed to open repodata") {
+		t.Errorf("the raw xbps stderr was dropped:\n%s", errs)
+	}
+	if !strings.Contains(errs, "hint:") || !strings.Contains(errs, "xbp update") {
+		t.Errorf("the stale-index hint is missing:\n%s", errs)
+	}
+}
+
+// TestSuccessfulPlanWithUnmatchedStderrStaysQuiet is the other half of the
+// same rule: a successful dry run whose stderr matches nothing gets no
+// guessed hint, and nothing is echoed back at the user (FR-017, AC-016).
+func TestSuccessfulPlanWithUnmatchedStderrStaysQuiet(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.set("XB_STUB_STDERR", "WARNING: something harmless happened\n")
+	code, out, errs := e.run("xbpretty", "install", "figlet", "-n")
+	if code != 0 {
+		t.Errorf("exit = %d, want 0", code)
+	}
+	if !strings.Contains(out, "Install") {
+		t.Errorf("summary missing:\n%s", out)
+	}
+	if errs != "" {
+		t.Errorf("stderr is not empty:\n%s", errs)
+	}
+}
+
+// TestColorAutoChecksTheTerminalAndNoColor covers FR-020: `--color=auto` is
+// not `always`. An explicit auto falls through to the TTY and NO_COLOR
+// checks exactly like the config key's own default, while always and never
+// keep overriding both.
+func TestColorAutoChecksTheTerminalAndNoColor(t *testing.T) {
+	orig := isTerminalFn
+	t.Cleanup(func() { isTerminalFn = orig })
+
+	tests := []struct {
+		name    string
+		config  string
+		argv    []string
+		tty     bool
+		noColor string
+		want    bool
+	}{
+		{"auto on a terminal", "auto", []string{"--color=auto"}, true, "", true},
+		{"auto off a terminal", "auto", []string{"--color=auto"}, false, "", false},
+		{"auto honours NO_COLOR", "auto", []string{"--color=auto"}, true, "1", false},
+		{"always overrides the terminal", "auto", []string{"--color=always"}, false, "1", true},
+		{"never overrides the terminal", "auto", []string{"--color=never"}, true, "", false},
+		{"the config key still decides", "always", nil, false, "1", true},
+		{"config never wins over the default", "never", nil, true, "", false},
+		{"config auto off a terminal", "auto", nil, false, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isTerminalFn = func(*os.File) bool { return tt.tty }
+			t.Setenv("NO_COLOR", tt.noColor)
+			argv := append([]string{"install", "figlet"}, tt.argv...)
+			opts, err := parseArgs(argv, "")
+			if err != nil {
+				t.Fatalf("parseArgs: %v", err)
+			}
+			if got := wantColor(tt.config, opts); got != tt.want {
+				t.Errorf("wantColor(%q, %v) = %v, want %v", tt.config, tt.argv, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestUpdateIsLogged covers FR-013 for the one real execution that produces
+// no package rows: an index sync is still a transaction, so its line names
+// the command with no list after it.
+func TestUpdateIsLogged(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	code, _, errs := e.run("xbpretty", "update")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	path, err := config.TransactionLog()
+	if err != nil {
+		t.Fatalf("log path: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("transaction log missing: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("log has %d lines, want 1:\n%s", len(lines), raw)
+	}
+	fields := strings.Fields(lines[0])
+	if len(fields) != 2 {
+		t.Errorf("log line = %q, want a timestamp and the command alone", lines[0])
+	}
+	if _, err := time.Parse(time.RFC3339, fields[0]); err != nil {
+		t.Errorf("log line does not start with an ISO-8601 timestamp: %q", lines[0])
+	}
+	if len(fields) > 1 && fields[1] != "update" {
+		t.Errorf("log line does not name the command: %q", lines[0])
+	}
+	if strings.HasSuffix(lines[0], " ") {
+		t.Errorf("log line has a trailing space: %q", lines[0])
+	}
+}
+
+// TestSignalExitCodeMatchesTheShell pins the mapping FR-014 and AC-014 need:
+// a child killed by a signal never had an exit code of its own, so the code a
+// shell reports is passed through instead of Go's -1.
+func TestSignalExitCodeMatchesTheShell(t *testing.T) {
+	tests := []struct {
+		name   string
+		script string
+		want   int
+	}{
+		{"SIGINT", "kill -INT $$", 130},
+		{"SIGTERM", "kill -TERM $$", 143},
+		{"a real exit code passes through", "exit 17", 17},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, ok := exitCode(exec.Command("/bin/sh", "-c", tt.script).Run())
+			if !ok {
+				t.Fatalf("%q reported no exit code", tt.script)
+			}
+			if code != tt.want {
+				t.Errorf("exitCode = %d, want %d", code, tt.want)
+			}
+		})
+	}
+}
+
+// writeSlowChild writes an xbps-install stand-in that records the call and
+// its pid, then sleeps until it is signalled. The shared stub exits at once,
+// which leaves no window for a signal to land in.
+func writeSlowChild(t *testing.T, dir, logPath, pidPath string) string {
+	t.Helper()
+	path := filepath.Join(dir, "slow-xbps-install")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> " + logPath + "\n" +
+		"printf '%s' \"$$\" > " + pidPath + "\n" +
+		"exec sleep 30\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// pointInstallAt rewrites the config so xbps_install_path names another
+// binary, keeping the other two on the shared stubs.
+func (e *env) pointInstallAt(path string) {
+	e.t.Helper()
+	stubDir, err := filepath.Abs("../../testdata/stub")
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	cfg := strings.Join([]string{
+		"xbps_install_path = \"" + path + "\"",
+		"xbps_remove_path = \"" + filepath.Join(stubDir, "xbps-remove") + "\"",
+		"xbps_query_path = \"" + filepath.Join(stubDir, "xbps-query") + "\"",
+		"color = \"never\"",
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(e.dir, "config", "xbpretty", "config.toml"), []byte(cfg), 0o644); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// waitForPID blocks until the streamed child has written its pid.
+func waitForPID(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+			if err != nil {
+				t.Fatalf("child pid %q: %v", raw, err)
+			}
+			return pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the streamed child never started")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestAC014SignalledChildDecidesTheExitCode drives a real streamed child,
+// interrupts xbpretty, and checks the whole promise AC-014 makes: the child
+// receives the signal and xbpretty exits with the code a shell would report.
+func TestAC014SignalledChildDecidesTheExitCode(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	pidPath := filepath.Join(e.dir, "child.pid")
+	e.pointInstallAt(writeSlowChild(t, e.dir, e.logPath, pidPath))
+
+	// Keep the test binary alive whatever the timing: stream arms its own
+	// handler only once the child has started.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT)
+	defer signal.Stop(sigs)
+
+	done := make(chan int, 1)
+	go func() {
+		code, _, _ := e.run("xbpretty", "update")
+		done <- code
+	}()
+
+	childPID := waitForPID(t, pidPath)
+	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+
+	// Repeat the signal: a signal delivered before stream's handler is
+	// registered is not queued for it.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		select {
+		case code := <-done:
+			if code != 130 {
+				t.Fatalf("exit = %d, want 130 (128 + SIGINT)", code)
+			}
+			if path, err := config.TransactionLog(); err == nil {
+				if _, err := os.Stat(path); err == nil {
+					t.Error("an interrupted run wrote to the transaction log")
+				}
+			}
+			return
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("xbpretty did not exit after SIGINT")
+		}
+		if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+			t.Fatalf("signalling the test process: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

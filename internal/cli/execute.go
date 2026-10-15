@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -88,7 +89,9 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 	}
 	stderr := st.r.lastStderr
 	if code == 0 {
-		if st.log && len(rows) > 0 {
+		// FR-013: every real execution that exits 0 is logged, and `update`
+		// is one of them even though it produces no rows of its own.
+		if st.log {
 			st.writeLog(cmd, args, rows)
 		}
 		if hint := rebootHint(rows); hint != "" {
@@ -151,15 +154,28 @@ func (st *state) writeLog(cmd string, args []string, rows []xbps.Row) {
 	}
 	defer f.Close()
 
+	// AC-012: under sudo or doas the log belongs to the invoking user, whose
+	// state home it sits in, not to root. A failed chown is a warning, like
+	// every other log failure.
+	if uid, gid, ok := config.Invoker(); ok {
+		for _, p := range []string{filepath.Dir(path), path} {
+			if err := os.Chown(p, uid, gid); err != nil {
+				fmt.Fprintf(st.stderr, "xbpretty: transaction log ownership not changed: %v\n", err)
+			}
+		}
+	}
+
 	names := make([]string, 0, len(rows))
 	for _, row := range rows {
 		names = append(names, row.Pkgver())
 	}
-	line := fmt.Sprintf("%s %s %s\n",
-		config.FormatTimestamp(time.Now()),
-		cmd,
-		strings.Join(names, " "))
-	if _, err := f.WriteString(line); err != nil {
+	// The package list is the last field, and `update` has none: no
+	// trailing space for a line that names only the command.
+	fields := []string{config.FormatTimestamp(time.Now()), cmd}
+	if len(names) > 0 {
+		fields = append(fields, strings.Join(names, " "))
+	}
+	if _, err := f.WriteString(strings.Join(fields, " ") + "\n"); err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: transaction log unavailable: %v\n", err)
 	}
 }
