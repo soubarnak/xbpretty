@@ -213,10 +213,14 @@ func (st *state) heldPackages() map[string]bool {
 		if line == "" {
 			continue
 		}
-		name, _, ok := strings.Cut(line, "-")
-		if ok {
-			held[name] = true
+		// `xbps-query -H` prints one pkgver per held package, and a package
+		// name carries hyphens of its own, so the version comes off the last
+		// hyphen: base-files-0.146_1 is held as base-files, not base.
+		name, version := xbps.SplitPkgver(line)
+		if version == "" {
+			continue
 		}
+		held[name] = true
 	}
 	return held
 }

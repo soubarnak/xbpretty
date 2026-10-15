@@ -8,6 +8,16 @@ import (
 	"strings"
 )
 
+// The actions an xbps plan row carries, as internal/xbps spells them.
+const (
+	actionInstall   = "install"
+	actionUpdate    = "update"
+	actionRemove    = "remove"
+	actionConfigure = "configure"
+	actionHold      = "hold"
+	actionReinstall = "reinstall"
+)
+
 // Row is one package line of an xbps dry-run transaction plan, as parsed by
 // internal/xbps.
 type Row struct {
@@ -40,10 +50,10 @@ type Summary struct {
 	Old map[string]Old
 	// Download is the total bytes the transaction fetches.
 	Download uint64
-	// AddBytes is newly installed bytes, RemoveBytes is bytes freed by
-	// removals, and ObsoleteBytes is old bytes an upgrade frees when the
-	// package shrinks on disk.
-	AddBytes, RemoveBytes, ObsoleteBytes uint64
+	// AddBytes is the installed size of what the transaction unpacks,
+	// RemoveBytes is the size removals free, and OldBytes is the size the
+	// packages an upgrade replaces hold today.
+	AddBytes, RemoveBytes, OldBytes uint64
 }
 
 // Build groups rows into the Install, Upgrade, Remove and Hold groups and
@@ -54,43 +64,65 @@ func Build(rows []Row, held map[string]bool, old map[string]Old) *Summary {
 		s.Old = map[string]Old{}
 	}
 	for _, row := range rows {
-		if s.hasDownload(row) {
-			s.Download += row.DownloadSize
+		if held[row.Name] || row.Action == actionHold {
+			// A held package is left out of the transaction: xbps fetches
+			// and unpacks nothing for it, so it is reported under Hold and
+			// nowhere else (FR-011).
+			s.Hold = append(s.Hold, row)
+			continue
 		}
 		switch row.Action {
-		case "remove":
+		case actionRemove:
+			// A removal fetches nothing, so its download size stays out of
+			// the total; its installed size is what the transaction frees.
 			s.Remove = append(s.Remove, row)
 			if row.HasInstalled {
 				s.RemoveBytes += row.InstalledSize
 			}
-		case "update", "reinstall":
+		case actionUpdate, actionReinstall:
 			s.Upgrade = append(s.Upgrade, row)
+			if row.HasDownload {
+				s.Download += row.DownloadSize
+			}
 			if row.HasInstalled {
 				s.AddBytes += row.InstalledSize
 			}
-			if o, ok := s.Old[row.Name]; ok && o.HasSize && o.InstalledSize > row.InstalledSize {
-				s.ObsoleteBytes += o.InstalledSize - row.InstalledSize
+			if o, ok := s.Old[row.Name]; ok && o.HasSize {
+				s.OldBytes += o.InstalledSize
 			}
-			if held[row.Name] {
-				s.Hold = append(s.Hold, row)
-			}
-		case "install", "configure":
+		case actionInstall:
 			s.Install = append(s.Install, row)
+			if row.HasDownload {
+				s.Download += row.DownloadSize
+			}
 			if row.HasInstalled {
 				s.AddBytes += row.InstalledSize
 			}
-			if held[row.Name] {
-				s.Hold = append(s.Hold, row)
-			}
-		case "hold":
-			s.Hold = append(s.Hold, row)
+		case actionConfigure:
+			// FR-011 counts configure actions but does not list them. The
+			// package's files are already unpacked, so nothing is fetched or
+			// added to disk either.
+			s.Install = append(s.Install, row)
 		}
 	}
 	return s
 }
 
-func (s *Summary) hasDownload(row Row) bool {
-	return row.HasDownload
+// listable drops the rows a group holds but does not list, which is the
+// configure action (FR-011).
+func listable(rows []Row) []Row {
+	out := make([]Row, 0, len(rows))
+	for _, row := range rows {
+		if row.Action != actionConfigure {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// hasListable reports whether a group has any row to list.
+func hasListable(rows []Row) bool {
+	return len(listable(rows)) > 0
 }
 
 // Counts holds the number of packages in each group.
@@ -113,11 +145,11 @@ func (s *Summary) Total() int {
 	return len(s.Install) + len(s.Upgrade) + len(s.Remove)
 }
 
-// NetDiskBytes is the net change in disk usage: new bytes plus upgrade
-// growth, minus obsolete and removed bytes.
+// NetDiskBytes is FR-012's net delta: new installed size minus old installed
+// size minus removed size. An upgrade the lookups did not answer for brings
+// no old size with it, so only its new bytes count.
 func (s *Summary) NetDiskBytes() int64 {
-	net := int64(s.AddBytes) - int64(s.ObsoleteBytes) - int64(s.RemoveBytes)
-	return net
+	return int64(s.AddBytes) - int64(s.OldBytes) - int64(s.RemoveBytes)
 }
 
 // Renderer draws a summary to a writer, optionally with ANSI colour.
@@ -128,22 +160,22 @@ type Renderer struct {
 // Render writes the grouped summary and its footer to w.
 func (r Renderer) Render(w io.Writer, s *Summary) error {
 	holdNote := r.holdNote(s)
-	if len(s.Install) > 0 {
+	if hasListable(s.Install) {
 		if err := r.group(w, "Install", s.Install, s, holdNote); err != nil {
 			return err
 		}
 	}
-	if len(s.Upgrade) > 0 {
+	if hasListable(s.Upgrade) {
 		if err := r.group(w, "Upgrade", s.Upgrade, s, holdNote); err != nil {
 			return err
 		}
 	}
-	if len(s.Remove) > 0 {
+	if hasListable(s.Remove) {
 		if err := r.group(w, "Remove", s.Remove, s, holdNote); err != nil {
 			return err
 		}
 	}
-	if len(s.Hold) > 0 {
+	if hasListable(s.Hold) {
 		if err := r.group(w, "Hold", s.Hold, s, holdNote); err != nil {
 			return err
 		}
@@ -168,16 +200,14 @@ func (r Renderer) group(w io.Writer, title string, rows []Row, s *Summary, holdN
 	if _, err := io.WriteString(w, r.paint(boldSeq, title)+"\n"); err != nil {
 		return err
 	}
-	nameWidth := widest(func(i int) string { return rows[i].Name }, len(rows))
-	verWidth := widest(func(i int) string { return s.version(rows[i]) }, len(rows))
-	sizeWidth := widest(func(i int) string { return r.size(rows[i]) }, len(rows))
-	for i := range rows {
-		line := padRight(rows[i].Name, nameWidth) + "  " +
-			padRight(s.version(rows[i]), verWidth) + "  " +
-			padRight(r.size(rows[i]), sizeWidth)
-		if rows[i].Action == "remove" && rows[i].HasDownload {
-			line += "  -" + r.size(Row{DownloadSize: rows[i].DownloadSize, HasDownload: true})
-		}
+	shown := listable(rows)
+	nameWidth := widest(func(i int) string { return shown[i].Name }, len(shown))
+	verWidth := widest(func(i int) string { return s.version(shown[i]) }, len(shown))
+	sizeWidth := widest(func(i int) string { return r.size(shown[i]) }, len(shown))
+	for i := range shown {
+		line := padRight(shown[i].Name, nameWidth) + "  " +
+			padRight(s.version(shown[i]), verWidth) + "  " +
+			padRight(r.size(shown[i]), sizeWidth)
 		if _, err := io.WriteString(w, line+"\n"); err != nil {
 			return err
 		}
@@ -192,7 +222,7 @@ func (r Renderer) group(w io.Writer, title string, rows []Row, s *Summary, holdN
 }
 
 func (s *Summary) version(row Row) string {
-	if row.Action != "update" && row.Action != "reinstall" {
+	if row.Action != actionUpdate && row.Action != actionReinstall {
 		return row.Version
 	}
 	if o, ok := s.Old[row.Name]; ok && o.Version != "" {
@@ -201,9 +231,13 @@ func (s *Summary) version(row Row) string {
 	return row.Version
 }
 
+// size is the figure a row's column shows. A package the transaction fetches
+// is shown by what it downloads; a removal or a held package, which is not
+// fetched, by what it occupies on disk.
 func (r Renderer) size(row Row) string {
+	fetched := row.Action != actionRemove && row.Action != actionHold
 	switch {
-	case row.HasDownload:
+	case fetched && row.HasDownload:
 		return Human(row.DownloadSize)
 	case row.HasInstalled:
 		return Human(row.InstalledSize)
@@ -211,7 +245,8 @@ func (r Renderer) size(row Row) string {
 	return "-"
 }
 
-// Human renders a byte count the way the summary shows sizes.
+// Human renders a byte count the way the summary shows sizes, e.g. `48.2 MiB`
+// (FR-012).
 func Human(n uint64) string {
 	const (
 		kib = 1024
@@ -220,13 +255,13 @@ func Human(n uint64) string {
 	)
 	switch {
 	case n >= gib:
-		return trimZero(float64(n)/gib) + "GiB"
+		return trimZero(float64(n)/gib) + " GiB"
 	case n >= mib:
-		return trimZero(float64(n)/mib) + "MiB"
+		return trimZero(float64(n)/mib) + " MiB"
 	case n >= kib:
-		return trimZero(float64(n)/kib) + "KiB"
+		return trimZero(float64(n)/kib) + " KiB"
 	}
-	return formatInt(n) + "B"
+	return formatInt(n) + " B"
 }
 
 func trimZero(v float64) string {
@@ -246,16 +281,16 @@ func (r Renderer) footer(s *Summary) string {
 	c := s.Counts()
 	parts := []string{}
 	if c.Install > 0 {
-		parts = append(parts, plural(c.Install, "install"))
+		parts = append(parts, count(c.Install, "install"))
 	}
 	if c.Upgrade > 0 {
-		parts = append(parts, plural(c.Upgrade, "upgrade"))
+		parts = append(parts, count(c.Upgrade, "upgrade"))
 	}
 	if c.Remove > 0 {
-		parts = append(parts, plural(c.Remove, "remove"))
+		parts = append(parts, count(c.Remove, "remove"))
 	}
 	if c.Hold > 0 {
-		parts = append(parts, plural(c.Hold, "hold"))
+		parts = append(parts, count(c.Hold, "hold"))
 	}
 	counts := strings.Join(parts, ", ")
 	line := counts
@@ -276,9 +311,8 @@ func (r Renderer) footer(s *Summary) string {
 	return line
 }
 
-func plural(n int, noun string) string {
-	if n == 1 {
-		return "1 " + noun
-	}
-	return itoa(uint64(n)) + " " + noun + "s"
+// count renders one group's tally. The nouns stay as FR-012's example spells
+// them, so three installs read `3 install`.
+func count(n int, noun string) string {
+	return itoa(uint64(n)) + " " + noun
 }

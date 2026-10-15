@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -37,25 +38,33 @@ func itoa(n uint64) string {
 	return strconv.FormatUint(n, 10)
 }
 
+// width is the display width of s in columns. An upgrade's `old → new` cell
+// is one column wider than the arrow's three bytes, so columns are measured
+// in runes before they are padded (FR-012).
+func width(s string) int {
+	return utf8.RuneCountInString(s)
+}
+
 // widest returns the display width of the longest of n values produced by f.
 func widest(f func(int) string, n int) int {
 	max := 0
 	for i := 0; i < n; i++ {
-		if w := len(f(i)); w > max {
+		if w := width(f(i)); w > max {
 			max = w
 		}
 	}
 	return max
 }
 
-// pad right-aligns s in a field of w bytes.
+// pad fills s out to w columns.
 func pad(s string, w int) string {
 	return padRight(s, w)
 }
 
+// padRight fills s out to w columns.
 func padRight(s string, w int) string {
-	if len(s) >= w {
+	if width(s) >= w {
 		return s
 	}
-	return s + strings.Repeat(" ", w-len(s))
+	return s + strings.Repeat(" ", w-width(s))
 }

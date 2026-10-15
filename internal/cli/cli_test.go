@@ -338,6 +338,32 @@ func TestAC021StdoutHoldsOnlyTheSummary(t *testing.T) {
 	}
 }
 
+// TestAC010RemovalFreesWithNoDownload covers FR-011 and FR-012 over the
+// captured remove plan (testdata/parser/0607/remove.txt): the row reports the
+// bytes the removal frees and the footer reports no download, because a
+// removal fetches nothing.
+func TestAC010RemovalFreesWithNoDownload(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.set("XB_STUB_STDOUT", removePlanFixture)
+	code, out, errs := e.run("xbpretty", "remove", "wget", "-n")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if strings.Contains(out, "805.3 KiB") {
+		t.Errorf("the removal is shown by its download size:\n%s", out)
+	}
+	if !strings.Contains(out, "wget  1.25.0_1  3.5 MiB") {
+		t.Errorf("the removal's freed bytes are missing:\n%s", out)
+	}
+	if strings.Contains(out, "download") {
+		t.Errorf("the footer reports a download for a removal:\n%s", out)
+	}
+	if !strings.Contains(out, "-3.5 MiB disk") {
+		t.Errorf("the footer is missing the freed disk delta:\n%s", out)
+	}
+}
+
 func TestAC023PassthroughReachesBothRuns(t *testing.T) {
 	e := newEnv(t)
 	e.root = true

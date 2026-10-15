@@ -86,3 +86,28 @@ func TestAC010UpgradeShowsOldVersion(t *testing.T) {
 		t.Errorf("summary is missing the old version:\n%s", out)
 	}
 }
+
+// TestAC010HeldPackageNameCoversHyphens covers the join between the two Hold
+// sources: `xbps-query -H` prints a pkgver, and a package name carries
+// hyphens of its own, so the name comes off the version rather than the first
+// hyphen. A held package belongs in the Hold group alone, since the
+// transaction does not touch it.
+func TestAC010HeldPackageNameCoversHyphens(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.set("XB_STUB_STDOUT", "base-files-0.146_1 update x86_64 https://repo-default.voidlinux.org/current 262427 62743\n")
+	e.set("XB_STUB_HOLD", "base-files-0.145_1\n")
+	code, out, errs := e.run("xbpretty", "upgrade", "-n")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if !strings.Contains(out, "Hold") || !strings.Contains(out, "base-files") {
+		t.Errorf("the held package is missing from the Hold group:\n%s", out)
+	}
+	if strings.Contains(out, "Upgrade") {
+		t.Errorf("a held package is listed as an upgrade:\n%s", out)
+	}
+	if !strings.Contains(out, "1 hold") {
+		t.Errorf("the footer is missing the hold count:\n%s", out)
+	}
+}
