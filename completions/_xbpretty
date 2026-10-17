@@ -1,0 +1,50 @@
+#compdef xbpretty xbp xbp-install xbp-remove xbp-upgrade xbp-autoremove xbp-update
+# zsh completion for xbpretty
+
+_xbpretty_installed() {
+  local -a pkgs
+  pkgs=(${(f)"$(LC_ALL=C xbps-query -l 2>/dev/null | awk '{print $2}' | sed 's/-[^-]*$//')"})
+  _describe 'installed package' pkgs
+}
+
+_xbpretty_available() {
+  local -a pkgs
+  pkgs=(${(f)"$(LC_ALL=C xbps-query -Rs "$1" 2>/dev/null | awk '{print $2}' | sed 's/-[^-]*$//')"})
+  _describe 'available package' pkgs
+}
+
+_xbpretty() {
+  local -a cmds
+  cmds=(
+    'install:install packages from repositories'
+    'remove:remove installed packages'
+    'upgrade:upgrade all packages'
+    'autoremove:remove orphaned packages'
+    'update:refresh the repository index'
+    'completion:print a shell completion script'
+    'link:create xbp symlinks'
+  )
+
+  if (( CURRENT == 2 )); then
+    _describe -t commands 'xbpretty command' cmds
+    _arguments '*::flag:(-n --dry-run -y --yes -v --verbose --no-sync --no-log --color --version)'
+    return
+  fi
+
+  case "${words[2]}" in
+    install) _xbpretty_available "${words[CURRENT]}" ;;
+    remove|autoremove) _xbpretty_installed ;;
+    completion) _values 'shell' bash zsh fish ;;
+    *)
+      _arguments \
+        '(-n --dry-run)'{-n,--dry-run}'[dry run]' \
+        '(-y --yes)'{-y,--yes}'[assume yes]' \
+        '(-v --verbose)'{-v,--verbose}'[verbose]' \
+        '--no-sync[skip index sync]' \
+        '--no-log[skip transaction log]' \
+        '--color=[colour output]:mode:(auto always never)' \
+        '--version[print version]'
+      ;;
+  esac
+}
+_xbpretty "$@"

@@ -185,3 +185,28 @@ func TestPackageField(t *testing.T) {
 		}
 	}
 }
+
+// TestShippedScriptsAreCurrent keeps completions/, which the xbps-src template
+// and tools/build-xbps.sh install, in step with the generator. A cross build
+// cannot run the target binary, so the scripts are checked in; regenerate them
+// with `make completions`.
+func TestShippedScriptsAreCurrent(t *testing.T) {
+	files := map[string]string{
+		"bash": "xbpretty.bash",
+		"zsh":  "_xbpretty",
+		"fish": "xbpretty.fish",
+	}
+	for shell, name := range files {
+		want, err := Script(shell)
+		if err != nil {
+			t.Fatalf("Script(%s): %v", shell, err)
+		}
+		got, err := os.ReadFile(filepath.Join("..", "..", "completions", name))
+		if err != nil {
+			t.Fatalf("read shipped %s script: %v (run `make completions`)", shell, err)
+		}
+		if string(got) != want {
+			t.Errorf("completions/%s is stale (run `make completions`)", name)
+		}
+	}
+}

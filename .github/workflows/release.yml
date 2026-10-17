@@ -1,0 +1,99 @@
+# Push a tag named xbpretty-vX.Y.Z (X.Y.Z must equal version= in srcpkgs/xbpretty/template).
+# The workflow tests, builds one .xbps per architecture, signs an XBPS repository and attaches it,
+# with the packages, to the GitHub release (xbps reads it from releases/latest/download), then
+# commits the new checksum in srcpkgs/xbpretty/template.
+name: release
+
+on:
+  push:
+    tags: ["xbpretty-v*"]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container: ghcr.io/void-linux/void-glibc:latest
+    steps:
+      - name: Install build tools
+        run: |
+          xbps-install -Syu xbps
+          xbps-install -Sy go bash make git shadow github-cli
+      - uses: actions/checkout@v4
+      - name: Check tag against version
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          version=$(sed -n 's/^version=//p' srcpkgs/xbpretty/template)
+          [ "${GITHUB_REF_NAME}" = "xbpretty-v${version}" ] || {
+            echo "tag ${GITHUB_REF_NAME} does not match template version ${version}" >&2; exit 1; }
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+      - name: Test and build
+        run: |
+          # The tests assume a normal user, so run them as one.
+          useradd -m builder
+          mkdir -p "$RUNNER_TEMP/repo"
+          chown -R builder "$GITHUB_WORKSPACE" "$RUNNER_TEMP/repo"
+          su builder -s /bin/sh -c "cd '$GITHUB_WORKSPACE' && tools/build-xbps.sh '$RUNNER_TEMP/repo'"
+      - name: Sign repository
+        env:
+          XBPS_PRIVKEY: ${{ secrets.XBPS_PRIVKEY }}
+        run: |
+          out="$RUNNER_TEMP/assets"
+          mkdir -p "$out"
+          cp "$RUNNER_TEMP"/repo/xbpretty-"${VERSION}"_1.*.xbps "$out/"
+          [ -n "$XBPS_PRIVKEY" ] || { echo "secret XBPS_PRIVKEY is not set; publishing the packages only" >&2; exit 0; }
+          key="$RUNNER_TEMP/privkey.pem"
+          umask 077
+          printf '%s\n' "$XBPS_PRIVKEY" > "$key"
+          umask 022
+          cd "$out"
+          # One package per architecture: index each into its own signed repodata.
+          for arch in x86_64 x86_64-musl i686 aarch64 aarch64-musl armv7l armv7l-musl armv6l armv6l-musl; do
+            pkg="xbpretty-${VERSION}_1.${arch}.xbps"
+            XBPS_ARCH=$arch xbps-rindex -a "$pkg"
+            XBPS_ARCH=$arch xbps-rindex --privkey "$key" --signedby "Bongbetic <soubarna@live.in>" -s .
+            XBPS_ARCH=$arch xbps-rindex --privkey "$key" -S "$pkg"
+          done
+          rm -f "$key"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > "$RUNNER_TEMP/notes.md" <<NOTES
+          Add the repository once, then install and update like any other package:
+
+          \`\`\`sh
+          echo 'repository=https://github.com/${GITHUB_REPOSITORY}/releases/latest/download' | sudo tee /etc/xbps.d/20-xbpretty.conf
+          sudo xbps-install -S xbpretty
+          \`\`\`
+
+          Later updates arrive with \`sudo xbps-install -Su\`. The first sync asks you to accept the
+          repository key. Check that the fingerprint matches the README before you accept.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" --title "xbpretty ${VERSION}" \
+            --notes-file "$RUNNER_TEMP/notes.md" --generate-notes \
+            "$RUNNER_TEMP"/assets/*
+
+  template:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Bump template checksum
+        run: |
+          version=${GITHUB_REF_NAME#xbpretty-v}
+          sum=$(curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz" | sha256sum | cut -d' ' -f1)
+          t=srcpkgs/xbpretty/template
+          if grep -q "^version=${version}\$" "$t" && grep -q "^checksum=${sum}\$" "$t"; then
+            echo "template already current"; exit 0
+          fi
+          sed -i "s/^version=.*/version=${version}/; s/^revision=.*/revision=1/; s/^checksum=.*/checksum=${sum}/" "$t"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Template: xbpretty ${version}"
+          git push origin HEAD:main

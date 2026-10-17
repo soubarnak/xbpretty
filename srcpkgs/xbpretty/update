@@ -1,0 +1,2 @@
+site="https://github.com/soubarnak/xbpretty/releases/latest"
+pattern="(?<=releases/tag/xbpretty-v)[\d.]+"

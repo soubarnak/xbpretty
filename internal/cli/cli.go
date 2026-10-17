@@ -7,7 +7,7 @@ import (
 )
 
 // Version is xbpretty's own version string. Release builds set it with
-// -ldflags "-X github.com/soubarnak/xbpretty/internal/cli.Version=vX.Y.Z".
+// -ldflags "-X github.com/soubarnak/xbpretty/internal/cli.Version=X.Y.Z".
 var Version = "dev"
 
 // Commands are the subcommands xbpretty dispatches on.
