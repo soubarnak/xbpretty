@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"unsafe"
 
 	"github.com/soubarnak/xbpretty/internal/hints"
 	"github.com/soubarnak/xbpretty/internal/summary"
@@ -290,13 +292,13 @@ func parseSize(s string) (uint64, error) {
 	return uint64(total + 0.5), nil
 }
 
-// isTerminal reports whether f is attached to a terminal.
+// isTerminal reports whether f is attached to a terminal. A character-device
+// check is not enough: /dev/null is one too. TCGETS succeeds only on a tty.
 func isTerminal(f *os.File) bool {
-	info, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeCharDevice != 0
+	var termios syscall.Termios
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(),
+		uintptr(syscall.TCGETS), uintptr(unsafe.Pointer(&termios)))
+	return errno == 0
 }
 
 // prompt asks the FR-009 [Y/n] question until the answer is clear. It

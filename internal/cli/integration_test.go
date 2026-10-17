@@ -69,22 +69,24 @@ func TestIntegrationPipedStdinNeverBlocks(t *testing.T) {
 	go func() { done <- cmd.Wait() }()
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Error("exit = 0, want 1")
+		if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 1 {
+			t.Errorf("exit = %v, want 1", err)
 		}
 	case <-time.After(10 * time.Second):
 		_ = cmd.Process.Kill()
 		t.Fatal("xbpretty blocked on a pipe instead of exiting")
 	}
-	// Whichever guard fires first - the piped-stdin rule or, for a
-	// non-root test run, the privilege rule - xbpretty must explain itself
-	// on stderr and exit without prompting.
-	if !strings.Contains(stderr.String(), "-y") && !strings.Contains(stderr.String(), "sudo") &&
-		!strings.Contains(stderr.String(), "doas") {
-		t.Errorf("missing the guidance hint:\n%s", stderr.String())
+	errs := stderr.String()
+	if strings.Contains(errs, "[Y/n]") {
+		t.Errorf("prompted on a pipe:\n%s", errs)
 	}
-	if strings.Contains(stdout.String(), "Install") && strings.Contains(stderr.String(), "[Y/n]") {
-		t.Errorf("prompted on a pipe:\n%s", stderr.String())
+	// The piped-stdin rule (FR-010 / AC-004) must fire for root and
+	// non-root alike. A non-root run only adds the stale-index warning.
+	if !strings.Contains(errs, "-y") {
+		t.Errorf("missing the -y hint:\n%s", errs)
+	}
+	if os.Geteuid() == 0 && (strings.Contains(errs, "sudo") || strings.Contains(errs, "doas")) {
+		t.Errorf("root run hit the privilege guard:\n%s", errs)
 	}
 }
 
