@@ -10,7 +10,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   release:
@@ -20,7 +19,7 @@ jobs:
       - name: Install build tools
         run: |
           xbps-install -Syu xbps
-          xbps-install -Sy go bash make git shadow github-cli
+          xbps-install -Sy go bash make git shadow util-linux github-cli
       - uses: actions/checkout@v4
       - name: Check tag against version
         run: |
