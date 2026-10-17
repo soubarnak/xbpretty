@@ -1387,3 +1387,29 @@ func TestAC026LinkCreatesSixLinksAndLeavesThemAlone(t *testing.T) {
 		t.Errorf("the conflicting file was overwritten: %q, %v", raw, err)
 	}
 }
+
+// /dev/null is a character device but not a terminal; the piped-stdin rule
+// (FR-010) depends on telling the two apart.
+func TestIsTerminalRejectsNonTerminals(t *testing.T) {
+	null, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer null.Close()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	file, err := os.Open("cli_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	for name, f := range map[string]*os.File{"/dev/null": null, "pipe": r, "regular file": file} {
+		if isTerminal(f) {
+			t.Errorf("isTerminal(%s) = true, want false", name)
+		}
+	}
+}
