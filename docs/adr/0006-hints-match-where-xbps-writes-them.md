@@ -75,8 +75,9 @@ The real run keeps reading stderr only. A measurement at 0.59.1 and 0.60.7
 (rootless podman, `script -q` for the pty, fifos for the pipes) showed what a
 stdout tee would cost: with stdout a pipe, xbps moves its progress and download
 lines from stderr (`\r` redraws, `ESC[K`) to stdout as plain lines without the
-`[ N%]` prefix, and the closing "downloaded, installed" line did not appear on
-the piped stdout. That is a visible change to the live output FR-014 promises.
+`[ N%]` prefix. That is a visible change to the live output FR-014 promises.
+(That measurement also reported the closing "downloaded, installed" line
+missing from the piped stdout; the next subsection corrects it.)
 A pty keeps the output but merges the two streams, which FR-017 and the
 per-stream matching above rule out, and it would be the module's first
 dependency (`go.mod` has none). So `xbp upgrade` against an outdated xbps keeps
@@ -93,6 +94,40 @@ refusal to stdout. For
 real run is never reached; that run is `xbps-install -y` without `-S`, since
 the plan synced, and its refusal would be caught on stderr anyway. So an
 install gets its hint on either path, with or without `--no-sync`.
+
+#### Piped stdout keeps the closing line
+
+The measurement above left one question open: why the closing
+"downloaded, installed" line did not appear on a piped stdout. It is answered
+now, and the earlier report was wrong. **xbps 0.60.7 writes the closing line to
+stdout when stdout is a pipe, and the line arrives intact once the pipe is
+drained to EOF; it is neither withheld nor lost at exit.** The earlier miss
+came from the reader, not from xbps: the line is the tail of the last
+`write(1, ...)`, one 773-byte write issued just before xbps exits, so a reader
+that stops at or before that write sees everything but the line. That reading
+is an inference. The old fifo run is not preserved, so it was not reproduced.
+
+Method, in `scripts/measure-piped-stdout.sh` (rootless podman, container root,
+`ghcr.io/void-linux/void-glibc:latest`; `xbps-install -Syu xbps` leaves
+`xbps-install --version` at 0.60.7; `strace` and `util-linux` installed for the
+trace and for `script`). Each run removes `figlet`, empties the package cache
+and installs it, so the closing line is
+`1 downloaded, 1 installed, 0 updated, 1 configured, 0 removed, 0 on hold.`
+`script` gives xbps a terminal.
+
+| stdout is | closing line |
+|---|---|
+| the terminal | on the terminal |
+| a pipe (`xbps-install ... \| cat > file`), drained to EOF | in the file |
+| a file | in the file |
+| a pipe, under `strace -f -e trace=write,writev` | in the file, and in a `write(1, ...)` in the trace |
+| a file, under the same `strace` | in the file, and in a `write(1, ...)` in the trace |
+
+With stdout a pipe or a file, the terminal on stderr received nothing: the
+progress and download lines, the transaction lines and the closing line were
+all written to fd 1, as the paragraph above says. The decision stands: the real
+run keeps reading stderr only, because a stdout tee changes the live output,
+not because a line is lost. No runtime behaviour changes.
 
 ### Fixtures
 
