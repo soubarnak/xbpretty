@@ -8,6 +8,9 @@ _xbpretty_installed() {
   LC_ALL=C xbps-query -l 2>/dev/null | awk '{print $2}' | sed 's/-[^-]*$//'
 }
 _xbpretty_available() {
+  # A search of the whole repository is slow and never wanted: only search for a
+  # word the user has started, and never for a flag.
+  [[ -z "$1" || "$1" == -* ]] && return 0
   LC_ALL=C xbps-query -Rs "$1" 2>/dev/null | awk '{print $2}' | sed 's/-[^-]*$//'
 }
 
@@ -43,7 +46,7 @@ _xbpretty_available() {
   case "$sub" in
     install)
       COMPREPLY=( $(compgen -W "$(_xbpretty_available "$cur")" -- "$cur") ) ;;
-    remove|autoremove)
+    remove)
       COMPREPLY=( $(compgen -W "$(_xbpretty_installed)" -- "$cur") ) ;;
     completion)
       COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") ) ;;
