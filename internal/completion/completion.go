@@ -6,8 +6,9 @@ var Subcommands = []string{
 	"install", "remove", "upgrade", "autoremove", "update", "completion", "link", "log",
 }
 
-// Flags accepted by xbpretty's own argument parser.
+// Flags accepted by xbpretty's own argument parser. --limit is offered only
+// after the log command; the scripts spell that out themselves.
 var Flags = []string{
 	"-n", "--dry-run", "-y", "--yes", "-v", "--verbose",
-	"--no-sync", "--no-log", "--color", "--version",
+	"--no-sync", "--no-log", "--color", "--limit", "--version",
 }

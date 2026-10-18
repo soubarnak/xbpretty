@@ -357,6 +357,17 @@ func TestCompletionQueryRules(t *testing.T) {
 					t.Errorf("package names offered on a flag word: %q", p.offered)
 				}
 			})
+			t.Run("after --limit offers nothing and queries nothing", func(t *testing.T) {
+				for _, word := range []string{"", "5"} {
+					p := probeCompletion(t, shell, "xbp", "log", "--limit", word)
+					if len(p.calls) != 0 {
+						t.Errorf("word %q: xbps-query was called: %q", word, p.calls)
+					}
+					if len(p.offered) != 0 {
+						t.Errorf("word %q: completion offered %q after --limit", word, p.offered)
+					}
+				}
+			})
 			t.Run("remove offers installed names", func(t *testing.T) {
 				p := probeCompletion(t, shell, "xbp", "remove", "")
 				for _, name := range []string{"figlet", "htop"} {

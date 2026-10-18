@@ -79,9 +79,7 @@ _xbpretty() {
   case "$sub" in
     install)
       COMPREPLY=( $(compgen -W "$(_xbpretty_available "$cur")" -- "$cur") ) ;;
-    remove)
-      COMPREPLY=( $(compgen -W "$(_xbpretty_installed)" -- "$cur") ) ;;
-    log)
+    remove|log)
       COMPREPLY=( $(compgen -W "$(_xbpretty_installed)" -- "$cur") ) ;;
     completion)
       COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") ) ;;
@@ -129,6 +127,9 @@ _xbpretty() {
     _arguments '*::flag:(-n --dry-run -y --yes -v --verbose --no-sync --no-log --color --version)'
     return
   fi
+
+  # --limit takes a count: offer nothing and query nothing for it.
+  [[ "${words[CURRENT-1]}" == --limit ]] && return
 
   case "${words[2]}" in
     install) _xbpretty_available "${words[CURRENT]}" ;;
