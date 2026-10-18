@@ -202,6 +202,9 @@ cap_hold_list() {
 capture_pre() {
 	set_dirs
 	hint_case xbps-unsigned-update xbps-install -Sn htop curl wget
+	# An install's real run, as `xbp install` issues it after a synced plan:
+	# the refusal stays on stderr, unlike the upgrade's below.
+	hint_case xbps-unsigned-update-install xbps-install -y figlet
 	# The same refusal on the other stream: an upgrade gets it on stdout.
 	hint_case xbps-unsigned-update-upgrade xbps-install -Syu
 	hint_case not-installed xbps-remove -yn this-package-does-not-exist-xyz

@@ -33,4 +33,13 @@ plans in `testdata/parser/0607/`, so it waits for a reason of its own.
 privilege, so it was re-run as a user and added. Its stderr matched `.txt`
 byte for byte, and `not-found.meta` says so.
 
+## Cases added on their own
+
+`0591/xbps-unsigned-update-install` (`xbps-install -y figlet`) came from
+running its `capture_pre` line alone in the container, after the same
+repository setup, rather than from a full run of the phase. A full run would
+also rewrite `testdata/parser/0591/upgrade` and the lookups, which follow the
+live repository. Its stderr is byte for byte the refusal in
+`0591/xbps-unsigned-update.txt`.
+
 Regenerate with `scripts/capture-fixtures.sh`.

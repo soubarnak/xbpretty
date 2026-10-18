@@ -66,7 +66,33 @@ own line and no `hint:` line. The `xbps-unsigned-update` entry lists stdout so
 that a caller holding that stream gets the hint, and so the table records
 what was measured; the real-run path does not hold it yet. An install gets its
 hint, since xbps writes that refusal to stderr. Whether `execute` should read
-stdout, and how without costing the terminal, is a separate decision.
+stdout, and how without costing the terminal, was left as a separate decision;
+the next section settles it.
+
+#### Decision: the gap stays
+
+The real run keeps reading stderr only. A measurement at 0.59.1 and 0.60.7
+(rootless podman, `script -q` for the pty, fifos for the pipes) showed what a
+stdout tee would cost: with stdout a pipe, xbps moves its progress and download
+lines from stderr (`\r` redraws, `ESC[K`) to stdout as plain lines without the
+`[ N%]` prefix, and the closing "downloaded, installed" line did not appear on
+the piped stdout. That is a visible change to the live output FR-014 promises.
+A pty keeps the output but merges the two streams, which FR-017 and the
+per-stream matching above rule out, and it would be the module's first
+dependency (`go.mod` has none). So `xbp upgrade` against an outdated xbps keeps
+xbps's own line and gets no `hint:` line. The line is clear without one.
+
+The measurement also showed the refusal on stdout in every wiring for
+`xbps-install -Syu`. An install does not follow it. At 0.59.1 every
+install-shaped command exits 16 with the refusal on stderr and nothing on
+stdout: `-Sn` and `-n` (the plan, with and without sync) and `-y` and `-Sy`
+(the real run). Each was run for `figlet`, `-Sn` also for `htop curl wget`, and
+`-y` and `-Sy` with stdout a terminal as well as a file. Only `-u` moves the
+refusal to stdout. For
+`xbp install` the plan is refused first, `plan` reads both streams, and the
+real run is never reached; that run is `xbps-install -y` without `-S`, since
+the plan synced, and its refusal would be caught on stderr anyway. So an
+install gets its hint on either path, with or without `--no-sync`.
 
 ### Fixtures
 
@@ -82,6 +108,13 @@ were added from 0.59.1. The container phase of the script reproduced the two
 - `0591/xbps-unsigned-update-upgrade`: `xbps-install -Syu`, exit 16, message on
   stdout.
 
+A third came later, from the measurement under "Decision: the gap stays":
+
+- `0591/xbps-unsigned-update-install`: `xbps-install -y figlet`, the real run
+  `xbp install` issues, exit 16, message on stderr. With
+  `0591/xbps-unsigned-update` (`-Sn`, the plan) it covers both runs of an
+  install.
+
 `TestCapturedCasesMatch` lists every captured case, and
 `TestHintsMatchWhereXbpsWritesThem` moves each message to the other stream and
 requires the hint to stay silent, except for `xbps-unsigned-update`.
@@ -90,11 +123,13 @@ requires the hint to stay silent, except for `xbps-unsigned-update`.
 
 - The `not-installed` entry is reachable: ADR-0003 #4's consequence is
   settled by this ADR.
-- The four 0.60.7 hint captures taken on the host (`stale-index`,
-  `stale-index-upgrade`, `not-found`, `lock-wait`) have no `.out`: they predate
-  the stdout half of the capture. The test reads a missing `.out` as empty and
-  does not claim stdout was observed to be empty. A host recapture
+- Three 0.60.7 hint captures taken on the host (`stale-index`,
+  `stale-index-upgrade`, `lock-wait`) have no `.out`: they predate the stdout
+  half of the capture. The test reads a missing `.out` as empty and does not
+  claim stdout was observed to be empty. A host recapture
   (`sudo XB_CAPTURE_MODE=host scripts/capture-fixtures.sh`) supplies it.
+  `not-found` was the fourth; its `.out` came from an unprivileged dry run
+  (see `testdata/hints/README.md`).
 - 0.60.7 has no capture of `xbps-unsigned-update` on either stream: the
   refusal needs an outdated xbps, which only the 0.59.1 container has. The
   ticket's remark that both versions behave alike for `-Sn` rests on that

@@ -373,6 +373,31 @@ func TestFailureWrittenToStdoutGetsHint(t *testing.T) {
 	}
 }
 
+// TestInstallRefusedOnStderrGetsHint is ADR-0006's other half: an install is
+// refused with the outdated-xbps text on stderr and nothing on stdout, and the
+// plan step still hands back xbps's own line plus the hint.
+func TestInstallRefusedOnStderrGetsHint(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	raw, err := os.ReadFile("../../testdata/hints/0591/xbps-unsigned-update.txt")
+	if err != nil {
+		t.Fatalf("reading capture: %v", err)
+	}
+	e.set("XB_STUB_STDOUT", "")
+	e.set("XB_STUB_STDERR", string(raw))
+	e.set("XB_STUB_PLAN_EXIT", "16")
+	code, _, errs := e.run("xbpretty", "install", "-n", "htop", "curl", "wget")
+	if code != 16 {
+		t.Errorf("exit = %d, want 16 (xbps's code)", code)
+	}
+	if !strings.Contains(errs, string(raw)) {
+		t.Errorf("stderr is missing xbps's own refusal %q:\n%s", raw, errs)
+	}
+	if !strings.Contains(errs, "hint:") || !strings.Contains(errs, "xbps-install -u xbps") {
+		t.Errorf("stderr is missing the hint naming %q:\n%s", "xbps-install -u xbps", errs)
+	}
+}
+
 // TestStdoutMessageOnTheWrongCodeGetsNoHint keeps AC-016 over the new stream:
 // the not-installed text on stdout with another exit code is not that failure.
 func TestStdoutMessageOnTheWrongCodeGetsNoHint(t *testing.T) {

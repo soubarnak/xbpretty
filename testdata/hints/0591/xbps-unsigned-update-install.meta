@@ -1,0 +1,3 @@
+CMD: xbps-install -y figlet
+EXIT: 16
+NOTE: captured on 2026-10-18 by running this line of capture_pre alone, after the container repository setup, not by a full run of the phase; its stderr matched xbps-unsigned-update.txt byte for byte

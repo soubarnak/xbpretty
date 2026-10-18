@@ -60,6 +60,7 @@ func TestCapturedCasesMatch(t *testing.T) {
 		{"0607/not-installed", "not-installed"},
 		{"0607/lock-wait", "lock-wait"},
 		{"0591/xbps-unsigned-update", "xbps-unsigned-update"},
+		{"0591/xbps-unsigned-update-install", "xbps-unsigned-update"},
 		{"0591/xbps-unsigned-update-upgrade", "xbps-unsigned-update"},
 		{"0591/not-found", "not-found"},
 		{"0591/not-installed", "not-installed"},
@@ -100,6 +101,7 @@ func TestHintsMatchWhereXbpsWritesThem(t *testing.T) {
 		{"0607/not-installed", Stdout, false},
 		{"0591/not-installed", Stdout, false},
 		{"0591/xbps-unsigned-update", Stderr, true},
+		{"0591/xbps-unsigned-update-install", Stderr, true},
 		{"0591/xbps-unsigned-update-upgrade", Stdout, true},
 	}
 	for _, tt := range tests {
