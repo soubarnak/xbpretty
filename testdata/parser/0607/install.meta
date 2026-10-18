@@ -1,3 +1,2 @@
 CMD: xbps-install -Sn figlet
 EXIT: 0
-NOTE: reconstructed on 2026-10-18 from the command table in testdata/parser/README.md, not written by capture-fixtures.sh; EXIT is inferred from the plan being complete (a failed dry run prints none); stderr was not kept

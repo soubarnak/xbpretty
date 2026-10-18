@@ -26,15 +26,19 @@ Every capture was taken with `LC_ALL=C`, against the one repository
 | `0591/upgrade.txt` | `xbps-install -Sun` |
 
 The `.meta` beside each plan records the command, its exit code, and whatever
-state the capture had to induce first. Four of them are reconstructed, not
-captured: `0607/install`, `reinstall`, `remove` and `upgrade` were taken on the
-host before the script wrote a `.meta` or kept the other stream. Their `.meta`
-was written afterwards from the command table above, says so in a `NOTE:` line,
-and has no `.err` beside it, because stderr was never observed for them. The
-exit code is inferred from the plan being complete. Nothing reads a `.meta`
-here, and the plans themselves are untouched. A host recapture would replace
-them with new plans and move the figures `plan_test.go` pins, so it waits for
-a reason of its own. Two of the actions a plan prints only appear in induced
+state the capture had to induce first. Two of them are still reconstructed,
+not captured: `0607/remove` and `0607/upgrade` were taken on the host before
+the script wrote a `.meta` or kept the other stream. Their `.meta` was written
+afterwards from the command table above, says so in a `NOTE:` line, and has no
+`.err` beside it. `0607/install` and `0607/reinstall` were recaptured on the
+host on 2026-10-18 and now hold observed `.meta` and `.err` files. The
+recapture could not replace the other two: it found nothing pending for
+`upgrade` (an empty plan) and, for `remove`, `xbps-remove -n wget` aborted
+because other installed packages depend on `wget`, so neither would still hold
+the rows `plan_test.go` pins. They wait for a host that has an upgrade
+pending and a removable target. The reverse-dependency lookup the run also
+produced (`lookups/0607/revdeps`) is not committed, because nothing reads it.
+Two of the actions a plan prints only appear in induced
 state:
 
 - **`hold`**: 0.60.7 prints a package on hold as `<pkgver> hold ...`. 0.59.1

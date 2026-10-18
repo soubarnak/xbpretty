@@ -158,13 +158,15 @@ requires the hint to stay silent, except for `xbps-unsigned-update`.
 
 - The `not-installed` entry is reachable: ADR-0003 #4's consequence is
   settled by this ADR.
-- Three 0.60.7 hint captures taken on the host (`stale-index`,
-  `stale-index-upgrade`, `lock-wait`) have no `.out`: they predate the stdout
-  half of the capture. The test reads a missing `.out` as empty and does not
-  claim stdout was observed to be empty. A host recapture
-  (`sudo XB_CAPTURE_MODE=host scripts/capture-fixtures.sh`) supplies it.
-  `not-found` was the fourth; its `.out` came from an unprivileged dry run
-  (see `testdata/hints/README.md`).
+- `stale-index` and `stale-index-upgrade` gained their `.out` from the host
+  recapture of 2026-10-18; both are empty, so xbps writes those errors to
+  stderr only. `lock-wait` still has no `.out`: the recapture found no
+  upgrade pending, which its lock race needs, so that step stopped and its
+  output was not committed. The test reads a missing `.out` as empty and does
+  not claim stdout was observed to be empty. A host recapture while an upgrade
+  is pending (`sudo XB_CAPTURE_MODE=host scripts/capture-fixtures.sh`)
+  supplies it. `not-found` was the fourth; its `.out` came from an
+  unprivileged dry run (see `testdata/hints/README.md`).
 - 0.60.7 has no capture of `xbps-unsigned-update` on either stream: the
   refusal needs an outdated xbps, which only the 0.59.1 container has. The
   ticket's remark that both versions behave alike for `-Sn` rests on that
