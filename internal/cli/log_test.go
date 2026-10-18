@@ -74,6 +74,39 @@ func TestLogFilterMatchesExactNames(t *testing.T) {
 	}
 }
 
+// A filter matches package names only, never the command field. The fixture
+// has a line whose command is remove and a line with a package named remove,
+// and a line whose command is update and carries a package, so a filter that
+// also read the command field would return the wrong lines.
+func TestLogFilterNeverMatchesTheCommandField(t *testing.T) {
+	const fixture = `2026-10-01T08:00:00Z remove figlet-2.2.5_6
+2026-10-02T08:00:00Z install remove-1.0_1
+2026-10-03T08:00:00Z update
+2026-10-04T08:00:00Z update htop-3.5.3_1
+`
+	lines := strings.SplitAfter(fixture, "\n")
+	tests := []struct {
+		name   string
+		filter string
+		want   string
+	}{
+		{"remove matches the package, not the command", "remove", lines[1]},
+		{"update is only ever a command here", "update", ""},
+		{"a package on an update line still matches", "htop", lines[3]},
+		{"a package on a remove line still matches", "figlet", lines[0]},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.writeLogFixture(fixture)
+			code, out, errs := e.run("xbp", "log", tt.filter)
+			if code != 0 || out != tt.want {
+				t.Fatalf("code=%d out=%q want %q err=%q", code, out, tt.want, errs)
+			}
+		})
+	}
+}
+
 func TestLogLimit(t *testing.T) {
 	tests := []struct {
 		name string
