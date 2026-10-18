@@ -23,6 +23,9 @@ func packageLists() string {
   LC_ALL=C xbps-query -l 2>/dev/null | awk '{print $2}' | sed 's/-[^-]*$//'
 }
 _xbpretty_available() {
+  # A search of the whole repository is slow and never wanted: only search for a
+  # word the user has started, and never for a flag.
+  [[ -z "$1" || "$1" == -* ]] && return 0
   LC_ALL=C xbps-query -Rs "$1" 2>/dev/null | awk '{print $2}' | sed 's/-[^-]*$//'
 }
 `)
@@ -71,7 +74,7 @@ _xbpretty() {
   case "$sub" in
     install)
       COMPREPLY=( $(compgen -W "$(_xbpretty_available "$cur")" -- "$cur") ) ;;
-    remove|autoremove)
+    remove)
       COMPREPLY=( $(compgen -W "$(_xbpretty_installed)" -- "$cur") ) ;;
     completion)
       COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") ) ;;
@@ -95,6 +98,7 @@ _xbpretty_installed() {
 }
 
 _xbpretty_available() {
+  [[ -z "$1" || "$1" == -* ]] && return 0
   local -a pkgs
   pkgs=(${(f)"$(LC_ALL=C xbps-query -Rs "$1" 2>/dev/null | awk '{print $2}' | sed 's/-[^-]*$//')"})
   _describe 'available package' pkgs
@@ -120,7 +124,7 @@ _xbpretty() {
 
   case "${words[2]}" in
     install) _xbpretty_available "${words[CURRENT]}" ;;
-    remove|autoremove) _xbpretty_installed ;;
+    remove) _xbpretty_installed ;;
     completion) _values 'shell' bash zsh fish ;;
     *)
       _arguments \
@@ -154,11 +158,14 @@ function __xbpretty_no_subcommand
 end
 
 function __xbpretty_installed
-    LC_ALL=C xbps-query -l 2>/dev/null | awk '{print $2}' | string replace -r '-[^-]*$' ''
+    LC_ALL=C xbps-query -l 2>/dev/null | awk '{print $2}' | string replace -r -- '-[^-]*$' ''
 end
 
 function __xbpretty_available
-    LC_ALL=C xbps-query -Rs (commandline -ct) 2>/dev/null | awk '{print $2}' | string replace -r '-[^-]*$' ''
+    set -l word (commandline -ct)
+    test -n "$word"; or return 0
+    string match -q -- '-*' $word; and return 0
+    LC_ALL=C xbps-query -Rs $word 2>/dev/null | awk '{print $2}' | string replace -r -- '-[^-]*$' ''
 end
 
 for __xbpretty_cmd in xbpretty xbp xbp-install xbp-remove xbp-upgrade xbp-autoremove xbp-update
@@ -181,7 +188,6 @@ for __xbpretty_cmd in xbpretty xbp xbp-install xbp-remove xbp-upgrade xbp-autore
 
     complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install' -a '(__xbpretty_available)'
     complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from remove' -a '(__xbpretty_installed)'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from autoremove' -a '(__xbpretty_installed)'
     complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
 end
 `)
