@@ -51,9 +51,7 @@ _xbpretty_available() {
   case "$sub" in
     install)
       COMPREPLY=( $(compgen -W "$(_xbpretty_available "$cur")" -- "$cur") ) ;;
-    remove)
-      COMPREPLY=( $(compgen -W "$(_xbpretty_installed)" -- "$cur") ) ;;
-    log)
+    remove|log)
       COMPREPLY=( $(compgen -W "$(_xbpretty_installed)" -- "$cur") ) ;;
     completion)
       COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") ) ;;

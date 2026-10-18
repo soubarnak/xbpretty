@@ -293,6 +293,10 @@ func StateDir() (string, error) {
 	return dir, nil
 }
 
+// transactionLogName is the file name of the transaction log in the state
+// directory.
+const transactionLogName = "transactions.log"
+
 // stateDirPath is where the state directory is, without creating it.
 func stateDirPath() (string, error) {
 	base := os.Getenv("XDG_STATE_HOME")
@@ -313,7 +317,7 @@ func TransactionLogPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "transactions.log"), nil
+	return filepath.Join(dir, transactionLogName), nil
 }
 
 // TransactionLog is the path of the append-only transaction log.
@@ -322,7 +326,7 @@ func TransactionLog() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "transactions.log"), nil
+	return filepath.Join(dir, transactionLogName), nil
 }
 
 // FormatTimestamp renders t in the ISO-8601 form the transaction log uses.

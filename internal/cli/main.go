@@ -89,7 +89,8 @@ func Main(argv []string) int {
 		usage(os.Stderr)
 		return exitUsage
 	}
-	if opts.command == "log" && cmd == "" {
+	isLogCommand := opts.command == "log" && cmd == ""
+	if isLogCommand {
 		return st.runLog(opts)
 	}
 

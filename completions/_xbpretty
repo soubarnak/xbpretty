@@ -33,6 +33,9 @@ _xbpretty() {
     return
   fi
 
+  # --limit takes a count: offer nothing and query nothing for it.
+  [[ "${words[CURRENT-1]}" == --limit ]] && return
+
   case "${words[2]}" in
     install) _xbpretty_available "${words[CURRENT]}" ;;
     remove) _xbpretty_installed ;;
