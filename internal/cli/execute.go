@@ -170,6 +170,10 @@ func (st *state) writeLog(cmd string, args []string, rows []xbps.Row) {
 
 	names := make([]string, 0, len(rows))
 	for _, row := range rows {
+		// A held package is in the plan but the transaction leaves it alone.
+		if row.Action == xbps.ActionHold {
+			continue
+		}
 		names = append(names, row.Pkgver())
 	}
 	// The package list is the last field, and `update` has none: no

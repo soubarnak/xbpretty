@@ -9,7 +9,6 @@ import (
 
 const (
 	boldSeq = "\x1b[1m"
-	dimSeq  = "\x1b[2m"
 	reset   = "\x1b[0m"
 )
 
@@ -54,11 +53,6 @@ func widest(f func(int) string, n int) int {
 		}
 	}
 	return max
-}
-
-// pad fills s out to w columns.
-func pad(s string, w int) string {
-	return padRight(s, w)
 }
 
 // padRight fills s out to w columns.

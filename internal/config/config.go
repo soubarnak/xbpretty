@@ -283,21 +283,37 @@ func (c Config) Resolve() error {
 // StateDir returns the directory holding xbpretty's state files, creating it
 // on first use.
 func StateDir() (string, error) {
+	dir, err := stateDirPath()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("creating state directory: %w", err)
+	}
+	return dir, nil
+}
+
+// stateDirPath is where the state directory is, without creating it.
+func stateDirPath() (string, error) {
 	base := os.Getenv("XDG_STATE_HOME")
-	var err error
 	if base == "" {
-		var home string
-		home, err = userHome()
+		home, err := userHome()
 		if err != nil {
 			return "", err
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
-	dir := filepath.Join(base, "xbpretty")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("creating state directory: %w", err)
+	return filepath.Join(base, "xbpretty"), nil
+}
+
+// TransactionLogPath is the path TransactionLog returns, for readers: it
+// creates nothing, so reading the log never leaves a directory behind.
+func TransactionLogPath() (string, error) {
+	dir, err := stateDirPath()
+	if err != nil {
+		return "", err
 	}
-	return dir, nil
+	return filepath.Join(dir, "transactions.log"), nil
 }
 
 // TransactionLog is the path of the append-only transaction log.

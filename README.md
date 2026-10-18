@@ -54,6 +54,7 @@ One binary, six names. `xbp` is the short form; the `xbp-*` names are symlinks t
 | `xbp upgrade` | `xbps-install -Su` | `xbp-upgrade` |
 | `xbp autoremove` | `xbps-remove -o` | `xbp-autoremove` |
 | `xbp update` | `xbps-install -S` | `xbp-update` |
+| `xbp log [--limit N] [package...]` | nothing (reads the transaction log) | none |
 
 Other commands: `xbp completion bash|zsh|fish`, and `xbp link [dir]` to create the symlinks when
 you install by hand.
@@ -67,7 +68,26 @@ Unprivileged, it prints the summary and tells you to rerun under `doas` or `sudo
 terminal, pass `-y` or `--dry-run`. Only the summary goes to stdout, so `xbp upgrade -n | grep`
 works.
 
-Transactions are logged to `$XDG_STATE_HOME/xbpretty/transactions.log`. Configuration lives in
+`xbp log` prints the transaction log, oldest first, one stored line per line of stdout. Package
+names (no versions) keep only lines that changed a package with exactly that name, so `xbp log curl`
+does not show `libcurl`; several names match any of them. `--limit N` keeps the last N matching
+lines. It needs no root, writes nothing and runs no xbps. A missing or empty log prints a note on
+stderr and exits 0; an unreadable one exits 1. `--dry-run`, `--yes`, `--no-sync` and `--` are usage
+errors. There is no `xbp-log` link.
+
+Transactions are logged to `$XDG_STATE_HOME/xbpretty/transactions.log`, one line per successful
+real run, appended and never rewritten:
+
+```
+<RFC 3339 UTC timestamp> <command> [<name-version> ...]
+```
+
+For example `2026-10-15T09:41:01Z install figlet-2.2.5_6`. Fields are separated by single spaces
+and a line never ends in a space. Only packages the transaction changed (install, update,
+reinstall, remove, configure) are listed; held packages are not. `update` lines carry no packages.
+The log cannot replay a transaction. See [ADR-0008](docs/adr/0008-transaction-log-line-format.md).
+
+Configuration lives in
 `$XDG_CONFIG_HOME/xbpretty/config.toml` (`assume_yes`, `color`, `verbose`, `sync`, `log`,
 `xbps_install_path`, `xbps_remove_path`, `xbps_query_path`). Command-line flags win over the file.
 

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -157,35 +158,6 @@ func TestParseShell(t *testing.T) {
 	}
 }
 
-func TestStripVersion(t *testing.T) {
-	tests := []struct{ in, want string }{
-		{"htop-3.5.3_1", "htop"},
-		{"ca-certificates-20250419+3.127_1", "ca-certificates"},
-		{"base-files-0.146_1", "base-files"},
-		{"noversion", ""},
-		{"-1.0_1", ""},
-	}
-	for _, tt := range tests {
-		if got := stripVersion(tt.in); got != tt.want {
-			t.Errorf("stripVersion(%q) = %q, want %q", tt.in, got, tt.want)
-		}
-	}
-}
-
-func TestPackageField(t *testing.T) {
-	tests := []struct{ in, want string }{
-		{"ii htop-3.5.3_1 Interactive process viewer", "htop-3.5.3_1"},
-		{"[-] htop-3.5.3_1 Interactive process viewer", "htop-3.5.3_1"},
-		{"[*] vim-9.2.1031_1 Vim editor", "vim-9.2.1031_1"},
-		{"htop-3.5.3_1", "htop-3.5.3_1"},
-	}
-	for _, tt := range tests {
-		if got := packageField(tt.in); got != tt.want {
-			t.Errorf("packageField(%q) = %q, want %q", tt.in, got, tt.want)
-		}
-	}
-}
-
 // TestShippedScriptsAreCurrent keeps completions/, which the xbps-src template
 // and tools/build-xbps.sh install, in step with the generator. A cross build
 // cannot run the target binary, so the scripts are checked in; regenerate them
@@ -208,5 +180,157 @@ func TestShippedScriptsAreCurrent(t *testing.T) {
 		if string(got) != want {
 			t.Errorf("completions/%s is stale (run `make completions`)", name)
 		}
+	}
+}
+
+// completionProbe runs a generated script for one shell against a stub
+// xbps-query that logs each call, and reports what the completion offered and
+// which xbps-query calls it made.
+type completionProbe struct {
+	offered []string
+	calls   []string
+}
+
+func probeCompletion(t *testing.T, shell string, words ...string) completionProbe {
+	t.Helper()
+	script, err := Script(shell)
+	if err != nil {
+		t.Fatalf("Script(%s): %v", shell, err)
+	}
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "calls.log")
+	stub := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"$XBPS_QUERY_LOG\"\n" +
+		"case \"$*\" in\n" +
+		"  *-Rs*) printf '%s\\n' '[-] figlet-2.2.5_6 A program' '[-] fig2dev-3.2.9_1 A converter' ;;\n" +
+		"  *-l*) printf '%s\\n' 'ii figlet-2.2.5_6 A program' 'ii htop-3.5.3_1 A viewer' ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(binDir, "xbps-query"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(dir, "script")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	quoted := make([]string, len(words))
+	for i, w := range words {
+		quoted[i] = "'" + w + "'"
+	}
+	var cmd *exec.Cmd
+	switch shell {
+	case "bash":
+		probe := ". " + scriptPath + "\n" +
+			"COMP_WORDS=(" + strings.Join(quoted, " ") + ")\n" +
+			"COMP_CWORD=" + strconv.Itoa(len(words)-1) + "\n" +
+			"_xbpretty\n" +
+			"printf '%s\\n' \"${COMPREPLY[@]}\"\n"
+		cmd = exec.Command("bash", "-c", probe)
+	case "zsh":
+		// Stand in for the completion builtins: _describe prints the
+		// candidates it is given, the others print nothing.
+		probe := "_describe() { print -l -- \"${(P)2[@]}\" }\n" +
+			"_arguments() { : }\n_values() { : }\n" +
+			"words=(" + strings.Join(quoted, " ") + ")\n" +
+			"CURRENT=" + strconv.Itoa(len(words)) + "\n" +
+			". " + scriptPath + "\n"
+		cmd = exec.Command("zsh", "-f", "-c", probe)
+	case "fish":
+		probe := "source " + scriptPath + "\n" +
+			"complete -C '" + strings.Join(words, " ") + "'\n"
+		cmd = exec.Command("fish", "--no-config", "-c", probe)
+	}
+	env := []string{"PATH=" + binDir + ":" + os.Getenv("PATH"), "XBPS_QUERY_LOG=" + logPath}
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "PATH=") {
+			env = append(env, kv)
+		}
+	}
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running the %s completion: %v\n%s", shell, err, out)
+	}
+	var p completionProbe
+	for _, line := range strings.Split(string(out), "\n") {
+		// fish prints "name<TAB>description"; keep the name only.
+		if name, _, _ := strings.Cut(line, "\t"); name != "" {
+			p.offered = append(p.offered, name)
+		}
+	}
+	if data, err := os.ReadFile(logPath); err == nil {
+		p.calls = strings.Split(strings.TrimSpace(string(data)), "\n")
+	}
+	return p
+}
+
+func offers(p completionProbe, name string) bool {
+	for _, o := range p.offered {
+		if o == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestCompletionQueryRules pins the rules of ADR-0009 in every shell: install
+// searches the repository only for a non-empty word that is not a flag, a flag
+// word queries nothing, autoremove offers no package names, remove still
+// offers the installed ones. Shells that are not on PATH are skipped.
+func TestCompletionQueryRules(t *testing.T) {
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		t.Run(shell, func(t *testing.T) {
+			if _, err := exec.LookPath(shell); err != nil {
+				t.Skipf("%s is not installed", shell)
+			}
+
+			t.Run("install with a word searches that word", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "install", "fig")
+				if len(p.calls) != 1 || p.calls[0] != "-Rs fig" {
+					t.Errorf("xbps-query calls = %q, want exactly [\"-Rs fig\"]", p.calls)
+				}
+				if !offers(p, "figlet") {
+					t.Errorf("figlet not offered: %q", p.offered)
+				}
+			})
+			t.Run("install on an empty word offers nothing and queries nothing", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "install", "")
+				if len(p.calls) != 0 {
+					t.Errorf("xbps-query was called: %q", p.calls)
+				}
+				if offers(p, "figlet") {
+					t.Errorf("package names offered on an empty word: %q", p.offered)
+				}
+			})
+			t.Run("install on a flag queries nothing", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "install", "-")
+				if len(p.calls) != 0 {
+					t.Errorf("xbps-query was called: %q", p.calls)
+				}
+			})
+			t.Run("autoremove offers no package names", func(t *testing.T) {
+				for _, word := range []string{"", "h", "-"} {
+					p := probeCompletion(t, shell, "xbp", "autoremove", word)
+					if len(p.calls) != 0 {
+						t.Errorf("word %q: xbps-query was called: %q", word, p.calls)
+					}
+					if offers(p, "htop") || offers(p, "figlet") {
+						t.Errorf("word %q: package names offered: %q", word, p.offered)
+					}
+				}
+			})
+			t.Run("remove offers installed names", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "remove", "")
+				for _, name := range []string{"figlet", "htop"} {
+					if !offers(p, name) {
+						t.Errorf("%s not offered: %q", name, p.offered)
+					}
+				}
+			})
+		})
 	}
 }

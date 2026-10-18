@@ -84,6 +84,15 @@ func Main(argv []string) int {
 		return st.runLink(opts)
 	}
 
+	if opts.explicit["limit"] && opts.command != "log" {
+		fmt.Fprintln(os.Stderr, "xbpretty: --limit only applies to the log command")
+		usage(os.Stderr)
+		return exitUsage
+	}
+	if opts.command == "log" && cmd == "" {
+		return st.runLog(opts)
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "xbpretty: %v\n", err)

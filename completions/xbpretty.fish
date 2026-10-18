@@ -11,11 +11,14 @@ function __xbpretty_no_subcommand
 end
 
 function __xbpretty_installed
-    LC_ALL=C xbps-query -l 2>/dev/null | awk '{print $2}' | string replace -r '-[^-]*$' ''
+    LC_ALL=C xbps-query -l 2>/dev/null | awk '{print $2}' | string replace -r -- '-[^-]*$' ''
 end
 
 function __xbpretty_available
-    LC_ALL=C xbps-query -Rs (commandline -ct) 2>/dev/null | awk '{print $2}' | string replace -r '-[^-]*$' ''
+    set -l word (commandline -ct)
+    test -n "$word"; or return 0
+    string match -q -- '-*' $word; and return 0
+    LC_ALL=C xbps-query -Rs $word 2>/dev/null | awk '{print $2}' | string replace -r -- '-[^-]*$' ''
 end
 
 for __xbpretty_cmd in xbpretty xbp xbp-install xbp-remove xbp-upgrade xbp-autoremove xbp-update
@@ -38,6 +41,5 @@ for __xbpretty_cmd in xbpretty xbp xbp-install xbp-remove xbp-upgrade xbp-autore
 
     complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install' -a '(__xbpretty_available)'
     complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from remove' -a '(__xbpretty_installed)'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from autoremove' -a '(__xbpretty_installed)'
     complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
 end
