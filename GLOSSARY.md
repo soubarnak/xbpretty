@@ -30,5 +30,6 @@ their own group rather than hiding them.
 _Avoid_: pinned, frozen, locked.
 
 **Transaction log**:
-The append-only file listing one line per successful real execution, in the
+The append-only file listing one line per successful real execution, naming only the
+packages the transaction changed (ADR-0008), in the
 invoking user's state directory. It records transactions; it cannot replay them.

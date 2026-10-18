@@ -67,4 +67,6 @@ figure only where it does the thing the figure measures.
   and columns are padded by display width, so the `→` an upgrade carries —
   three bytes, one column — does not shift the rows under it.
 - The `held:` note a group carries under Install and Upgrade pre-dates this
-  ADR and now repeats what the Hold group already says.
+  ADR and now repeats what the Hold group already says. (Superseded by
+  ADR-0007: the `held:` note is removed and a held package appears under Hold
+  only.)

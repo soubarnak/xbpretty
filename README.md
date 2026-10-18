@@ -87,8 +87,7 @@ and a line never ends in a space. Only packages the transaction changed (install
 reinstall, remove, configure) are listed; held packages are not. `update` lines carry no packages.
 The log cannot replay a transaction. See [ADR-0008](docs/adr/0008-transaction-log-line-format.md).
 
-Configuration lives in
-`$XDG_CONFIG_HOME/xbpretty/config.toml` (`assume_yes`, `color`, `verbose`, `sync`, `log`,
+Configuration lives in `$XDG_CONFIG_HOME/xbpretty/config.toml` (`assume_yes`, `color`, `verbose`, `sync`, `log`,
 `xbps_install_path`, `xbps_remove_path`, `xbps_query_path`). Command-line flags win over the file.
 
 See [xbpretty-spec.md](xbpretty-spec.md) for the full specification.
