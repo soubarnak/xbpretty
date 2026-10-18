@@ -1,6 +1,6 @@
 # ADR-004: The summary's figures follow the transaction, not the plan
 
-- Status: Accepted
+- Status: Accepted (last consequence superseded by ADR-0007)
 - Date: 2026-10-15
 - Relates to: FR-011, FR-012, NFR-004
 - Answers: the open consequence in ADR-003 about held rows and the download total

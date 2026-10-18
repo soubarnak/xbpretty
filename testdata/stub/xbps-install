@@ -3,7 +3,10 @@
 # enough for the acceptance tests - a dry run prints the plan, a real run
 # succeeds or fails according to the fixture variables.
 printf '%s\n' "$*" >> "${XB_STUB_LOG:-/dev/null}"
-case "$*" in
+# A call is a plan when its first argument is a flag cluster (starts with -,
+# not --) containing n. Nothing after the first argument counts.
+case "${1:-}" in
+  --*) ;;
   -*n*)
     printf '%s' "${XB_STUB_STDOUT:-}"
     printf '%s' "${XB_STUB_STDERR:-}" >&2

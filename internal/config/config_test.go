@@ -279,3 +279,32 @@ func TestInvokerFollowsSudoAndDoas(t *testing.T) {
 		})
 	}
 }
+
+// TestTransactionLogPathReadsWithoutCreating pins ticket #21: the path a
+// reader resolves follows the sudo/doas invoker like the writer's, and
+// resolving it creates nothing.
+func TestTransactionLogPathReadsWithoutCreating(t *testing.T) {
+	origEuid, origLookup := euid, lookupUser
+	t.Cleanup(func() { euid, lookupUser = origEuid, origLookup })
+	aliceHome := t.TempDir()
+	lookupUser = func(name string) (*user.User, error) {
+		return &user.User{Username: name, HomeDir: aliceHome}, nil
+	}
+	euid = func() int { return 0 }
+	t.Setenv("SUDO_USER", "alice")
+	t.Setenv("DOAS_USER", "")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", "")
+
+	got, err := TransactionLogPath()
+	if err != nil {
+		t.Fatalf("TransactionLogPath: %v", err)
+	}
+	want := filepath.Join(aliceHome, ".local", "state", "xbpretty", "transactions.log")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(aliceHome, ".local")); err == nil {
+		t.Error("resolving the path created directories")
+	}
+}

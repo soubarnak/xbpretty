@@ -80,10 +80,13 @@ func newEnv(t *testing.T) *env {
 	return e
 }
 
-// isDryRun reports whether a stub invocation was a plan: xbps accepts both
-// `-n` and the combined `-Sn`.
+// isDryRun reports whether a stub invocation was a plan. It is the same rule
+// the stubs use: a call is a plan when its first argument is a flag cluster
+// (starts with `-`, not `--`) containing `n`. Nothing after the first
+// argument counts.
 func isDryRun(cmd string) bool {
-	return strings.Contains(cmd, "-Sn") || strings.Contains(cmd, " -n")
+	first, _, _ := strings.Cut(cmd, " ")
+	return strings.HasPrefix(first, "-") && !strings.HasPrefix(first, "--") && strings.Contains(first, "n")
 }
 
 // setAnswers scripts the prompt's replies. It must be called before run:
@@ -807,6 +810,56 @@ func TestAC012TransactionLogIsWritten(t *testing.T) {
 	if len(line) < 20 || line[4] != '-' || line[10] != 'T' {
 		t.Errorf("log line does not start with an ISO-8601 timestamp: %q", line)
 	}
+	if strings.HasSuffix(string(raw), " \n") {
+		t.Errorf("log line has a trailing space: %q", raw)
+	}
+}
+
+// TestTransactionLogRecordsChangedPackagesOnly pins the log line contract
+// (ADR-0008): an RFC 3339 UTC timestamp, the command, then one name-version
+// entry per changed package, single spaces and no trailing space. A held
+// package is not touched by the transaction, so it is not written.
+func TestTransactionLogRecordsChangedPackagesOnly(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.set("XB_STUB_STDOUT", "figlet-2.2.5_6 install x86_64 https://repo-default.voidlinux.org/current 657000 241000\n"+
+		"linux6.12-6.12.50_1 hold x86_64 https://repo-default.voidlinux.org/current 210000000 32000000\n")
+	code, _, errs := e.run("xbpretty", "install", "figlet", "-y")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	path, err := config.TransactionLog()
+	if err != nil {
+		t.Fatalf("log path: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("transaction log missing: %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("log has %d lines, want 1:\n%s", len(lines), raw)
+	}
+	fields := strings.Split(lines[0], " ")
+	want := []string{"install", "figlet-2.2.5_6"}
+	if len(fields) != 1+len(want) {
+		t.Fatalf("log line = %q, want a timestamp, the command and the changed package only", lines[0])
+	}
+	ts, err := time.Parse(time.RFC3339, fields[0])
+	if err != nil || !strings.HasSuffix(fields[0], "Z") || ts.Location() != time.UTC {
+		t.Errorf("log line does not start with an RFC 3339 UTC timestamp: %q", lines[0])
+	}
+	for i, w := range want {
+		if fields[1+i] != w {
+			t.Errorf("field %d = %q, want %q (line %q)", 1+i, fields[1+i], w, lines[0])
+		}
+	}
+	if strings.Contains(lines[0], "linux6.12") {
+		t.Errorf("log line names a held package: %q", lines[0])
+	}
+	if strings.HasSuffix(lines[0], " ") {
+		t.Errorf("log line has a trailing space: %q", lines[0])
+	}
 }
 
 // TestAC012LogFollowsTheInvokersStateHome is AC-012's `alice` path: with no
@@ -1246,7 +1299,7 @@ func TestUpdateIsLogged(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("log has %d lines, want 1:\n%s", len(lines), raw)
 	}
-	fields := strings.Fields(lines[0])
+	fields := strings.Split(lines[0], " ")
 	if len(fields) != 2 {
 		t.Errorf("log line = %q, want a timestamp and the command alone", lines[0])
 	}
@@ -1501,6 +1554,96 @@ func TestIsTerminalRejectsNonTerminals(t *testing.T) {
 	for name, f := range map[string]*os.File{"/dev/null": null, "pipe": r, "regular file": file} {
 		if isTerminal(f) {
 			t.Errorf("isTerminal(%s) = true, want false", name)
+		}
+	}
+}
+
+const nanoPlanFixture = "nano-8.4_1 install x86_64 https://repo-default.voidlinux.org/current 300000 900000\n"
+
+func TestStubRealInstallOfNanoIsNotAPlan(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.set("XB_STUB_STDOUT", nanoPlanFixture)
+	e.set("XB_STUB_PLAN_EXIT", "0")
+	e.set("XB_STUB_RUN_STDERR", "ERROR: real install of nano failed\n")
+	e.set("XB_STUB_EXIT", "3")
+	code, _, errs := e.run("xbpretty", "install", "nano", "-y")
+	if code != 3 {
+		t.Errorf("exit = %d, want 3 (the real run's code)", code)
+	}
+	if !strings.Contains(errs, "ERROR: real install of nano failed") {
+		t.Errorf("real-run stderr missing, plan streams used instead:\n%s", errs)
+	}
+	var sawReal bool
+	for _, c := range e.commands() {
+		if !isDryRun(c) && strings.HasPrefix(c, "-y") && strings.Contains(c, "nano") {
+			sawReal = true
+		}
+	}
+	if !sawReal {
+		t.Errorf("no real run of nano recorded: %q", e.commands())
+	}
+}
+
+func TestStubRealRemoveOfPackageWithNIsNotAPlan(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.set("XB_STUB_STDOUT", "nano-8.4_1 remove x86_64 https://repo-default.voidlinux.org/current 300000 900000\n")
+	e.set("XB_STUB_RUN_STDERR", "ERROR: real remove of nano failed\n")
+	e.set("XB_STUB_EXIT", "4")
+	code, _, errs := e.run("xbpretty", "remove", "nano", "-y")
+	if code != 4 {
+		t.Errorf("exit = %d, want 4 (the real run's code)", code)
+	}
+	if !strings.Contains(errs, "ERROR: real remove of nano failed") {
+		t.Errorf("real-run stderr missing, plan streams used instead:\n%s", errs)
+	}
+}
+
+// TestStubClassifiesEveryArgvShape runs both stubs directly with every argv
+// shape xbpretty sends and checks the stub and the helper agree.
+func TestStubClassifiesEveryArgvShape(t *testing.T) {
+	stubDir, err := filepath.Abs("../../testdata/stub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shapes := []struct {
+		args []string
+		plan bool
+	}{
+		{[]string{"-Sn", "nano"}, true},
+		{[]string{"-n", "nano"}, true},
+		{[]string{"-Sun"}, true},
+		{[]string{"-un"}, true},
+		{[]string{"-on"}, true},
+		{[]string{"-Sn", "nano", "--", "-f"}, true},
+		{[]string{"-y", "nano"}, false},
+		{[]string{"-y", "-u"}, false},
+		{[]string{"-y", "-o"}, false},
+		{[]string{"-S"}, false},
+		{[]string{}, false},
+		{[]string{"-y", "nano", "-n"}, false},
+		{[]string{"-y", "nano", "--", "-n"}, false},
+		{[]string{"-S", "nano", "-n"}, false},
+	}
+	for _, name := range []string{"xbps-install", "xbps-remove"} {
+		for _, sh := range shapes {
+			cmd := exec.Command(filepath.Join(stubDir, name), sh.args...)
+			cmd.Env = append(os.Environ(),
+				"XB_STUB_LOG=/dev/null",
+				"XB_STUB_STDOUT=PLANOUT", "XB_STUB_STDERR=",
+				"XB_STUB_RUN_STDOUT=REALOUT",
+			)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("%s %v: %v", name, sh.args, err)
+			}
+			if gotPlan := string(out) == "PLANOUT"; gotPlan != sh.plan {
+				t.Errorf("%s %v: stub plan = %v, want %v", name, sh.args, gotPlan, sh.plan)
+			}
+			if got := isDryRun(strings.Join(sh.args, " ")); got != sh.plan {
+				t.Errorf("isDryRun(%v) = %v, want %v", sh.args, got, sh.plan)
+			}
 		}
 	}
 }
