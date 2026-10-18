@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -20,6 +21,8 @@ type options struct {
 	command    string
 	args       []string
 	passthru   []string
+	dashDash   bool // a `--` was given, even with nothing after it
+	limit      int  // --limit N for `log`; 0 means not given
 	explicit   map[string]bool
 }
 
@@ -35,6 +38,7 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 		arg := argv[i]
 		switch {
 		case arg == "--":
+			o.dashDash = true
 			o.passthru = append(o.passthru, argv[i+1:]...)
 			i = len(argv)
 		case strings.HasPrefix(arg, "--"):
@@ -67,6 +71,20 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 				}
 				o.color = value
 				o.explicit["color"] = true
+			case "limit":
+				if !hasValue {
+					if i+1 >= len(argv) {
+						return nil, fmt.Errorf("--limit needs a positive integer")
+					}
+					i++
+					value = argv[i]
+				}
+				n, err := strconv.Atoi(value)
+				if err != nil || n < 1 {
+					return nil, fmt.Errorf("--limit must be a positive integer, got %q", value)
+				}
+				o.limit = n
+				o.explicit["limit"] = true
 			case "version":
 				o.version = true
 			case "help":
@@ -130,6 +148,10 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 	case rest[0] == "link":
 		o.command = "link"
 		o.args = rest[1:]
+	case rest[0] == "log":
+		// `xbp log` only: no xbp-log link name, so argv[0] never reaches here.
+		o.command = "log"
+		o.args = rest[1:]
 	default:
 		cmd, ok := aliases[rest[0]]
 		if !ok {
@@ -162,6 +184,7 @@ Commands:
   update      refresh the index only  (wraps xbps-install -S)
   completion  print a completion script for bash, zsh or fish
   link        create the xbp symlinks in a directory
+  log         print the transaction log (log [--limit N] [package...])
 
 Flags:
   -n, --dry-run     show the plan without changing anything
@@ -169,6 +192,7 @@ Flags:
   -v, --verbose     print every xbps command before running it
       --no-sync     do not refresh the repository index
       --no-log      do not append to the transaction log
+      --limit N     with log: keep only the last N matching lines
       --color=WHEN  colour the summary: auto, always or never
       --version     print version information
 

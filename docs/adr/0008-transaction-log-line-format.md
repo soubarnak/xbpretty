@@ -65,3 +65,31 @@ the same shape and are read as they are; nothing rewrites them.
 - Old lines in an existing log may still list held packages. A filter by
   package name can therefore show a line where an old transaction only held
   that package.
+
+## The `xbp log` command
+
+`xbp log [--limit N] [package...]` is the reader this contract exists for.
+
+- It prints matching lines verbatim to stdout, oldest first, and writes
+  nothing else there. It reads the path FR-013 and FR-019 resolve, so under
+  sudo or doas it reads the invoking user's log. It resolves that path without
+  creating directories, needs no root, never writes the log, never runs xbps
+  and never prompts.
+- A package argument is a name without a version. A line matches when any
+  package entry on it, split at the last hyphen (`xbps.SplitPkgver`, the rule
+  the summary uses), has exactly that name. `curl` matches `curl-8.10.1_1` and
+  not `libcurl-8.10.1_1`. Several names match any of them. `update` lines carry
+  no entries, so they never match a filter. Filtering never matches the
+  timestamp or the command word.
+- `--limit N` takes a positive integer and keeps the last N matching lines;
+  the filter applies first. A zero, negative or non-numeric N is a usage error
+  (exit 2), as is `--limit` on any other command.
+- A missing or empty log prints one line on stderr saying nothing has been
+  logged yet, and exits 0. A log that exists but cannot be read prints an
+  error on stderr and exits 1. A non-empty log with no match prints nothing
+  and exits 0.
+- `--dry-run`, `--yes`, `--no-sync` and arguments after `--` are usage errors
+  (exit 2): no xbps command runs, so they mean nothing. `--color` and
+  `--verbose` are accepted and have no effect.
+- `log` is reached as `xbp log` or `xbpretty log` only. There is no `xbp-log`
+  link, so the binary keeps its six names and AC-026 stands.
