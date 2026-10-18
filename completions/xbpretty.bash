@@ -19,14 +19,14 @@ _xbpretty_available() {
     return 0
   fi
 
-  local cmds="install remove upgrade autoremove update completion link"
+  local cmds="install remove upgrade autoremove update completion link log"
   local flags="-n --dry-run -y --yes -v --verbose --no-sync --no-log --color --version"
 
   # which subcommand are we in?
   local sub="" i
   for (( i=1; i < COMP_CWORD; i++ )); do
     case "${COMP_WORDS[i]}" in
-      install|remove|upgrade|autoremove|update|completion|link)
+      install|remove|upgrade|autoremove|update|completion|link|log)
         sub="${COMP_WORDS[i]}"; break ;;
       --)
         break ;;
@@ -38,7 +38,12 @@ _xbpretty_available() {
     return 0
   fi
 
+  if [[ "$prev" == "--limit" ]]; then
+    return 0
+  fi
+
   if [[ "$cur" == -* ]]; then
+    [[ "$sub" == "log" ]] && flags="$flags --limit"
     COMPREPLY=( $(compgen -W "$flags" -- "$cur") )
     return 0
   fi
@@ -47,6 +52,8 @@ _xbpretty_available() {
     install)
       COMPREPLY=( $(compgen -W "$(_xbpretty_available "$cur")" -- "$cur") ) ;;
     remove)
+      COMPREPLY=( $(compgen -W "$(_xbpretty_installed)" -- "$cur") ) ;;
+    log)
       COMPREPLY=( $(compgen -W "$(_xbpretty_installed)" -- "$cur") ) ;;
     completion)
       COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") ) ;;

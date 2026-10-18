@@ -24,6 +24,7 @@ _xbpretty() {
     'update:refresh the repository index'
     'completion:print a shell completion script'
     'link:create xbp symlinks'
+    'log:print the transaction log'
   )
 
   if (( CURRENT == 2 )); then
@@ -35,6 +36,15 @@ _xbpretty() {
   case "${words[2]}" in
     install) _xbpretty_available "${words[CURRENT]}" ;;
     remove) _xbpretty_installed ;;
+    log)
+      if [[ "${words[CURRENT]}" == -* ]]; then
+        local -a logopts
+        logopts=(--limit)
+        _describe 'option' logopts
+      else
+        _xbpretty_installed
+      fi
+      ;;
     completion) _values 'shell' bash zsh fish ;;
     *)
       _arguments \
