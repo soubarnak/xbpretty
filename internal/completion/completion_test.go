@@ -233,7 +233,7 @@ func probeCompletion(t *testing.T, shell string, words ...string) completionProb
 	case "zsh":
 		// Stand in for the completion builtins: _describe prints the
 		// candidates it is given, the others print nothing.
-		probe := "_describe() { print -l -- \"${(P)2[@]}\" }\n" +
+		probe := "_describe() { local arr=${@[-1]}; print -l -- \"${(@P)arr}\" }\n" +
 			"_arguments() { : }\n_values() { : }\n" +
 			"words=(" + strings.Join(quoted, " ") + ")\n" +
 			"CURRENT=" + strconv.Itoa(len(words)) + "\n" +
@@ -258,7 +258,12 @@ func probeCompletion(t *testing.T, shell string, words ...string) completionProb
 	var p completionProbe
 	for _, line := range strings.Split(string(out), "\n") {
 		// fish prints "name<TAB>description"; keep the name only.
-		if name, _, _ := strings.Cut(line, "\t"); name != "" {
+		name, _, _ := strings.Cut(line, "\t")
+		if shell == "zsh" {
+			// zsh _describe candidates read "name:description".
+			name, _, _ = strings.Cut(name, ":")
+		}
+		if name != "" {
 			p.offered = append(p.offered, name)
 		}
 	}
@@ -321,6 +326,35 @@ func TestCompletionQueryRules(t *testing.T) {
 					if offers(p, "htop") || offers(p, "figlet") {
 						t.Errorf("word %q: package names offered: %q", word, p.offered)
 					}
+				}
+			})
+			t.Run("the command list offers log", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "")
+				if !offers(p, "log") {
+					t.Errorf("log not offered after xbp: %q", p.offered)
+				}
+			})
+			t.Run("log offers installed names", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "log", "")
+				if len(p.calls) != 1 || p.calls[0] != "-l" {
+					t.Errorf("xbps-query calls = %q, want exactly [\"-l\"]", p.calls)
+				}
+				for _, name := range []string{"figlet", "htop"} {
+					if !offers(p, name) {
+						t.Errorf("%s not offered: %q", name, p.offered)
+					}
+				}
+			})
+			t.Run("log on a flag queries nothing and offers --limit", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "log", "-")
+				if len(p.calls) != 0 {
+					t.Errorf("xbps-query was called: %q", p.calls)
+				}
+				if !offers(p, "--limit") {
+					t.Errorf("--limit not offered: %q", p.offered)
+				}
+				if offers(p, "figlet") {
+					t.Errorf("package names offered on a flag word: %q", p.offered)
 				}
 			})
 			t.Run("remove offers installed names", func(t *testing.T) {

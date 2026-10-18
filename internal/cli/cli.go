@@ -11,7 +11,7 @@ import (
 var Version = "dev"
 
 // Commands are the subcommands xbpretty dispatches on.
-var Commands = []string{"install", "remove", "upgrade", "autoremove", "update", "completion", "link"}
+var Commands = []string{"install", "remove", "upgrade", "autoremove", "update", "completion", "link", "log"}
 
 // aliases maps a subcommand name to the words that select it.
 var aliases = map[string]string{

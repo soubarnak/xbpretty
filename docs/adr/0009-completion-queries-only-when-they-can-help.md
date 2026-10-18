@@ -81,6 +81,16 @@ fixed 0.3 to 0.4 s per TAB on a started word in `install`. Whether that
 justifies a cache is for a later effort, which should repeat this measurement
 on an idle host.
 
+## Note: `log` completion (ticket #22)
+
+`log` joins the command list in bash, zsh and fish. `xbp log` completes
+installed package names for its filter, from the same local `xbps-query -l`
+that `remove` uses. Packages removed since are not offered; completing from
+the log file itself is not done. On a word that starts with `-` it runs no
+`xbps-query` and offers `--limit`, and bash offers nothing after `--limit`
+since the value is a number. The query rules above are otherwise unchanged,
+and the runtime tests cover `log` in every shell.
+
 ## Consequences
 
 - `xbp install <TAB>` on an empty word offers nothing.
