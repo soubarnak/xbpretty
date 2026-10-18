@@ -810,6 +810,56 @@ func TestAC012TransactionLogIsWritten(t *testing.T) {
 	if len(line) < 20 || line[4] != '-' || line[10] != 'T' {
 		t.Errorf("log line does not start with an ISO-8601 timestamp: %q", line)
 	}
+	if strings.HasSuffix(string(raw), " \n") {
+		t.Errorf("log line has a trailing space: %q", raw)
+	}
+}
+
+// TestTransactionLogRecordsChangedPackagesOnly pins the log line contract
+// (ADR-0008): an RFC 3339 UTC timestamp, the command, then one name-version
+// entry per changed package, single spaces and no trailing space. A held
+// package is not touched by the transaction, so it is not written.
+func TestTransactionLogRecordsChangedPackagesOnly(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.set("XB_STUB_STDOUT", "figlet-2.2.5_6 install x86_64 https://repo-default.voidlinux.org/current 657000 241000\n"+
+		"linux6.12-6.12.50_1 hold x86_64 https://repo-default.voidlinux.org/current 210000000 32000000\n")
+	code, _, errs := e.run("xbpretty", "install", "figlet", "-y")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	path, err := config.TransactionLog()
+	if err != nil {
+		t.Fatalf("log path: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("transaction log missing: %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("log has %d lines, want 1:\n%s", len(lines), raw)
+	}
+	fields := strings.Split(lines[0], " ")
+	want := []string{"install", "figlet-2.2.5_6"}
+	if len(fields) != 1+len(want) {
+		t.Fatalf("log line = %q, want a timestamp, the command and the changed package only", lines[0])
+	}
+	ts, err := time.Parse(time.RFC3339, fields[0])
+	if err != nil || !strings.HasSuffix(fields[0], "Z") || ts.Location() != time.UTC {
+		t.Errorf("log line does not start with an RFC 3339 UTC timestamp: %q", lines[0])
+	}
+	for i, w := range want {
+		if fields[1+i] != w {
+			t.Errorf("field %d = %q, want %q (line %q)", 1+i, fields[1+i], w, lines[0])
+		}
+	}
+	if strings.Contains(lines[0], "linux6.12") {
+		t.Errorf("log line names a held package: %q", lines[0])
+	}
+	if strings.HasSuffix(lines[0], " ") {
+		t.Errorf("log line has a trailing space: %q", lines[0])
+	}
 }
 
 // TestAC012LogFollowsTheInvokersStateHome is AC-012's `alice` path: with no
@@ -1249,7 +1299,7 @@ func TestUpdateIsLogged(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("log has %d lines, want 1:\n%s", len(lines), raw)
 	}
-	fields := strings.Fields(lines[0])
+	fields := strings.Split(lines[0], " ")
 	if len(fields) != 2 {
 		t.Errorf("log line = %q, want a timestamp and the command alone", lines[0])
 	}
