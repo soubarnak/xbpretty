@@ -118,7 +118,7 @@ func (st *state) plan(cmd string, opts *options, wantSync *bool) ([]xbps.Row, in
 	if res.exitCode != 0 {
 		fmt.Fprint(st.stderr, res.stderr)
 		fmt.Fprint(st.stdout, res.stdout)
-		if h := hints.Lookup(res.exitCode, res.stderr); h != nil {
+		if h := hints.Lookup(res.exitCode, res.output()); h != nil {
 			fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
 		}
 		return nil, res.exitCode
@@ -129,7 +129,7 @@ func (st *state) plan(cmd string, opts *options, wantSync *bool) ([]xbps.Row, in
 	// error still on stderr. A successful dry run is therefore checked too,
 	// so the breakage is never reported as a plain "Nothing to do."; the
 	// exit code stays xbps's own.
-	if h := hints.Lookup(res.exitCode, res.stderr); h != nil {
+	if h := hints.Lookup(res.exitCode, res.output()); h != nil {
 		fmt.Fprint(st.stderr, res.stderr)
 		fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
 	}

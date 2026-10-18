@@ -9,6 +9,8 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+
+	"github.com/soubarnak/xbpretty/internal/hints"
 )
 
 // result is the outcome of running one xbps command.
@@ -16,6 +18,12 @@ type result struct {
 	exitCode int
 	stdout   string
 	stderr   string
+}
+
+// output is both streams of the run, as the hint table reads them: xbps writes
+// some failures to stdout and some to stderr (ADR-0006).
+func (r result) output() hints.Output {
+	return hints.Output{Stdout: r.stdout, Stderr: r.stderr}
 }
 
 // run captures a command's output and returns it. Used for dry runs and for

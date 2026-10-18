@@ -1,0 +1,2 @@
+CMD: xbps-remove -yn this-package-does-not-exist-xyz
+EXIT: 2

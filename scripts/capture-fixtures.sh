@@ -8,12 +8,15 @@
 #
 #   <root>/parser/<key>/<case>.txt    the dry-run stdout internal/xbps parses
 #   <root>/hints/<key>/<case>.txt     the stderr internal/hints matches a hint on
+#   <root>/hints/<key>/<case>.out     its stdout, matched too (ADR-0006)
 #   <root>/lookups/<key>/<case>.txt   the stdout of an xbps-query the CLI reads
 #   <root>/<kind>/<key>/<case>.meta   the command, its exit code, and the state
 #                                     the capture had to induce first
 #
 # The remaining stream of each case is kept beside its fixture: `.err` next to
-# a plan case, `.out` next to a hint case. <key> is the running xbps version
+# a plan case. A hint case keeps both streams under the same names every time,
+# `.txt` for stderr and `.out` for stdout, because xbps writes some failures to
+# one and some to the other. <key> is the running xbps version
 # with its dots dropped (0.60.7_1 -> 0607), so a capture lands in the
 # directory of the version that produced it.
 #
@@ -199,6 +202,9 @@ cap_hold_list() {
 capture_pre() {
 	set_dirs
 	hint_case xbps-unsigned-update xbps-install -Sn htop curl wget
+	# The same refusal on the other stream: an upgrade gets it on stdout.
+	hint_case xbps-unsigned-update-upgrade xbps-install -Syu
+	hint_case not-installed xbps-remove -yn this-package-does-not-exist-xyz
 
 	plan_case upgrade xbps-install -Sun
 
@@ -268,9 +274,9 @@ capture_host() {
 	# FR-017's other failures. `ignorepkg` is absent on purpose: it prints
 	# nothing at all, so there is no stderr to match (ADR-0002 #3).
 	hint_case not-found xbps-install -Sn this-package-does-not-exist-xyz
-	# The "not installed" message goes to stdout, so no hint can match it:
-	# captured as both streams, with no fixture for a test to read.
-	cap hints not-installed both xbps-remove -yn this-package-does-not-exist-xyz
+	# The "not installed" message is on stdout with nothing on stderr, so its
+	# hint matches the stdout half of the capture (ADR-0006).
+	hint_case not-installed xbps-remove -yn this-package-does-not-exist-xyz
 
 	lookup_case xbps xbps-query -p pkgver,installed_size xbps
 	lookup_case base-files xbps-query -p pkgver,installed_size base-files

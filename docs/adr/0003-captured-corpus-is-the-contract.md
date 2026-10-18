@@ -75,6 +75,7 @@ run does not reach.
   downloaded; whether the footer's download total should count them is
   unanswered here.
 - The `not-installed` hint entry stays in the table but is unreachable until
-  the stream question in (4) is settled.
+  the stream question in (4) is settled. ADR-0006 settles it: a hint is matched
+  on the streams xbps writes its failure to.
 - `lookupOld` issues the same one-package-per-call lookups as before; only the
   reading of the answer changed (ADR-001 stands).

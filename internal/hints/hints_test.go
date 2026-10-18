@@ -10,54 +10,66 @@ import (
 
 const fixtureDir = "../../testdata/hints/"
 
-// loadFixture reads a captured stderr file and the exit code in its .meta.
-func loadFixture(t *testing.T, path string) (string, int) {
+// loadFixture reads a captured case: the stderr in <case>.txt, the stdout in
+// <case>.out and the exit code in <case>.meta. A case with no .out predates
+// the stdout half of the capture, so it carries stderr alone.
+func loadFixture(t *testing.T, name string) (Output, int) {
 	t.Helper()
-	raw, err := os.ReadFile(fixtureDir + path)
-	if err != nil {
-		t.Fatalf("reading fixture %s: %v", path, err)
+	read := func(ext string) (string, bool) {
+		raw, err := os.ReadFile(fixtureDir + name + ext)
+		if os.IsNotExist(err) {
+			return "", false
+		}
+		if err != nil {
+			t.Fatalf("reading fixture %s%s: %v", name, ext, err)
+		}
+		return string(raw), true
 	}
-	meta, err := os.ReadFile(fixtureDir + strings.Replace(path, ".txt", ".meta", 1))
-	if err != nil {
-		t.Fatalf("reading fixture meta for %s: %v", path, err)
+	stderr, ok := read(".txt")
+	if !ok {
+		t.Fatalf("fixture %s has no stderr capture", name)
+	}
+	stdout, _ := read(".out")
+	meta, ok := read(".meta")
+	if !ok {
+		t.Fatalf("fixture %s has no meta", name)
 	}
 	var exitCode int
-	for _, line := range strings.Split(string(meta), "\n") {
+	for _, line := range strings.Split(meta, "\n") {
 		if rest, ok := strings.CutPrefix(line, "EXIT: "); ok {
 			n, err := strconv.Atoi(strings.TrimSpace(rest))
 			if err != nil {
-				t.Fatalf("parsing exit code in %s: %v", path, err)
+				t.Fatalf("parsing exit code in %s: %v", name, err)
 			}
 			exitCode = n
 		}
 	}
-	return string(raw), exitCode
+	return Output{Stdout: stdout, Stderr: stderr}, exitCode
 }
 
 // TestCapturedCasesMatch is NFR-004's promise: every captured failure must
 // still match its hint. If xbps changes its wording, this fails.
-//
-// The not-installed case is absent on purpose: xbps prints "is not currently
-// installed" on stdout, not stderr, so a stderr-only match cannot fire for it
-// (testdata/hints/0607/not-installed.out carries the capture).
 func TestCapturedCasesMatch(t *testing.T) {
 	tests := []struct {
 		fixture string
 		hint    string
 	}{
-		{"0607/stale-index.txt", "stale-index"},
-		{"0607/stale-index-upgrade.txt", "stale-index"},
-		{"0607/not-found.txt", "not-found"},
-		{"0607/lock-wait.txt", "lock-wait"},
-		{"0591/xbps-unsigned-update.txt", "xbps-unsigned-update"},
-		{"0591/not-found.txt", "not-found"},
+		{"0607/stale-index", "stale-index"},
+		{"0607/stale-index-upgrade", "stale-index"},
+		{"0607/not-found", "not-found"},
+		{"0607/not-installed", "not-installed"},
+		{"0607/lock-wait", "lock-wait"},
+		{"0591/xbps-unsigned-update", "xbps-unsigned-update"},
+		{"0591/xbps-unsigned-update-upgrade", "xbps-unsigned-update"},
+		{"0591/not-found", "not-found"},
+		{"0591/not-installed", "not-installed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.fixture, func(t *testing.T) {
-			stderr, exitCode := loadFixture(t, tt.fixture)
-			hint := Lookup(exitCode, stderr)
+			out, exitCode := loadFixture(t, tt.fixture)
+			hint := Lookup(exitCode, out)
 			if hint == nil {
-				t.Fatalf("exit %d with captured stderr matched no hint:\n%s", exitCode, stderr)
+				t.Fatalf("exit %d with captured output matched no hint:\nstdout:\n%s\nstderr:\n%s", exitCode, out.Stdout, out.Stderr)
 			}
 			if hint.Name != tt.hint {
 				t.Errorf("got hint %q, want %q", hint.Name, tt.hint)
@@ -69,14 +81,86 @@ func TestCapturedCasesMatch(t *testing.T) {
 	}
 }
 
+// TestHintsMatchWhereXbpsWritesThem is ADR-0006: a message xbps writes to one
+// stream does not fire its hint when it turns up on the other, so a captured
+// message is matched on its own stream and only there. xbps-unsigned-update
+// is the one entry measured on both, and the one that fires either way.
+func TestHintsMatchWhereXbpsWritesThem(t *testing.T) {
+	tests := []struct {
+		fixture string
+		// onStream is where the capture holds the message; fires reports
+		// whether the same text moved to the other stream still matches.
+		onStream Stream
+		fires    bool
+	}{
+		{"0607/stale-index", Stderr, false},
+		{"0607/not-found", Stderr, false},
+		{"0607/lock-wait", Stderr, false},
+		{"0591/not-found", Stderr, false},
+		{"0607/not-installed", Stdout, false},
+		{"0591/not-installed", Stdout, false},
+		{"0591/xbps-unsigned-update", Stderr, true},
+		{"0591/xbps-unsigned-update-upgrade", Stdout, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.fixture, func(t *testing.T) {
+			out, exitCode := loadFixture(t, tt.fixture)
+			message := out.on(tt.onStream)
+			if message == "" {
+				t.Fatalf("fixture holds nothing on the stream it is meant to carry")
+			}
+			if Lookup(exitCode, Output{Stdout: out.Stdout, Stderr: out.Stderr}) == nil {
+				t.Fatal("the captured output matched no hint")
+			}
+			moved := Output{Stderr: message}
+			if tt.onStream == Stderr {
+				moved = Output{Stdout: message}
+			}
+			got := Lookup(exitCode, moved)
+			if tt.fires && got == nil {
+				t.Errorf("the message on the other stream matched nothing; want a hint")
+			}
+			if !tt.fires && got != nil {
+				t.Errorf("the message on the other stream matched %q; want none", got.Name)
+			}
+		})
+	}
+}
+
+// TestNotInstalledIsReachableFromStdoutAlone is the ticket's own failure: the
+// message is on stdout with stderr empty, so a stderr-only match never fired.
+func TestNotInstalledIsReachableFromStdoutAlone(t *testing.T) {
+	out, exitCode := loadFixture(t, "0607/not-installed")
+	if out.Stderr != "" {
+		t.Fatalf("fixture stderr = %q, want empty", out.Stderr)
+	}
+	hint := Lookup(exitCode, out)
+	if hint == nil || hint.Name != "not-installed" {
+		t.Fatalf("Lookup = %v, want not-installed", hint)
+	}
+}
+
+// TestEveryHintNamesItsStreams keeps the table honest: an entry with no stream
+// could never fire, and one with no substring would fire on anything.
+func TestEveryHintNamesItsStreams(t *testing.T) {
+	for _, h := range Table {
+		if len(h.Streams) == 0 {
+			t.Errorf("hint %q names no stream", h.Name)
+		}
+		if h.Contains == "" {
+			t.Errorf("hint %q has an empty substring", h.Name)
+		}
+	}
+}
+
 // TestStaleIndexFiresOnBothExitCodes records the capture where a stale index
 // fails an install with exit 2 but leaves an upgrade with exit 0.
 func TestStaleIndexFiresOnBothExitCodes(t *testing.T) {
-	stderr, exitCode := loadFixture(t, "0607/stale-index-upgrade.txt")
+	out, exitCode := loadFixture(t, "0607/stale-index-upgrade")
 	if exitCode != 0 {
 		t.Fatalf("fixture exit code = %d, want 0", exitCode)
 	}
-	hint := Lookup(exitCode, stderr)
+	hint := Lookup(exitCode, out)
 	if hint == nil {
 		t.Fatal("expected a hint for a stale index regardless of exit code")
 	}
@@ -90,18 +174,19 @@ func TestUnmatchedFailureGetsNoHint(t *testing.T) {
 	tests := []struct {
 		name     string
 		exitCode int
-		stderr   string
+		out      Output
 	}{
-		{"unknown message", 2, "ERROR: something unprecedented happened.\n"},
-		{"right code wrong text", 2, "ERROR: the moon is in the wrong phase.\n"},
-		{"right text wrong code", 16, "ERROR: something unprecedented happened.\n"},
-		{"success with no warning", 0, ""},
-		{"success with unrelated text", 0, "ERROR: something unprecedented happened.\n"},
+		{"unknown message", 2, Output{Stderr: "ERROR: something unprecedented happened.\n"}},
+		{"unknown message on stdout", 2, Output{Stdout: "ERROR: something unprecedented happened.\n"}},
+		{"right code wrong text", 2, Output{Stderr: "ERROR: the moon is in the wrong phase.\n"}},
+		{"right text wrong code", 16, Output{Stderr: "ERROR: something unprecedented happened.\n"}},
+		{"success with no warning", 0, Output{}},
+		{"success with unrelated text", 0, Output{Stderr: "ERROR: something unprecedented happened.\n"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if hint := Lookup(tt.exitCode, tt.stderr); hint != nil {
-				t.Errorf("Lookup(%d, %q) = %q, want nil", tt.exitCode, tt.stderr, hint.Name)
+			if hint := Lookup(tt.exitCode, tt.out); hint != nil {
+				t.Errorf("Lookup(%d, %+v) = %q, want nil", tt.exitCode, tt.out, hint.Name)
 			}
 		})
 	}
@@ -110,13 +195,13 @@ func TestUnmatchedFailureGetsNoHint(t *testing.T) {
 // TestBothDimensionsMustMatch proves neither the exit code nor the stderr
 // substring fires a hint on its own.
 func TestBothDimensionsMustMatch(t *testing.T) {
-	if hint := Lookup(16, "failed to open repodata"); hint != nil {
+	if hint := Lookup(16, Output{Stderr: "failed to open repodata"}); hint != nil {
 		t.Errorf("exit code 16 with a stale-index message matched %q", hint.Name)
 	}
-	if hint := Lookup(2, "package database locked"); hint != nil {
+	if hint := Lookup(2, Output{Stderr: "package database locked"}); hint != nil {
 		t.Errorf("exit code 2 with a lock message matched %q", hint.Name)
 	}
-	if hint := Lookup(2, "failed to open repodata"); hint == nil {
+	if hint := Lookup(2, Output{Stderr: "failed to open repodata"}); hint == nil {
 		t.Error("exit code 2 with a stale-index message matched nothing")
 	}
 }
@@ -124,10 +209,10 @@ func TestBothDimensionsMustMatch(t *testing.T) {
 // TestShortSubstrings pins the patterns to short substrings, never full lines.
 func TestShortSubstrings(t *testing.T) {
 	for _, h := range Table {
-		if len(h.StderrContains) > 60 {
-			t.Errorf("hint %q substring is %d characters; keep patterns short", h.Name, len(h.StderrContains))
+		if len(h.Contains) > 60 {
+			t.Errorf("hint %q substring is %d characters; keep patterns short", h.Name, len(h.Contains))
 		}
-		if strings.Contains(h.StderrContains, "\n") {
+		if strings.Contains(h.Contains, "\n") {
 			t.Errorf("hint %q substring spans lines", h.Name)
 		}
 	}

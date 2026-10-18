@@ -100,8 +100,11 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 		return exitOK
 	}
 
-	// FR-017: the raw xbps output stays, then one matching hint if any.
-	if h := hints.Lookup(code, stderr); h != nil {
+	// FR-017: the raw xbps output stays, then one matching hint if any. Only
+	// stderr is kept from a real run: stdout goes straight to the terminal so
+	// xbps still sees one. A failure that lives on stdout alone is only caught
+	// when the dry run that came first already printed it (ADR-0006).
+	if h := hints.Lookup(code, hints.Output{Stderr: stderr}); h != nil {
 		fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
 	}
 	if len(rows) > 0 && rows[0].Action == "remove" {

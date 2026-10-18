@@ -323,6 +323,72 @@ func TestAC015FailureGetsHint(t *testing.T) {
 	}
 }
 
+// hintCapture reads the stdout half of a captured hint case.
+func hintCapture(t *testing.T, name string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("../../testdata/hints", name+".out"))
+	if err != nil {
+		t.Fatalf("reading capture %s: %v", name, err)
+	}
+	return string(raw)
+}
+
+// TestFailureWrittenToStdoutGetsHint is ADR-0006: xbps-remove says a package
+// is not installed on stdout with nothing on stderr, and the plan step has to
+// find the hint there while the raw text is still printed once, unchanged and
+// the exit code stays xbps's own. The second case exercises the mechanism on
+// the outdated-xbps text, which xbps writes to stdout for an upgrade; the
+// measured 0.59.1 flow differs, since its dry run succeeds and only the real
+// run is refused (ADR-0006, "the real run reads stderr").
+func TestFailureWrittenToStdoutGetsHint(t *testing.T) {
+	tests := []struct {
+		name    string
+		capture string
+		argv    []string
+		exit    string
+		want    string
+	}{
+		{"not installed", "0607/not-installed", []string{"remove", "this-package-does-not-exist-xyz", "-n"}, "2", "nothing to remove"},
+		{"outdated xbps text on stdout", "0591/xbps-unsigned-update-upgrade", []string{"upgrade", "-n"}, "16", "xbps-install -u xbps"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.root = true
+			raw := hintCapture(t, tt.capture)
+			e.set("XB_STUB_STDOUT", raw)
+			e.set("XB_STUB_STDERR", "")
+			e.set("XB_STUB_PLAN_EXIT", tt.exit)
+			code, out, errs := e.run(append([]string{"xbpretty"}, tt.argv...)...)
+			if strconv.Itoa(code) != tt.exit {
+				t.Errorf("exit = %d, want %s (xbps's code)", code, tt.exit)
+			}
+			if out != raw {
+				t.Errorf("stdout = %q, want xbps's own %q", out, raw)
+			}
+			if !strings.Contains(errs, "hint:") || !strings.Contains(errs, tt.want) {
+				t.Errorf("stderr is missing the hint naming %q:\n%s", tt.want, errs)
+			}
+		})
+	}
+}
+
+// TestStdoutMessageOnTheWrongCodeGetsNoHint keeps AC-016 over the new stream:
+// the not-installed text on stdout with another exit code is not that failure.
+func TestStdoutMessageOnTheWrongCodeGetsNoHint(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.set("XB_STUB_STDOUT", hintCapture(t, "0607/not-installed"))
+	e.set("XB_STUB_PLAN_EXIT", "1")
+	code, _, errs := e.run("xbpretty", "remove", "this-package-does-not-exist-xyz", "-n")
+	if code != 1 {
+		t.Errorf("exit = %d, want 1", code)
+	}
+	if strings.Contains(errs, "hint:") {
+		t.Errorf("guessed a hint:\n%s", errs)
+	}
+}
+
 func TestAC016UnmatchedFailureGetsNoHint(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
