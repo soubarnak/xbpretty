@@ -4,7 +4,6 @@ package summary
 
 import (
 	"io"
-	"sort"
 	"strings"
 )
 
@@ -159,24 +158,23 @@ type Renderer struct {
 
 // Render writes the grouped summary and its footer to w.
 func (r Renderer) Render(w io.Writer, s *Summary) error {
-	holdNote := r.holdNote(s)
 	if hasListable(s.Install) {
-		if err := r.group(w, "Install", s.Install, s, holdNote); err != nil {
+		if err := r.group(w, "Install", s.Install, s); err != nil {
 			return err
 		}
 	}
 	if hasListable(s.Upgrade) {
-		if err := r.group(w, "Upgrade", s.Upgrade, s, holdNote); err != nil {
+		if err := r.group(w, "Upgrade", s.Upgrade, s); err != nil {
 			return err
 		}
 	}
 	if hasListable(s.Remove) {
-		if err := r.group(w, "Remove", s.Remove, s, holdNote); err != nil {
+		if err := r.group(w, "Remove", s.Remove, s); err != nil {
 			return err
 		}
 	}
 	if hasListable(s.Hold) {
-		if err := r.group(w, "Hold", s.Hold, s, holdNote); err != nil {
+		if err := r.group(w, "Hold", s.Hold, s); err != nil {
 			return err
 		}
 	}
@@ -184,36 +182,18 @@ func (r Renderer) Render(w io.Writer, s *Summary) error {
 	return err
 }
 
-func (r Renderer) holdNote(s *Summary) string {
-	if len(s.Hold) == 0 {
-		return ""
-	}
-	names := make([]string, 0, len(s.Hold))
-	for _, row := range s.Hold {
-		names = append(names, row.Name)
-	}
-	sort.Strings(names)
-	return "held: " + strings.Join(names, ", ")
-}
-
-func (r Renderer) group(w io.Writer, title string, rows []Row, s *Summary, holdNote string) error {
+func (r Renderer) group(w io.Writer, title string, rows []Row, s *Summary) error {
 	if _, err := io.WriteString(w, r.paint(boldSeq, title)+"\n"); err != nil {
 		return err
 	}
 	shown := listable(rows)
 	nameWidth := widest(func(i int) string { return shown[i].Name }, len(shown))
 	verWidth := widest(func(i int) string { return s.version(shown[i]) }, len(shown))
-	sizeWidth := widest(func(i int) string { return r.size(shown[i]) }, len(shown))
 	for i := range shown {
 		line := padRight(shown[i].Name, nameWidth) + "  " +
 			padRight(s.version(shown[i]), verWidth) + "  " +
-			padRight(r.size(shown[i]), sizeWidth)
+			r.size(shown[i])
 		if _, err := io.WriteString(w, line+"\n"); err != nil {
-			return err
-		}
-	}
-	if holdNote != "" && title != "Hold" {
-		if _, err := io.WriteString(w, "  "+r.paint(dimSeq, holdNote)+"\n"); err != nil {
 			return err
 		}
 	}
