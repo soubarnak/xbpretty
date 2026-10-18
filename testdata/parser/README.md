@@ -26,8 +26,16 @@ Every capture was taken with `LC_ALL=C`, against the one repository
 | `0591/upgrade.txt` | `xbps-install -Sun` |
 
 The `.meta` beside each plan records the command, its exit code, and whatever
-state the capture had to induce first. Two of the actions a plan prints only
-appear in that state:
+state the capture had to induce first. Four of them are reconstructed, not
+captured: `0607/install`, `reinstall`, `remove` and `upgrade` were taken on the
+host before the script wrote a `.meta` or kept the other stream. Their `.meta`
+was written afterwards from the command table above, says so in a `NOTE:` line,
+and has no `.err` beside it, because stderr was never observed for them. The
+exit code is inferred from the plan being complete. Nothing reads a `.meta`
+here, and the plans themselves are untouched. A host recapture would replace
+them with new plans and move the figures `plan_test.go` pins, so it waits for
+a reason of its own. Two of the actions a plan prints only appear in induced
+state:
 
 - **`hold`**: 0.60.7 prints a package on hold as `<pkgver> hold ...`. 0.59.1
   drops it from the plan instead of naming it, so `0591/` has no hold plan —

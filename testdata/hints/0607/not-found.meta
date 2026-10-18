@@ -1,2 +1,3 @@
 CMD: xbps-install -Sn this-package-does-not-exist-xyz
 EXIT: 2
+NOTE: the .out was added on 2026-10-18 by re-running the command as a user, a dry run; its stderr matched the .txt byte for byte and its stdout was empty
