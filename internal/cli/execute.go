@@ -50,7 +50,12 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 
 	sum := st.planToSummary(rows)
 	isPlain := !st.color || !isTTY(st.stdout)
-	if err := (summary.Renderer{Color: st.color, Plain: isPlain}).Render(st.stdout, sum); err != nil {
+	if err := (summary.Renderer{
+		Color:       st.color,
+		Plain:       isPlain,
+		BoxStyle:    st.boxStyle,
+		ProgressBar: st.progressBar,
+	}).Render(st.stdout, sum); err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
 		return exitRuntime
 	}

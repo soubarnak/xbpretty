@@ -1924,4 +1924,191 @@ exit 2
 	}
 }
 
+func TestBoxStyleConfigClassic(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
+	content, _ := os.ReadFile(cfgPath)
+	_ = os.WriteFile(cfgPath, append(content, []byte("\nbox_style = \"classic\"\n")...), 0o644)
+	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
+	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
 
+	code, out, errs := e.run("xbpretty", "upgrade", "-n", "--color=auto")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	plain := ansiEscape.ReplaceAllString(out, "")
+	if !strings.Contains(plain, "┌── Packages To Upgrade (1)") {
+		t.Errorf("classic output missing classic header:\n%s", out)
+	}
+	if !strings.Contains(plain, "┌── Summary") {
+		t.Errorf("classic output missing classic summary card:\n%s", out)
+	}
+	if strings.Contains(plain, "╭") || strings.Contains(plain, "╰") {
+		t.Errorf("classic output contains rounded box runes:\n%s", out)
+	}
+}
+
+func TestBoxStyleConfigASCII(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
+	content, _ := os.ReadFile(cfgPath)
+	_ = os.WriteFile(cfgPath, append(content, []byte("\nbox_style = \"ascii\"\n")...), 0o644)
+	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
+	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
+
+	code, out, errs := e.run("xbpretty", "upgrade", "-n", "--color=auto")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	plain := ansiEscape.ReplaceAllString(out, "")
+	if !strings.Contains(plain, "+-- Packages To Upgrade (1)") {
+		t.Errorf("ascii output missing ascii header:\n%s", out)
+	}
+	if !strings.Contains(plain, "+-- Summary") {
+		t.Errorf("ascii output missing ascii summary card:\n%s", out)
+	}
+	if strings.Contains(plain, "╭") || strings.Contains(plain, "┌") {
+		t.Errorf("ascii output contains unicode box runes:\n%s", out)
+	}
+}
+
+func TestBoxStyleFlagOverridesConfig(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
+	content, _ := os.ReadFile(cfgPath)
+	_ = os.WriteFile(cfgPath, append(content, []byte("\nbox_style = \"rounded\"\n")...), 0o644)
+	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
+	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
+
+	code, out, errs := e.run("xbpretty", "upgrade", "-n", "--color=auto", "--box-style=classic")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	plain := ansiEscape.ReplaceAllString(out, "")
+	if !strings.Contains(plain, "┌── Packages To Upgrade (1)") {
+		t.Errorf("flag override output missing classic header:\n%s", out)
+	}
+}
+
+func TestMalformedBoxStyleConfigExits2(t *testing.T) {
+	e := newEnv(t)
+	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
+	content, _ := os.ReadFile(cfgPath)
+	_ = os.WriteFile(cfgPath, append(content, []byte("\nbox_style = \"neon\"\n")...), 0o644)
+
+	code, _, errs := e.run("xbpretty", "upgrade", "-n")
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2\n%s", code, errs)
+	}
+	if !strings.Contains(errs, "box_style") {
+		t.Errorf("stderr does not name box_style:\n%s", errs)
+	}
+}
+
+func TestMalformedProgressBarConfigExits2(t *testing.T) {
+	e := newEnv(t)
+	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
+	content, _ := os.ReadFile(cfgPath)
+	_ = os.WriteFile(cfgPath, append(content, []byte("\nprogress_bar = \"maybe\"\n")...), 0o644)
+
+	code, _, errs := e.run("xbpretty", "upgrade", "-n")
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2\n%s", code, errs)
+	}
+	if !strings.Contains(errs, "expected true or false") && !strings.Contains(errs, "progress_bar") {
+		t.Errorf("stderr does not name parse error:\n%s", errs)
+	}
+}
+
+func TestPrecedenceColorFlagAndNoColor(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
+	content, _ := os.ReadFile(cfgPath)
+	_ = os.WriteFile(cfgPath, append(content, []byte("\ncolor = \"auto\"\n")...), 0o644)
+	e.set("XB_STUB_STDOUT", planCapture(t, "0607/upgrade.txt"))
+
+	// 1. With NO_COLOR set, color is disabled under default/auto config
+	e.set("NO_COLOR", "1")
+	code, out, errs := e.run("xbpretty", "upgrade", "-n")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Errorf("NO_COLOR should disable color under auto config:\n%s", out)
+	}
+
+	// 2. Explicit --color=always overrides NO_COLOR and auto config
+	code, out, errs = e.run("xbpretty", "upgrade", "-n", "--color=always")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if !strings.Contains(out, "\x1b[") {
+		t.Errorf("--color=always should override NO_COLOR:\n%s", out)
+	}
+
+	// 3. Explicit --color=never disables color even if NO_COLOR is unset
+	e.set("NO_COLOR", "")
+	code, out, errs = e.run("xbpretty", "upgrade", "-n", "--color=never")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Errorf("--color=never should disable color:\n%s", out)
+	}
+
+	// 4. Config color="never" overridden by explicit --color=always
+	_ = os.WriteFile(cfgPath, append(content, []byte("\ncolor = \"never\"\n")...), 0o644)
+	code, out, errs = e.run("xbpretty", "upgrade", "-n", "--color=always")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if !strings.Contains(out, "\x1b[") {
+		t.Errorf("--color=always should override config color=never:\n%s", out)
+	}
+}
+
+func TestProgressBarOptionsAndFlags(t *testing.T) {
+	// 1. parseArgs --no-progress
+	o, err := parseArgs([]string{"upgrade", "--no-progress"}, "")
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if o.progressBar == nil || *o.progressBar != false {
+		t.Errorf("--no-progress did not set progressBar to false: %+v", o)
+	}
+
+	// 2. parseArgs --no-progress-bar
+	o, err = parseArgs([]string{"upgrade", "--no-progress-bar"}, "")
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if o.progressBar == nil || *o.progressBar != false {
+		t.Errorf("--no-progress-bar did not set progressBar to false: %+v", o)
+	}
+
+	// 3. parseArgs --progress-bar=false
+	o, err = parseArgs([]string{"upgrade", "--progress-bar=false"}, "")
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if o.progressBar == nil || *o.progressBar != false {
+		t.Errorf("--progress-bar=false did not set progressBar to false: %+v", o)
+	}
+
+	// 4. parseArgs --progress-bar=true
+	o, err = parseArgs([]string{"upgrade", "--progress-bar=true"}, "")
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if o.progressBar == nil || *o.progressBar != true {
+		t.Errorf("--progress-bar=true did not set progressBar to true: %+v", o)
+	}
+}
