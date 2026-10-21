@@ -336,7 +336,6 @@ func NewStreamParser(totalPackages int, totalDownloadBytes int64) *StreamParser 
 // FeedStderr parses one line from child stderr.
 func (p *StreamParser) FeedStderr(line string) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	if tick, ok := ParseDownloadTick(line); ok {
 		p.state.Phase = "Downloading"
@@ -372,8 +371,10 @@ func (p *StreamParser) FeedStderr(line string) {
 			p.state.Percent = (float64(p.state.DownloadedBytes) / float64(p.state.TotalDownload)) * 100.0
 		}
 
-		if p.OnDownloadTick != nil {
-			p.OnDownloadTick(*tick)
+		cb := p.OnDownloadTick
+		p.mu.Unlock()
+		if cb != nil {
+			cb(*tick)
 		}
 		return
 	}
@@ -388,22 +389,26 @@ func (p *StreamParser) FeedStderr(line string) {
 		p.state.CurrentPackage = comp.PackageName
 		p.state.DownloadRate = comp.AvgRate
 
-		if p.OnDownloadComplete != nil {
-			p.OnDownloadComplete(*comp)
+		cb := p.OnDownloadComplete
+		p.mu.Unlock()
+		if cb != nil {
+			cb(*comp)
 		}
 		return
 	}
+	p.mu.Unlock()
 }
 
 // FeedStdout parses one line from child stdout.
 func (p *StreamParser) FeedStdout(line string) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	if phase, ok := ParsePhaseHeader(line); ok {
 		p.state.Phase = phase
-		if p.OnPhaseChange != nil {
-			p.OnPhaseChange(phase)
+		cb := p.OnPhaseChange
+		p.mu.Unlock()
+		if cb != nil {
+			cb(phase)
 		}
 		return
 	}
@@ -419,18 +424,23 @@ func (p *StreamParser) FeedStdout(line string) {
 		}
 		p.state.CurrentPackage = event.Package
 
-		if p.OnPackageEvent != nil {
-			p.OnPackageEvent(*event)
+		cb := p.OnPackageEvent
+		p.mu.Unlock()
+		if cb != nil {
+			cb(*event)
 		}
 		return
 	}
 
 	if sum, ok := ParseTransactionSummary(line); ok {
-		if p.OnSummary != nil {
-			p.OnSummary(*sum)
+		cb := p.OnSummary
+		p.mu.Unlock()
+		if cb != nil {
+			cb(*sum)
 		}
 		return
 	}
+	p.mu.Unlock()
 }
 
 // State returns a copy of the current telemetry state.

@@ -44,6 +44,7 @@ type runner struct {
 	stderr io.Writer
 	stdin  io.Reader
 	parser *StreamParser
+	widget *ProgressWidget
 }
 
 // state is everything one invocation of xbpretty needs.

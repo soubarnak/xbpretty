@@ -88,16 +88,31 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 
 // execute streams one xbps command live (FR-014) and handles its outcome.
 func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
-	if st.r.parser == nil && len(rows) > 0 {
-		var totalDl int64
-		for _, row := range rows {
-			if row.DownloadSize > 0 {
-				totalDl += int64(row.DownloadSize)
-			}
+	var totalDl int64
+	for _, row := range rows {
+		if row.DownloadSize > 0 {
+			totalDl += int64(row.DownloadSize)
 		}
+	}
+	if st.r.parser == nil {
 		st.r.parser = NewStreamParser(len(rows), totalDl)
 	}
+
+	useWidget := st.progressBar && !st.r.verbose && isTTY(st.stdout) && isTTY(st.stderr)
+	var widget *ProgressWidget
+	if useWidget {
+		termWidth := 80
+		widget = NewProgressWidget(st.stdout, st.boxStyle, st.color, termWidth, len(rows), totalDl)
+		widget.AttachToParser(st.r.parser)
+		widget.Start()
+		st.r.widget = widget
+	}
+
 	code, err := st.r.stream(bin, args...)
+	if widget != nil {
+		widget.Finish(code, st.r.lastStderr, rows, cmd)
+		st.r.widget = nil
+	}
 	if err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
 		return exitRuntime
@@ -115,6 +130,11 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 		return exitOK
 	}
 
+	// On failure:
+	// If widget was active, raw stderr was suppressed during run; print it now (FR-017).
+	if widget != nil && stderr != "" {
+		fmt.Fprint(st.stderr, stderr)
+	}
 	// FR-017: the raw xbps output stays, then one matching hint if any. Only
 	// stderr is kept from a real run: stdout goes straight to the terminal so
 	// xbps still sees one. A failure that lives on stdout alone is only caught
