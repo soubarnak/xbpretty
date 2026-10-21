@@ -55,27 +55,43 @@ type state struct {
 
 // Main runs xbpretty with the process arguments and returns its exit code.
 func Main(argv []string) int {
+	return Run(argv, stdinFn(), os.Stdout, os.Stderr)
+}
+
+// Run executes xbpretty with the specified arguments, standard input,
+// standard output, and standard error streams, returning the exit code.
+func Run(argv []string, in io.Reader, out, err io.Writer) int {
+	if in == nil {
+		in = stdinFn()
+	}
+	if out == nil {
+		out = os.Stdout
+	}
+	if err == nil {
+		err = os.Stderr
+	}
+
 	cmd, args := splitArgv(argv)
 
-	opts, err := parseArgs(args, cmd)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "xbpretty: %v\n", err)
-		usage(os.Stderr)
+	opts, errArgs := parseArgs(args, cmd)
+	if errArgs != nil {
+		fmt.Fprintf(err, "xbpretty: %v\n", errArgs)
+		usage(err)
 		return exitUsage
 	}
 	if opts.help {
-		usage(os.Stdout)
+		usage(out)
 		return exitOK
 	}
 	if opts.version {
-		printVersion(os.Stdout, os.Stderr)
+		printVersion(out, err)
 		return exitOK
 	}
 
 	st := &state{
-		stdout: os.Stdout,
-		stderr: os.Stderr,
-		stdin:  stdinFn(),
+		stdout: out,
+		stderr: err,
+		stdin:  in,
 	}
 	if opts.completion || cmd == "completion" {
 		return st.runCompletion(opts)
@@ -85,8 +101,8 @@ func Main(argv []string) int {
 	}
 
 	if opts.explicit["limit"] && opts.command != "log" {
-		fmt.Fprintln(os.Stderr, "xbpretty: --limit only applies to the log command")
-		usage(os.Stderr)
+		fmt.Fprintln(err, "xbpretty: --limit only applies to the log command")
+		usage(err)
 		return exitUsage
 	}
 	isLogCommand := opts.command == "log" && cmd == ""
@@ -94,9 +110,9 @@ func Main(argv []string) int {
 		return st.runLog(opts)
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "xbpretty: %v\n", err)
+	cfg, loadErr := config.Load()
+	if loadErr != nil {
+		fmt.Fprintf(err, "xbpretty: %v\n", loadErr)
 		return exitUsage
 	}
 	verbose := cfg.Verbose
@@ -113,17 +129,17 @@ func Main(argv []string) int {
 		st.log = !opts.noLog
 	}
 	st.color = wantColor(cfg.Color, opts)
-	st.r = &runner{cfg: cfg, out: os.Stderr, verbose: verbose}
+	st.r = &runner{cfg: cfg, out: err, verbose: verbose}
 
 	if cmd == "" {
 		cmd = opts.command
 	}
 	if cmd == "" {
-		usage(os.Stderr)
+		usage(err)
 		return exitUsage
 	}
-	if err := cfg.Resolve(); err != nil {
-		fmt.Fprintf(os.Stderr, "xbpretty: %v\n", err)
+	if resolveErr := cfg.Resolve(); resolveErr != nil {
+		fmt.Fprintf(err, "xbpretty: %v\n", resolveErr)
 		return exitRuntime
 	}
 	return st.runTransaction(cmd, opts)
