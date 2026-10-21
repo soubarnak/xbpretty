@@ -1733,6 +1733,197 @@ func TestCLIRunDirectSeam(t *testing.T) {
 	}
 }
 
+func TestHybridPTYExecutionInteractiveVsNonInteractive(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+
+	// Custom stub script that checks whether stdout is a TTY and whether stderr is a TTY.
+	stubScript := filepath.Join(e.dir, "custom-xbps-install")
+	scriptContent := `#!/bin/sh
+case "${1:-}" in
+  -*n*)
+    printf '%s' "${XB_STUB_STDOUT:-}"
+    exit 0
+    ;;
+esac
+
+# Check TTY status of stdout (fd 1) and stderr (fd 2)
+if [ -t 1 ] && ! [ -t 2 ]; then
+  echo "HYBRID_PTY_PIPE_OK"
+elif ! [ -t 1 ] && ! [ -t 2 ]; then
+  echo "DIRECT_PIPES_OK"
+else
+  echo "OTHER_STREAMS: stdout_tty=$( [ -t 1 ] && echo 1 || echo 0 ) stderr_tty=$( [ -t 2 ] && echo 1 || echo 0 )"
+fi
+exit 0
+`
+	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.pointInstallAt(stubScript)
+
+	// Case 1: Interactive mode (tty = true, no verbose) -> should spawn PTY on stdout and Pipe on stderr
+	e.tty = true
+	code, out, errs := e.run("xbpretty", "install", "-y", "figlet")
+	if code != 0 {
+		t.Fatalf("interactive run failed code %d: %s", code, errs)
+	}
+	if !strings.Contains(out, "HYBRID_PTY_PIPE_OK") {
+		t.Errorf("expected interactive run to use PTY on stdout and pipe on stderr, got out:\n%s\nerr:\n%s", out, errs)
+	}
+
+	// Case 2: Non-interactive mode (tty = false) -> should fall back to direct pipes
+	e.tty = false
+	code, out, errs = e.run("xbpretty", "install", "-y", "figlet")
+	if code != 0 {
+		t.Fatalf("non-interactive run failed code %d: %s", code, errs)
+	}
+	if !strings.Contains(out, "DIRECT_PIPES_OK") {
+		t.Errorf("expected non-interactive run to use direct pipes, got out:\n%s\nerr:\n%s", out, errs)
+	}
+
+	// Case 3: Verbose mode with tty = true -> should fall back to direct pipes
+	e.tty = true
+	code, out, errs = e.run("xbpretty", "install", "-v", "-y", "figlet")
+	if code != 0 {
+		t.Fatalf("verbose run failed code %d: %s", code, errs)
+	}
+	if !strings.Contains(out, "DIRECT_PIPES_OK") {
+		t.Errorf("expected verbose run to use direct pipes, got out:\n%s\nerr:\n%s", out, errs)
+	}
+}
+
+func TestHybridPTYLineBufferingDuringUnpack(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+
+	// Custom stub script that uses python (or sh) to write an unbuffered line ending in \n,
+	// then sleeps. In a PTY, the line is flushed immediately on \n without waiting 4KB.
+	stubScript := filepath.Join(e.dir, "buffering-stub")
+	scriptContent := `#!/bin/sh
+case "${1:-}" in
+  -*n*)
+    printf '%s' "${XB_STUB_STDOUT:-}"
+    exit 0
+    ;;
+esac
+
+python3 -c "import sys, time
+sys.stdout.write('[*] Unpacking packages\nfiglet-2.2.5_6: unpacking ...\n')
+time.sleep(0.4)
+sys.stdout.write('figlet-2.2.5_6: installed successfully.\n')
+"
+exit 0
+`
+	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.pointInstallAt(stubScript)
+
+	start := time.Now()
+	code, out, errs := e.run("xbpretty", "install", "-y", "figlet")
+	duration := time.Since(start)
+
+	if code != 0 {
+		t.Fatalf("run failed code %d: %s", code, errs)
+	}
+	if duration < 350*time.Millisecond {
+		t.Logf("child ran in %v", duration)
+	}
+	if !strings.Contains(out, "figlet-2.2.5_6: unpacking ...") {
+		t.Errorf("expected unpacking line in stdout, got:\n%s", out)
+	}
+	if !strings.Contains(out, "figlet-2.2.5_6: installed successfully.") {
+		t.Errorf("expected installed line in stdout, got:\n%s", out)
+	}
+}
+
+func TestHybridTelemetryStreamParsingWithStub(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+
+	// Stub simulates real xbps streaming stderr download ticks and stdout unpacking lines
+	stubScript := filepath.Join(e.dir, "telemetry-stub")
+	scriptContent := `#!/bin/sh
+case "${1:-}" in
+  -*n*)
+    printf '%s' "${XB_STUB_STDOUT:-}"
+    exit 0
+    ;;
+esac
+
+# Simulate stderr download ticks (TTY format with \r)
+printf '[ 0%%] figlet-2.2.5_6.x86_64.xbps: [87KB 50%%] 12MB/s ETA: 00m01s\033[K\r' >&2
+printf 'figlet-2.2.5_6.x86_64.xbps: 87KB [avg rate: 12MB/s]\033[K\n' >&2
+
+# Simulate stdout phase and unpack/configure lines
+printf '[*] Unpacking packages\n'
+printf 'figlet-2.2.5_6: unpacking ...\n'
+printf '[*] Configuring unpacked packages\n'
+printf 'figlet-2.2.5_6: configuring ...\n'
+printf 'figlet-2.2.5_6: installed successfully.\n'
+printf '\n1 downloaded, 1 installed, 0 updated, 1 configured, 0 removed, 0 on hold.\n'
+exit 0
+`
+	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.pointInstallAt(stubScript)
+
+	code, out, errs := e.run("xbpretty", "install", "-y", "figlet")
+	if code != 0 {
+		t.Fatalf("run failed code %d: %s", code, errs)
+	}
+
+	if !strings.Contains(out, "figlet-2.2.5_6: unpacking ...") {
+		t.Errorf("expected unpack output in stdout, got:\n%s", out)
+	}
+	if !strings.Contains(out, "figlet-2.2.5_6: configuring ...") {
+		t.Errorf("expected configure output in stdout, got:\n%s", out)
+	}
+	if !strings.Contains(errs, "figlet-2.2.5_6.x86_64.xbps: 87KB [avg rate: 12MB/s]") {
+		t.Errorf("expected download completion line in stderr, got:\n%s", errs)
+	}
+}
+
+func TestHybridFailurePreservesStderrAndHint(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+
+	// Simulate failure in xbps matching a known hint
+	stubScript := filepath.Join(e.dir, "fail-stub")
+	scriptContent := `#!/bin/sh
+case "${1:-}" in
+  -*n*)
+    printf '%s' "${XB_STUB_STDOUT:-}"
+    exit 0
+    ;;
+esac
+
+printf 'ERROR: failed to open repodata: No such file or directory\n' >&2
+exit 2
+`
+	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.pointInstallAt(stubScript)
+
+	code, out, errs := e.run("xbpretty", "install", "-y", "figlet")
+	if code != 2 {
+		t.Fatalf("expected code 2, got %d. out:\n%s\nerrs:\n%s", code, out, errs)
+	}
+	if !strings.Contains(errs, "ERROR: failed to open repodata") {
+		t.Errorf("expected error message in stderr, got:\n%s", errs)
+	}
+	// Verify stale index hint matched
+	if !strings.Contains(errs, "hint:") {
+		t.Errorf("expected hint for stale index error, got:\n%s", errs)
+	}
+}
+
 func TestBoxStyleConfigClassic(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
