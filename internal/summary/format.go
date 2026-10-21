@@ -31,6 +31,60 @@ func visibleWidth(s string) int {
 	return utf8.RuneCountInString(stripANSI(s))
 }
 
+// BoxChars holds the characters used to render container borders.
+type BoxChars struct {
+	TopLeft      string
+	TopRight     string
+	BottomLeft   string
+	BottomRight  string
+	Horizontal   string
+	Vertical     string
+	DividerLeft  string
+	DividerRight string
+}
+
+// BoxCharacterSet returns the BoxChars for the specified box style
+// ("rounded", "classic", "ascii"). Empty or unknown styles fall back to "rounded".
+func BoxCharacterSet(style string) BoxChars {
+	switch style {
+	case "classic":
+		return BoxChars{
+			TopLeft:      "┌",
+			TopRight:     "┐",
+			BottomLeft:   "└",
+			BottomRight:  "┘",
+			Horizontal:   "─",
+			Vertical:     "│",
+			DividerLeft:  "├",
+			DividerRight: "┤",
+		}
+	case "ascii":
+		return BoxChars{
+			TopLeft:      "+",
+			TopRight:     "+",
+			BottomLeft:   "+",
+			BottomRight:  "+",
+			Horizontal:   "-",
+			Vertical:     "|",
+			DividerLeft:  "+",
+			DividerRight: "+",
+		}
+	case "rounded", "":
+		fallthrough
+	default:
+		return BoxChars{
+			TopLeft:      "╭",
+			TopRight:     "╮",
+			BottomLeft:   "╰",
+			BottomRight:  "╯",
+			Horizontal:   "─",
+			Vertical:     "│",
+			DividerLeft:  "├",
+			DividerRight: "┤",
+		}
+	}
+}
+
 // VersionDiff highlights changed version components in ANSI 202 orange
 // (\x1b[38;5;202m) when color is true.
 func VersionDiff(oldVer, newVer string, color bool) string {
