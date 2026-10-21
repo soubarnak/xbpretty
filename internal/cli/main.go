@@ -39,6 +39,11 @@ type runner struct {
 	verbose    bool
 	lastStderr string
 	quiet      bool
+
+	stdout io.Writer
+	stderr io.Writer
+	stdin  io.Reader
+	parser *StreamParser
 }
 
 // state is everything one invocation of xbpretty needs.
@@ -129,7 +134,14 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		st.log = !opts.noLog
 	}
 	st.color = wantColor(cfg.Color, opts)
-	st.r = &runner{cfg: cfg, out: err, verbose: verbose}
+	st.r = &runner{
+		cfg:     cfg,
+		out:     err,
+		verbose: verbose,
+		stdout:  out,
+		stderr:  err,
+		stdin:   in,
+	}
 
 	if cmd == "" {
 		cmd = opts.command

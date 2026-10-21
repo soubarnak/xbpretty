@@ -83,6 +83,15 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 
 // execute streams one xbps command live (FR-014) and handles its outcome.
 func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
+	if st.r.parser == nil && len(rows) > 0 {
+		var totalDl int64
+		for _, row := range rows {
+			if row.DownloadSize > 0 {
+				totalDl += int64(row.DownloadSize)
+			}
+		}
+		st.r.parser = NewStreamParser(len(rows), totalDl)
+	}
 	code, err := st.r.stream(bin, args...)
 	if err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
