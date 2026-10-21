@@ -3,7 +3,6 @@ package cli
 import (
 	"bufio"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -368,9 +367,9 @@ func (st *state) planToSummary(rows []xbps.Row) *summary.Summary {
 	return summary.Build(srows, held, old)
 }
 
-// isTTY reports whether r is the process's terminal.
-func isTTY(r io.Reader) bool {
-	f, ok := r.(*os.File)
+// isTTY reports whether v is attached to a terminal.
+func isTTY(v any) bool {
+	f, ok := v.(*os.File)
 	if !ok {
 		return false
 	}

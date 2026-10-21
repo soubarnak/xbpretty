@@ -1647,3 +1647,88 @@ func TestStubClassifiesEveryArgvShape(t *testing.T) {
 		}
 	}
 }
+
+func TestNalaRoundedContainersInteractive(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
+	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
+	code, out, errs := e.run("xbpretty", "upgrade", "-n", "--color=auto")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+
+	plain := ansiEscape.ReplaceAllString(out, "")
+	if !strings.Contains(plain, "╭── Packages To Upgrade (1)") {
+		t.Errorf("interactive output missing rounded upgrade box:\n%s", out)
+	}
+	if !strings.Contains(plain, "╭── Summary") {
+		t.Errorf("interactive output missing rounded summary card:\n%s", out)
+	}
+	if !strings.Contains(out, "\x1b[38;5;202m") {
+		t.Errorf("interactive output missing orange version diff:\n%s", out)
+	}
+	if !strings.Contains(out, "\x1b[1;34m") {
+		t.Errorf("interactive output missing blue action color:\n%s", out)
+	}
+	if !strings.Contains(plain, "0.60.7_1 → 0.60.8_1") {
+		t.Errorf("interactive output missing version arrow delta:\n%s", out)
+	}
+}
+
+func TestNalaPlaintextWhenPiped(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = false
+	e.set("XB_STUB_STDOUT", planCapture(t, "0607/upgrade.txt"))
+	code, out, errs := e.run("xbpretty", "upgrade", "-n")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+
+	if strings.Contains(out, "╭") || strings.Contains(out, "╰") || strings.Contains(out, "│") {
+		t.Errorf("piped output contains box border runes:\n%s", out)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Errorf("piped output contains ANSI escape codes:\n%s", out)
+	}
+	if !strings.Contains(out, "Upgrade") {
+		t.Errorf("piped output missing plaintext Upgrade header:\n%s", out)
+	}
+}
+
+func TestNalaPlaintextWhenNoColor(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+	e.set("NO_COLOR", "1")
+	e.set("XB_STUB_STDOUT", planCapture(t, "0607/upgrade.txt"))
+	code, out, errs := e.run("xbpretty", "upgrade", "-n")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+
+	if strings.Contains(out, "╭") || strings.Contains(out, "╰") || strings.Contains(out, "│") {
+		t.Errorf("NO_COLOR output contains box border runes:\n%s", out)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Errorf("NO_COLOR output contains ANSI escape codes:\n%s", out)
+	}
+}
+
+func TestCLIRunDirectSeam(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = false
+	e.set("XB_STUB_STDOUT", planCapture(t, "0607/upgrade.txt"))
+
+	var outBuf, errBuf strings.Builder
+	code := Run([]string{"xbpretty", "upgrade", "-n"}, strings.NewReader(""), &outBuf, &errBuf)
+	if code != 0 {
+		t.Fatalf("Run exit = %d, want 0\n%s", code, errBuf.String())
+	}
+	if !strings.Contains(outBuf.String(), "Upgrade") {
+		t.Errorf("Run output missing summary:\n%s", outBuf.String())
+	}
+}

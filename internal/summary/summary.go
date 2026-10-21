@@ -5,6 +5,7 @@ package summary
 import (
 	"io"
 	"strings"
+	"unicode/utf8"
 )
 
 // The actions an xbps plan row carries, as internal/xbps spells them.
@@ -154,27 +155,36 @@ func (s *Summary) NetDiskBytes() int64 {
 // Renderer draws a summary to a writer, optionally with ANSI colour.
 type Renderer struct {
 	Color bool
+	Plain bool
+	Width int
 }
 
 // Render writes the grouped summary and its footer to w.
 func (r Renderer) Render(w io.Writer, s *Summary) error {
+	if r.Plain || !r.Color {
+		return r.renderPlain(w, s)
+	}
+	return r.renderBoxes(w, s)
+}
+
+func (r Renderer) renderPlain(w io.Writer, s *Summary) error {
 	if hasListable(s.Install) {
-		if err := r.group(w, "Install", s.Install, s); err != nil {
+		if err := r.groupPlain(w, "Install", s.Install, s); err != nil {
 			return err
 		}
 	}
 	if hasListable(s.Upgrade) {
-		if err := r.group(w, "Upgrade", s.Upgrade, s); err != nil {
+		if err := r.groupPlain(w, "Upgrade", s.Upgrade, s); err != nil {
 			return err
 		}
 	}
 	if hasListable(s.Remove) {
-		if err := r.group(w, "Remove", s.Remove, s); err != nil {
+		if err := r.groupPlain(w, "Remove", s.Remove, s); err != nil {
 			return err
 		}
 	}
 	if hasListable(s.Hold) {
-		if err := r.group(w, "Hold", s.Hold, s); err != nil {
+		if err := r.groupPlain(w, "Hold", s.Hold, s); err != nil {
 			return err
 		}
 	}
@@ -182,8 +192,12 @@ func (r Renderer) Render(w io.Writer, s *Summary) error {
 	return err
 }
 
-func (r Renderer) group(w io.Writer, title string, rows []Row, s *Summary) error {
-	if _, err := io.WriteString(w, r.paint(boldSeq, title)+"\n"); err != nil {
+func (r Renderer) groupPlain(w io.Writer, title string, rows []Row, s *Summary) error {
+	header := title
+	if !r.Plain {
+		header = r.paint(boldSeq, title)
+	}
+	if _, err := io.WriteString(w, header+"\n"); err != nil {
 		return err
 	}
 	shown := listable(rows)
@@ -199,6 +213,267 @@ func (r Renderer) group(w io.Writer, title string, rows []Row, s *Summary) error
 	}
 	_, err := io.WriteString(w, "\n")
 	return err
+}
+
+func (r Renderer) renderBoxes(w io.Writer, s *Summary) error {
+	termWidth := r.Width
+	if termWidth <= 0 {
+		termWidth = 80
+	}
+
+	type groupData struct {
+		title     string
+		colorCode string
+		headers   []string
+		rows      [][]string
+	}
+	var groups []groupData
+
+	if hasListable(s.Install) {
+		shown := listable(s.Install)
+		var rows [][]string
+		for _, row := range shown {
+			rows = append(rows, []string{
+				greenSeq + row.Name + resetSeq,
+				row.Version,
+				r.size(row),
+			})
+		}
+		groups = append(groups, groupData{
+			title:     sprintf("Packages To Install (%d)", len(shown)),
+			colorCode: greenSeq,
+			headers:   []string{"Package", "Version", "Size"},
+			rows:      rows,
+		})
+	}
+
+	if hasListable(s.Upgrade) {
+		shown := listable(s.Upgrade)
+		var rows [][]string
+		for _, row := range shown {
+			name := blueSeq + row.Name + resetSeq
+			vDiff := row.Version
+			if old, ok := s.Old[row.Name]; ok && old.Version != "" {
+				vDiff = dimSeq + old.Version + resetSeq + " → " + VersionDiff(old.Version, row.Version, true)
+			}
+			rows = append(rows, []string{
+				name,
+				vDiff,
+				r.size(row),
+			})
+		}
+		groups = append(groups, groupData{
+			title:     sprintf("Packages To Upgrade (%d)", len(shown)),
+			colorCode: blueSeq,
+			headers:   []string{"Package", "Version Delta", "Size"},
+			rows:      rows,
+		})
+	}
+
+	if hasListable(s.Remove) {
+		shown := listable(s.Remove)
+		var rows [][]string
+		for _, row := range shown {
+			rows = append(rows, []string{
+				redSeq + row.Name + resetSeq,
+				row.Version,
+				r.size(row),
+			})
+		}
+		groups = append(groups, groupData{
+			title:     sprintf("Packages To Remove (%d)", len(shown)),
+			colorCode: redSeq,
+			headers:   []string{"Package", "Version", "Size"},
+			rows:      rows,
+		})
+	}
+
+	if hasListable(s.Hold) {
+		shown := listable(s.Hold)
+		hasDelta := false
+		for _, row := range shown {
+			if old, ok := s.Old[row.Name]; ok && old.Version != "" {
+				hasDelta = true
+				break
+			}
+		}
+		headers := []string{"Package", "Version", "Size"}
+		if hasDelta {
+			headers[1] = "Version Delta"
+		}
+		var rows [][]string
+		for _, row := range shown {
+			name := boldOrangeSeq + row.Name + resetSeq
+			vDiff := row.Version
+			if old, ok := s.Old[row.Name]; ok && old.Version != "" {
+				vDiff = dimSeq + old.Version + resetSeq + " → " + VersionDiff(old.Version, row.Version, true)
+			}
+			rows = append(rows, []string{
+				name,
+				vDiff,
+				r.size(row),
+			})
+		}
+		groups = append(groups, groupData{
+			title:     sprintf("Packages To Hold (%d)", len(shown)),
+			colorCode: boldOrangeSeq,
+			headers:   headers,
+			rows:      rows,
+		})
+	}
+
+	for _, g := range groups {
+		if err := r.renderBox(w, g.title, g.colorCode, g.headers, g.rows, termWidth); err != nil {
+			return err
+		}
+	}
+
+	return r.renderSummaryCard(w, s, termWidth)
+}
+
+func (r Renderer) renderBox(w io.Writer, title, colorCode string, headers []string, rows [][]string, termWidth int) error {
+	col0Min := visibleWidth(headers[0])
+	col1Min := visibleWidth(headers[1])
+	col2Min := visibleWidth(headers[2])
+	for _, row := range rows {
+		if v := visibleWidth(row[0]); v > col0Min {
+			col0Min = v
+		}
+		if v := visibleWidth(row[1]); v > col1Min {
+			col1Min = v
+		}
+		if v := visibleWidth(row[2]); v > col2Min {
+			col2Min = v
+		}
+	}
+
+	col0Width := col0Min + 2
+	if col0Width < 24 {
+		col0Width = 24
+	}
+	if len(headers) > 1 && headers[1] == "Version" && col0Width < 34 {
+		col0Width = 34
+	}
+	col2Width := col2Min + 2
+	if col2Width < 12 {
+		col2Width = 12
+	}
+	col1Width := col1Min + 2
+	if col1Width < 28 {
+		col1Width = 28
+	}
+
+	width := termWidth
+	needed := 5 + col0Width + col1Width + col2Width
+	if needed > width {
+		width = needed
+	} else {
+		col1Width = width - 5 - col0Width - col2Width
+	}
+
+	titleRunes := utf8.RuneCountInString(title)
+	dashes := width - titleRunes - 6
+	if dashes < 1 {
+		dashes = 1
+	}
+	top := "╭── " + colorCode + title + resetSeq + " " + strings.Repeat("─", dashes) + "╮\n"
+	if _, err := io.WriteString(w, top); err != nil {
+		return err
+	}
+
+	hLine := "│  " + padRight(boldSeq+headers[0]+resetSeq, col0Width) +
+		padRight(boldSeq+headers[1]+resetSeq, col1Width) +
+		padLeft(boldSeq+headers[2]+resetSeq, col2Width)
+	if _, err := io.WriteString(w, padRight(hLine, width-1)+"│\n"); err != nil {
+		return err
+	}
+
+	div := "├" + strings.Repeat("─", width-2) + "┤\n"
+	if _, err := io.WriteString(w, div); err != nil {
+		return err
+	}
+
+	for _, row := range rows {
+		rowLine := "│  " + padRight(row[0], col0Width) +
+			padRight(row[1], col1Width) +
+			padLeft(row[2], col2Width)
+		if _, err := io.WriteString(w, padRight(rowLine, width-1)+"│\n"); err != nil {
+			return err
+		}
+	}
+
+	bottom := "╰" + strings.Repeat("─", width-2) + "╯\n\n"
+	_, err := io.WriteString(w, bottom)
+	return err
+}
+
+func (r Renderer) renderSummaryCard(w io.Writer, s *Summary, termWidth int) error {
+	width := termWidth
+	c := s.Counts()
+	var parts []string
+	if c.Install > 0 {
+		parts = append(parts, greenSeq+count(c.Install, "install")+resetSeq)
+	}
+	if c.Upgrade > 0 {
+		parts = append(parts, blueSeq+count(c.Upgrade, "upgrade")+resetSeq)
+	}
+	if c.Remove > 0 {
+		parts = append(parts, redSeq+count(c.Remove, "remove")+resetSeq)
+	}
+	if c.Hold > 0 {
+		parts = append(parts, boldOrangeSeq+count(c.Hold, "hold")+resetSeq)
+	}
+	countsText := strings.Join(parts, ", ")
+
+	var statParts []string
+	if s.Download > 0 {
+		statParts = append(statParts, sprintf("Transfer: %s download", Human(s.Download)))
+	}
+	net := s.NetDiskBytes()
+	if net != 0 {
+		sign := "+"
+		abs := uint64(net)
+		if net < 0 {
+			sign = "-"
+			abs = uint64(-net)
+		}
+		statParts = append(statParts, sprintf("Disk: %s%s", sign, Human(abs)))
+	}
+	if len(statParts) == 0 {
+		statParts = append(statParts, "Transfer: 0 B  •  Disk: 0 B")
+	}
+	statsText := strings.Join(statParts, "  •  ")
+
+	title := "Summary"
+	dashes := width - utf8.RuneCountInString(title) - 6
+	if dashes < 1 {
+		dashes = 1
+	}
+	top := "╭── " + boldSeq + title + resetSeq + " " + strings.Repeat("─", dashes) + "╮\n"
+	if _, err := io.WriteString(w, top); err != nil {
+		return err
+	}
+
+	line1 := "│  Changes:  " + countsText
+	if _, err := io.WriteString(w, padRight(line1, width-1)+"│\n"); err != nil {
+		return err
+	}
+
+	line2 := "│  " + statsText
+	if _, err := io.WriteString(w, padRight(line2, width-1)+"│\n"); err != nil {
+		return err
+	}
+
+	bottom := "╰" + strings.Repeat("─", width-2) + "╯\n"
+	_, err := io.WriteString(w, bottom)
+	return err
+}
+
+func (r Renderer) paint(code, text string) string {
+	if !r.Color || r.Plain || code == "" {
+		return text
+	}
+	return code + text + resetSeq
 }
 
 func (s *Summary) version(row Row) string {

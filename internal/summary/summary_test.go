@@ -404,3 +404,187 @@ func TestRenderShowsARemovalsFreedBytesOnce(t *testing.T) {
 		t.Errorf("remove row = %q, want %q", got, want)
 	}
 }
+
+func TestVersionDiffHighlighting(t *testing.T) {
+	tests := []struct {
+		name     string
+		oldVer   string
+		newVer   string
+		color    bool
+		wantDiff string
+	}{
+		{
+			name:     "revision only",
+			oldVer:   "2.38_1",
+			newVer:   "2.38_2",
+			color:    true,
+			wantDiff: "2.38_\x1b[38;5;202m2\x1b[0m",
+		},
+		{
+			name:     "patch bump",
+			oldVer:   "6.8.0_1",
+			newVer:   "6.8.101_1",
+			color:    true,
+			wantDiff: "6.8.\x1b[38;5;202m101\x1b[0m_\x1b[38;5;202m1\x1b[0m",
+		},
+		{
+			name:     "minor bump",
+			oldVer:   "8.1.0_1",
+			newVer:   "8.2.1_1",
+			color:    true,
+			wantDiff: "8.\x1b[38;5;202m2\x1b[0m.\x1b[38;5;202m1\x1b[0m_\x1b[38;5;202m1\x1b[0m",
+		},
+		{
+			name:     "major bump",
+			oldVer:   "124.0.1_1",
+			newVer:   "125.0.2_1",
+			color:    true,
+			wantDiff: "\x1b[38;5;202m125\x1b[0m.\x1b[38;5;202m0\x1b[0m.\x1b[38;5;202m2\x1b[0m_\x1b[38;5;202m1\x1b[0m",
+		},
+		{
+			name:     "color disabled",
+			oldVer:   "2.38_1",
+			newVer:   "2.38_2",
+			color:    false,
+			wantDiff: "2.38_2",
+		},
+		{
+			name:     "no old version",
+			oldVer:   "",
+			newVer:   "1.0.0_1",
+			color:    true,
+			wantDiff: "1.0.0_1",
+		},
+		{
+			name:     "identical versions",
+			oldVer:   "1.0.0_1",
+			newVer:   "1.0.0_1",
+			color:    true,
+			wantDiff: "1.0.0_1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := VersionDiff(tt.oldVer, tt.newVer, tt.color)
+			if got != tt.wantDiff {
+				t.Errorf("VersionDiff(%q, %q, %v) = %q, want %q", tt.oldVer, tt.newVer, tt.color, got, tt.wantDiff)
+			}
+		})
+	}
+}
+
+func TestNalaRoundedBoxTables(t *testing.T) {
+	rows := []Row{
+		row("ripgrep", "14.1.0_1", "install", 2100000, 1100000, true, true),
+		row("linux6.8", "6.8.101_1", "update", 154000000, 80000000, true, true),
+		row("old-lib", "1.0.0_1", "remove", 450000, 0, true, false),
+		row("xbps", "0.61.0_1", "hold", 1800000, 900000, true, true),
+	}
+	old := map[string]Old{
+		"linux6.8": {Version: "6.8.0_1", InstalledSize: 150000000, HasSize: true},
+	}
+	s := Build(rows, nil, old)
+
+	var b strings.Builder
+	r := Renderer{Color: true, Width: 80}
+	if err := r.Render(&b, s); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := b.String()
+
+	// Acceptance criteria:
+	// 1. Unicode rounded box containers with headers and item counts
+	plainOut := stripANSI(out)
+	for _, wantHeader := range []string{
+		"╭── Packages To Install (1)",
+		"╭── Packages To Upgrade (1)",
+		"╭── Packages To Remove (1)",
+		"╭── Packages To Hold (1)",
+	} {
+		if !strings.Contains(plainOut, wantHeader) {
+			t.Errorf("rendered output missing header %q:\n%s", wantHeader, out)
+		}
+	}
+
+	// 2. Upgraded packages display side-by-side versions with arrow delimiter and ANSI 202 orange diff
+	if !strings.Contains(plainOut, "6.8.0_1") || !strings.Contains(plainOut, "→") {
+		t.Errorf("upgrade row missing arrow diff:\n%s", out)
+	}
+	if !strings.Contains(out, "\x1b[38;5;202m") {
+		t.Errorf("upgrade row missing ANSI 202 orange highlighting:\n%s", out)
+	}
+
+	// 3. Actions are color-coded (green for install, blue for upgrade, red for remove, orange for hold)
+	if !strings.Contains(out, "\x1b[1;32m") {
+		t.Errorf("missing bold green install color:\n%s", out)
+	}
+	if !strings.Contains(out, "\x1b[1;34m") {
+		t.Errorf("missing bold blue upgrade color:\n%s", out)
+	}
+	if !strings.Contains(out, "\x1b[1;31m") {
+		t.Errorf("missing bold red remove color:\n%s", out)
+	}
+	if !strings.Contains(out, "\x1b[1;38;5;202m") && !strings.Contains(out, "\x1b[38;5;202m") {
+		t.Errorf("missing bold orange hold color:\n%s", out)
+	}
+
+	// 4. Summary card in matching rounded container
+	if !strings.Contains(plainOut, "╭── Summary") {
+		t.Errorf("missing Summary card header:\n%s", out)
+	}
+	if !strings.Contains(plainOut, "1 install, 1 upgrade, 1 remove, 1 hold") {
+		t.Errorf("Summary card missing action counts:\n%s", out)
+	}
+	if !strings.Contains(strings.ToLower(plainOut), "download") || !strings.Contains(strings.ToLower(plainOut), "disk") {
+		t.Errorf("Summary card missing download / disk metrics:\n%s", out)
+	}
+
+	// 5. Column alignment & pixel-perfect precision
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		// Each box line should start with ╭, │, ├, or ╰
+		firstRune, _ := utf8.DecodeRuneInString(line)
+		if firstRune != '╭' && firstRune != '│' && firstRune != '├' && firstRune != '╰' {
+			t.Errorf("line %d does not start with box rune: %q", i, line)
+		}
+		w := visibleWidth(line)
+		if w != 80 {
+			t.Errorf("line %d visible width = %d, want 80: %q", i, w, line)
+		}
+		if line != strings.TrimRight(line, " \t") {
+			t.Errorf("line %d has trailing whitespace: %q", i, line)
+		}
+	}
+}
+
+func TestNalaPlaintextFallback(t *testing.T) {
+	rows := []Row{
+		row("ripgrep", "14.1.0_1", "install", 2100000, 1100000, true, true),
+		row("linux6.8", "6.8.101_1", "update", 154000000, 80000000, true, true),
+	}
+	old := map[string]Old{
+		"linux6.8": {Version: "6.8.0_1", InstalledSize: 150000000, HasSize: true},
+	}
+	s := Build(rows, nil, old)
+
+	// Test Plain: true with Color: true
+	var b strings.Builder
+	r := Renderer{Color: true, Plain: true}
+	if err := r.Render(&b, s); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := b.String()
+	if strings.Contains(out, "╭") || strings.Contains(out, "╰") || strings.Contains(out, "│") {
+		t.Errorf("plaintext fallback contains box characters:\n%s", out)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Errorf("plaintext fallback contains ANSI codes:\n%s", out)
+	}
+	if !strings.Contains(out, "Install") || !strings.Contains(out, "Upgrade") {
+		t.Errorf("plaintext fallback missing standard headers:\n%s", out)
+	}
+}
