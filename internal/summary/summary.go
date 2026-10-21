@@ -64,7 +64,8 @@ func Build(rows []Row, held map[string]bool, old map[string]Old) *Summary {
 		s.Old = map[string]Old{}
 	}
 	for _, row := range rows {
-		if held[row.Name] || row.Action == actionHold {
+		isHeld := held[row.Name] || row.Action == actionHold
+		if isHeld {
 			// A held package is left out of the transaction: xbps fetches
 			// and unpacks nothing for it, so it is reported under Hold and
 			// nowhere else (FR-011).
@@ -87,8 +88,10 @@ func Build(rows []Row, held map[string]bool, old map[string]Old) *Summary {
 			if row.HasInstalled {
 				s.AddBytes += row.InstalledSize
 			}
-			if o, ok := s.Old[row.Name]; ok && o.HasSize {
-				s.OldBytes += o.InstalledSize
+			old, hasOld := s.Old[row.Name]
+			hasOldSize := hasOld && old.HasSize
+			if hasOldSize {
+				s.OldBytes += old.InstalledSize
 			}
 		case actionInstall:
 			s.Install = append(s.Install, row)
@@ -163,7 +166,7 @@ type Renderer struct {
 
 // Render writes the grouped summary and its footer to w.
 func (r Renderer) Render(w io.Writer, s *Summary) error {
-	if r.Plain || !r.Color {
+	if r.Plain {
 		return r.renderPlain(w, s)
 	}
 	return r.renderBoxes(w, s)
@@ -236,7 +239,7 @@ func (r Renderer) renderBoxes(w io.Writer, s *Summary) error {
 		var rows [][]string
 		for _, row := range shown {
 			rows = append(rows, []string{
-				greenSeq + row.Name + resetSeq,
+				r.paint(greenSeq, row.Name),
 				row.Version,
 				r.size(row),
 			})
@@ -253,10 +256,16 @@ func (r Renderer) renderBoxes(w io.Writer, s *Summary) error {
 		shown := listable(s.Upgrade)
 		var rows [][]string
 		for _, row := range shown {
-			name := blueSeq + row.Name + resetSeq
+			name := r.paint(blueSeq, row.Name)
 			vDiff := row.Version
-			if old, ok := s.Old[row.Name]; ok && old.Version != "" {
-				vDiff = dimSeq + old.Version + resetSeq + " → " + VersionDiff(old.Version, row.Version, true)
+			old, hasOld := s.Old[row.Name]
+			hasOldVersion := hasOld && old.Version != ""
+			if hasOldVersion {
+				oldVer := old.Version
+				if r.Color {
+					oldVer = dimSeq + old.Version + resetSeq
+				}
+				vDiff = oldVer + " → " + VersionDiff(old.Version, row.Version, r.Color)
 			}
 			rows = append(rows, []string{
 				name,
@@ -277,7 +286,7 @@ func (r Renderer) renderBoxes(w io.Writer, s *Summary) error {
 		var rows [][]string
 		for _, row := range shown {
 			rows = append(rows, []string{
-				redSeq + row.Name + resetSeq,
+				r.paint(redSeq, row.Name),
 				row.Version,
 				r.size(row),
 			})
@@ -294,7 +303,8 @@ func (r Renderer) renderBoxes(w io.Writer, s *Summary) error {
 		shown := listable(s.Hold)
 		hasDelta := false
 		for _, row := range shown {
-			if old, ok := s.Old[row.Name]; ok && old.Version != "" {
+			old, hasOld := s.Old[row.Name]
+			if hasOld && old.Version != "" {
 				hasDelta = true
 				break
 			}
@@ -305,10 +315,16 @@ func (r Renderer) renderBoxes(w io.Writer, s *Summary) error {
 		}
 		var rows [][]string
 		for _, row := range shown {
-			name := boldOrangeSeq + row.Name + resetSeq
+			name := r.paint(boldOrangeSeq, row.Name)
 			vDiff := row.Version
-			if old, ok := s.Old[row.Name]; ok && old.Version != "" {
-				vDiff = dimSeq + old.Version + resetSeq + " → " + VersionDiff(old.Version, row.Version, true)
+			old, hasOld := s.Old[row.Name]
+			hasOldVersion := hasOld && old.Version != ""
+			if hasOldVersion {
+				oldVer := old.Version
+				if r.Color {
+					oldVer = dimSeq + old.Version + resetSeq
+				}
+				vDiff = oldVer + " → " + VersionDiff(old.Version, row.Version, r.Color)
 			}
 			rows = append(rows, []string{
 				name,
@@ -354,7 +370,9 @@ func (r Renderer) renderBox(w io.Writer, title, colorCode string, headers []stri
 	if col0Width < 24 {
 		col0Width = 24
 	}
-	if len(headers) > 1 && headers[1] == "Version" && col0Width < 34 {
+	isVersionColumn := len(headers) > 1 && headers[1] == "Version"
+	needsExpandCol0 := isVersionColumn && col0Width < 34
+	if needsExpandCol0 {
 		col0Width = 34
 	}
 	col2Width := col2Min + 2
@@ -379,14 +397,14 @@ func (r Renderer) renderBox(w io.Writer, title, colorCode string, headers []stri
 	if dashes < 1 {
 		dashes = 1
 	}
-	top := chars.TopLeft + chars.Horizontal + chars.Horizontal + " " + colorCode + title + resetSeq + " " + strings.Repeat(chars.Horizontal, dashes) + chars.TopRight + "\n"
+	top := chars.TopLeft + chars.Horizontal + chars.Horizontal + " " + r.paint(colorCode, title) + " " + strings.Repeat(chars.Horizontal, dashes) + chars.TopRight + "\n"
 	if _, err := io.WriteString(w, top); err != nil {
 		return err
 	}
 
-	hLine := chars.Vertical + "  " + padRight(boldSeq+headers[0]+resetSeq, col0Width) +
-		padRight(boldSeq+headers[1]+resetSeq, col1Width) +
-		padLeft(boldSeq+headers[2]+resetSeq, col2Width)
+	hLine := chars.Vertical + "  " + padRight(r.paint(boldSeq, headers[0]), col0Width) +
+		padRight(r.paint(boldSeq, headers[1]), col1Width) +
+		padLeft(r.paint(boldSeq, headers[2]), col2Width)
 	if _, err := io.WriteString(w, padRight(hLine, width-1)+chars.Vertical+"\n"); err != nil {
 		return err
 	}
@@ -415,16 +433,16 @@ func (r Renderer) renderSummaryCard(w io.Writer, s *Summary, termWidth int, char
 	c := s.Counts()
 	var parts []string
 	if c.Install > 0 {
-		parts = append(parts, greenSeq+count(c.Install, "install")+resetSeq)
+		parts = append(parts, r.paint(greenSeq, count(c.Install, "install")))
 	}
 	if c.Upgrade > 0 {
-		parts = append(parts, blueSeq+count(c.Upgrade, "upgrade")+resetSeq)
+		parts = append(parts, r.paint(blueSeq, count(c.Upgrade, "upgrade")))
 	}
 	if c.Remove > 0 {
-		parts = append(parts, redSeq+count(c.Remove, "remove")+resetSeq)
+		parts = append(parts, r.paint(redSeq, count(c.Remove, "remove")))
 	}
 	if c.Hold > 0 {
-		parts = append(parts, boldOrangeSeq+count(c.Hold, "hold")+resetSeq)
+		parts = append(parts, r.paint(boldOrangeSeq, count(c.Hold, "hold")))
 	}
 	countsText := strings.Join(parts, ", ")
 
@@ -452,7 +470,7 @@ func (r Renderer) renderSummaryCard(w io.Writer, s *Summary, termWidth int, char
 	if dashes < 1 {
 		dashes = 1
 	}
-	top := chars.TopLeft + chars.Horizontal + chars.Horizontal + " " + boldSeq + title + resetSeq + " " + strings.Repeat(chars.Horizontal, dashes) + chars.TopRight + "\n"
+	top := chars.TopLeft + chars.Horizontal + chars.Horizontal + " " + r.paint(boldSeq, title) + " " + strings.Repeat(chars.Horizontal, dashes) + chars.TopRight + "\n"
 	if _, err := io.WriteString(w, top); err != nil {
 		return err
 	}
@@ -473,16 +491,14 @@ func (r Renderer) renderSummaryCard(w io.Writer, s *Summary, termWidth int, char
 }
 
 func (r Renderer) paint(code, text string) string {
-	if !r.Color || r.Plain || code == "" {
+	skipPaint := !r.Color || r.Plain || code == ""
+	if skipPaint {
 		return text
 	}
 	return code + text + resetSeq
 }
 
 func (s *Summary) version(row Row) string {
-	if row.Action != actionUpdate && row.Action != actionReinstall {
-		return row.Version
-	}
 	if o, ok := s.Old[row.Name]; ok && o.Version != "" {
 		return o.Version + " → " + row.Version
 	}

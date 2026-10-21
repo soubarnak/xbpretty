@@ -26,9 +26,13 @@ func stripANSI(s string) string {
 	return ansiRegex.ReplaceAllString(s, "")
 }
 
-// visibleWidth returns the terminal display width in runes, ignoring ANSI codes.
-func visibleWidth(s string) int {
+// VisibleWidth returns the terminal display width in runes, ignoring ANSI codes.
+func VisibleWidth(s string) int {
 	return utf8.RuneCountInString(stripANSI(s))
+}
+
+func visibleWidth(s string) int {
+	return VisibleWidth(s)
 }
 
 // BoxChars holds the characters used to render container borders.
@@ -88,18 +92,23 @@ func BoxCharacterSet(style string) BoxChars {
 // VersionDiff highlights changed version components in ANSI 202 orange
 // (\x1b[38;5;202m) when color is true.
 func VersionDiff(oldVer, newVer string, color bool) string {
-	if oldVer == "" || !color {
-		return newVer
-	}
-	if oldVer == newVer {
+	shouldBypass := oldVer == "" || !color || oldVer == newVer
+	if shouldBypass {
 		return newVer
 	}
 
-	// 1. Revision only change (e.g. 2.38_1 -> 2.38_2)
 	oldRevParts := strings.Split(oldVer, "_")
 	newRevParts := strings.Split(newVer, "_")
-	if len(oldRevParts) == 2 && len(newRevParts) == 2 && oldRevParts[0] == newRevParts[0] {
-		if oldRevParts[1] != newRevParts[1] {
+
+	hasOldRev := len(oldRevParts) == 2
+	hasNewRev := len(newRevParts) == 2
+	bothHaveRevs := hasOldRev && hasNewRev
+	sameUpstream := bothHaveRevs && oldRevParts[0] == newRevParts[0]
+
+	// 1. Revision only change (e.g. 2.38_1 -> 2.38_2)
+	if sameUpstream {
+		revChanged := oldRevParts[1] != newRevParts[1]
+		if revChanged {
 			return fmt.Sprintf("%s_%s%s%s", newRevParts[0], orangeSeq, newRevParts[1], resetSeq)
 		}
 		return newVer
@@ -122,6 +131,17 @@ func VersionDiff(oldVer, newVer string, color bool) string {
 		}
 	}
 
+	// When new version has fewer segments than old, and all common segments matched
+	// (e.g. 1.2.3 -> 1.2), highlight the changed trailing segment of new upstream.
+	fewerSegments := len(oldDots) > len(newDots)
+	matchedAllCommon := startColor >= len(newDots)
+	if fewerSegments && matchedAllCommon {
+		startColor = len(newDots) - 1
+		if startColor < 0 {
+			startColor = 0
+		}
+	}
+
 	var coloredParts []string
 	for i, part := range newDots {
 		if i >= startColor {
@@ -132,11 +152,9 @@ func VersionDiff(oldVer, newVer string, color bool) string {
 	}
 
 	res := strings.Join(coloredParts, ".")
-	if len(newRevParts) == 2 {
-		if startColor < len(newDots) {
-			// Upstream changed, revision is also highlighted
-			res += "_" + orangeSeq + newRevParts[1] + resetSeq
-		} else if len(oldRevParts) == 2 && oldRevParts[1] != newRevParts[1] {
+	if hasNewRev {
+		revChanged := !hasOldRev || oldRevParts[1] != newRevParts[1]
+		if revChanged {
 			res += "_" + orangeSeq + newRevParts[1] + resetSeq
 		} else {
 			res += "_" + newRevParts[1]
@@ -169,20 +187,28 @@ func widest(f func(int) string, n int) int {
 	return max
 }
 
-// padRight fills s out to w columns.
-func padRight(s string, w int) string {
-	cur := visibleWidth(s)
+// PadRight fills s out to w columns.
+func PadRight(s string, w int) string {
+	cur := VisibleWidth(s)
 	if cur >= w {
 		return s
 	}
 	return s + strings.Repeat(" ", w-cur)
 }
 
-// padLeft fills s from the left out to w columns.
-func padLeft(s string, w int) string {
-	cur := visibleWidth(s)
+func padRight(s string, w int) string {
+	return PadRight(s, w)
+}
+
+// PadLeft fills s from the left out to w columns.
+func PadLeft(s string, w int) string {
+	cur := VisibleWidth(s)
 	if cur >= w {
 		return s
 	}
 	return strings.Repeat(" ", w-cur) + s
+}
+
+func padLeft(s string, w int) string {
+	return PadLeft(s, w)
 }

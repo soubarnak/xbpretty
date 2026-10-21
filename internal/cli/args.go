@@ -91,7 +91,7 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 				o.version = true
 			case "help":
 				o.help = true
-			case "box-style", "box_style":
+			case "box-style":
 				if !hasValue {
 					if i+1 >= len(argv) {
 						return nil, fmt.Errorf("--box-style needs a value: rounded, classic or ascii")
@@ -104,7 +104,7 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 				}
 				o.boxStyle = value
 				o.explicit["box_style"] = true
-			case "progress-bar", "progress_bar":
+			case "progress-bar":
 				val := true
 				if hasValue {
 					b, err := parseBool(value)

@@ -314,7 +314,7 @@ func TestConfigureRowsCountedNotListed(t *testing.T) {
 func TestConfigureOnlyPlanListsNoGroup(t *testing.T) {
 	s := Build([]Row{row("libgcc", "14.2.1+20250405_4", "configure", 186384, 88847, true, true)}, nil, nil)
 	var b strings.Builder
-	if err := (Renderer{}).Render(&b, s); err != nil {
+	if err := (Renderer{Plain: true}).Render(&b, s); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	if got, want := b.String(), "1 install\n"; got != want {
@@ -350,7 +350,7 @@ func TestRenderAlignsColumnsByDisplayWidth(t *testing.T) {
 		map[string]Old{"acl": {Version: "2.4.0_1", InstalledSize: 41000, HasSize: true}},
 	)
 	var b strings.Builder
-	if err := (Renderer{}).Render(&b, s); err != nil {
+	if err := (Renderer{Plain: true}).Render(&b, s); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 
@@ -387,7 +387,7 @@ func TestRenderAlignsColumnsByDisplayWidth(t *testing.T) {
 func TestRenderShowsARemovalsFreedBytesOnce(t *testing.T) {
 	s := Build([]Row{row("wget", "1.25.0_1", "remove", 3673038, 824658, true, true)}, nil, nil)
 	var b strings.Builder
-	if err := (Renderer{}).Render(&b, s); err != nil {
+	if err := (Renderer{Plain: true}).Render(&b, s); err != nil {
 		t.Fatalf("Render: %v", err)
 	}
 	out := b.String()
@@ -425,21 +425,35 @@ func TestVersionDiffHighlighting(t *testing.T) {
 			oldVer:   "6.8.0_1",
 			newVer:   "6.8.101_1",
 			color:    true,
-			wantDiff: "6.8.\x1b[38;5;202m101\x1b[0m_\x1b[38;5;202m1\x1b[0m",
+			wantDiff: "6.8.\x1b[38;5;202m101\x1b[0m_1",
+		},
+		{
+			name:     "patch bump with revision bump",
+			oldVer:   "6.8.0_1",
+			newVer:   "6.8.101_2",
+			color:    true,
+			wantDiff: "6.8.\x1b[38;5;202m101\x1b[0m_\x1b[38;5;202m2\x1b[0m",
 		},
 		{
 			name:     "minor bump",
 			oldVer:   "8.1.0_1",
 			newVer:   "8.2.1_1",
 			color:    true,
-			wantDiff: "8.\x1b[38;5;202m2\x1b[0m.\x1b[38;5;202m1\x1b[0m_\x1b[38;5;202m1\x1b[0m",
+			wantDiff: "8.\x1b[38;5;202m2\x1b[0m.\x1b[38;5;202m1\x1b[0m_1",
 		},
 		{
 			name:     "major bump",
 			oldVer:   "124.0.1_1",
 			newVer:   "125.0.2_1",
 			color:    true,
-			wantDiff: "\x1b[38;5;202m125\x1b[0m.\x1b[38;5;202m0\x1b[0m.\x1b[38;5;202m2\x1b[0m_\x1b[38;5;202m1\x1b[0m",
+			wantDiff: "\x1b[38;5;202m125\x1b[0m.\x1b[38;5;202m0\x1b[0m.\x1b[38;5;202m2\x1b[0m_1",
+		},
+		{
+			name:     "fewer segments in new version",
+			oldVer:   "1.2.3_1",
+			newVer:   "1.2_1",
+			color:    true,
+			wantDiff: "1.\x1b[38;5;202m2\x1b[0m_1",
 		},
 		{
 			name:     "color disabled",
@@ -705,5 +719,33 @@ func TestNalaASCIIBoxTables(t *testing.T) {
 		if w != 80 {
 			t.Errorf("line %d visible width = %d, want 80: %q", i, w, line)
 		}
+	}
+}
+
+func TestNalaBoxesWhenNoColor(t *testing.T) {
+	rows := []Row{
+		row("ripgrep", "14.1.0_1", "install", 2100000, 1100000, true, true),
+		row("linux6.8", "6.8.101_1", "update", 154000000, 80000000, true, true),
+	}
+	old := map[string]Old{
+		"linux6.8": {Version: "6.8.0_1", InstalledSize: 150000000, HasSize: true},
+	}
+	s := Build(rows, nil, old)
+
+	var b strings.Builder
+	r := Renderer{Color: false, Plain: false, Width: 80}
+	if err := r.Render(&b, s); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := b.String()
+
+	if !strings.Contains(out, "╭") || !strings.Contains(out, "╰") || !strings.Contains(out, "│") {
+		t.Errorf("expected box layout when Color: false and Plain: false, got:\n%s", out)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Errorf("NO_COLOR box layout contains ANSI escape codes:\n%s", out)
+	}
+	if !strings.Contains(out, "6.8.0_1 → 6.8.101_1") {
+		t.Errorf("upgrade row missing old -> new delta:\n%s", out)
 	}
 }

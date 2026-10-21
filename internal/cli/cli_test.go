@@ -1709,8 +1709,9 @@ func TestNalaPlaintextWhenNoColor(t *testing.T) {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
 
-	if strings.Contains(out, "╭") || strings.Contains(out, "╰") || strings.Contains(out, "│") {
-		t.Errorf("NO_COLOR output contains box border runes:\n%s", out)
+	// Interactive with NO_COLOR renders uncolored box layout (Issue 4)
+	if !strings.Contains(out, "╭") || !strings.Contains(out, "╰") || !strings.Contains(out, "│") {
+		t.Errorf("NO_COLOR interactive output missing box border runes:\n%s", out)
 	}
 	if strings.Contains(out, "\x1b[") {
 		t.Errorf("NO_COLOR output contains ANSI escape codes:\n%s", out)
@@ -2150,38 +2151,41 @@ exit 0
 		t.Fatalf("run failed code %d: %s", code, errs)
 	}
 
-	// 1. Verify Download Phase container rendered
-	if !strings.Contains(out, "Downloading...") {
-		t.Errorf("expected Download Phase container in stdout, got:\n%s", out)
+	// 1. Verify Download Phase container rendered in stderr
+	if !strings.Contains(errs, "Downloading...") {
+		t.Errorf("expected Download Phase container in stderr, got:\n%s", errs)
 	}
-	if !strings.Contains(out, "Total Packages:") {
-		t.Errorf("expected Total Packages in stdout, got:\n%s", out)
-	}
-
-	// 2. Verify Unpack/Configure Phase container rendered
-	if !strings.Contains(out, "Running xbps...") {
-		t.Errorf("expected Running xbps container in stdout, got:\n%s", out)
-	}
-	if !strings.Contains(out, "Current Target:") {
-		t.Errorf("expected Current Target in stdout, got:\n%s", out)
+	if !strings.Contains(errs, "Total Packages:") {
+		t.Errorf("expected Total Packages in stderr, got:\n%s", errs)
 	}
 
-	// 3. Verify in-place cursor movement
-	if !strings.Contains(out, "\x1b[5A\r") {
-		t.Errorf("expected cursor jumps in stdout, got:\n%s", out)
+	// 2. Verify Unpack/Configure Phase container rendered in stderr
+	if !strings.Contains(errs, "Running xbps...") {
+		t.Errorf("expected Running xbps container in stderr, got:\n%s", errs)
+	}
+	if !strings.Contains(errs, "Current Target:") {
+		t.Errorf("expected Current Target in stderr, got:\n%s", errs)
 	}
 
-	// 4. Verify permanent completion line
-	if !strings.Contains(out, "✔ Transaction complete:") {
-		t.Errorf("expected completion line in stdout, got:\n%s", out)
-	}
-	if !strings.Contains(out, "1 installed") {
-		t.Errorf("expected '1 installed' in summary, got:\n%s", out)
+	// 3. Verify in-place cursor movement in stderr
+	if !strings.Contains(errs, "\x1b[5A\r") {
+		t.Errorf("expected cursor jumps in stderr, got:\n%s", errs)
 	}
 
-	// 5. Verify download ticks were not dumped to stderr
-	if strings.Contains(errs, "[ 50%]") {
-		t.Errorf("download tick leaked to stderr:\n%s", errs)
+	// 4. Verify permanent completion line in stderr
+	if !strings.Contains(errs, "✔ Transaction complete:") {
+		t.Errorf("expected completion line in stderr, got:\n%s", errs)
+	}
+	if !strings.Contains(errs, "1 installed") {
+		t.Errorf("expected '1 installed' in summary, got:\n%s", errs)
+	}
+
+	// 5. Verify stdout holds strictly the plan summary (ADR-0005)
+	if !strings.Contains(out, "Packages To Install") {
+		t.Errorf("expected plan summary in stdout, got:\n%s", out)
+	}
+	if strings.Contains(out, "Downloading...") || strings.Contains(out, "Running xbps...") {
+		t.Errorf("interactive widget lines leaked to stdout:\n%s", out)
 	}
 }
 
@@ -2213,13 +2217,13 @@ exit 1
 		t.Fatalf("expected code 1, got %d. out:\n%s\nerrs:\n%s", code, out, errs)
 	}
 
-	// Widget should clear 5 lines
-	if !strings.Contains(out, "\x1b[5A\r") {
-		t.Errorf("expected cursor jump clearing box on failure, got:\n%s", out)
+	// Widget should clear 5 lines in stderr using atomic clear
+	if !strings.Contains(errs, "\x1b[5A\r\x1b[0J") {
+		t.Errorf("expected cursor jump clearing box on failure in stderr, got:\n%s", errs)
 	}
 	// Completion banner should NOT be present
-	if strings.Contains(out, "✔ Transaction complete:") {
-		t.Errorf("completion banner should not appear on failure:\n%s", out)
+	if strings.Contains(errs, "✔ Transaction complete:") || strings.Contains(out, "✔ Transaction complete:") {
+		t.Errorf("completion banner should not appear on failure:\n%s", errs)
 	}
 	// Raw error must be in stderr
 	if !strings.Contains(errs, "ERROR: [trans] failed to download figlet") {
@@ -2309,12 +2313,15 @@ exit 0
 	if code != 0 {
 		t.Fatalf("classic code %d: %s", code, errs)
 	}
-	plain := ansiEscape.ReplaceAllString(out, "")
+	if !strings.Contains(out, "Packages To Install") {
+		t.Errorf("stdout missing classic plan summary:\n%s", out)
+	}
+	plain := ansiEscape.ReplaceAllString(errs, "")
 	if !strings.Contains(plain, "┌── Downloading...") {
-		t.Errorf("classic style missing classic download header:\n%s", out)
+		t.Errorf("classic style missing classic download header in stderr:\n%s", errs)
 	}
 	if !strings.Contains(plain, "┌── Running xbps...") {
-		t.Errorf("classic style missing classic running header:\n%s", out)
+		t.Errorf("classic style missing classic running header in stderr:\n%s", errs)
 	}
 
 	// Test ascii box style
@@ -2322,11 +2329,14 @@ exit 0
 	if code != 0 {
 		t.Fatalf("ascii code %d: %s", code, errs)
 	}
-	plain = ansiEscape.ReplaceAllString(out, "")
+	if !strings.Contains(out, "Packages To Install") {
+		t.Errorf("stdout missing ascii plan summary:\n%s", out)
+	}
+	plain = ansiEscape.ReplaceAllString(errs, "")
 	if !strings.Contains(plain, "+-- Downloading...") {
-		t.Errorf("ascii style missing ascii download header:\n%s", out)
+		t.Errorf("ascii style missing ascii download header in stderr:\n%s", errs)
 	}
 	if !strings.Contains(plain, "+-- Running xbps...") {
-		t.Errorf("ascii style missing ascii running header:\n%s", out)
+		t.Errorf("ascii style missing ascii running header in stderr:\n%s", errs)
 	}
 }

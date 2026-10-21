@@ -11,7 +11,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/creack/pty"
 	"github.com/soubarnak/xbpretty/internal/hints"
 )
 
@@ -97,7 +96,7 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 		r.parser = NewStreamParser(0, 0)
 	}
 
-	master, slave, err := pty.Open()
+	master, slave, err := openPty()
 	if err != nil {
 		return r.streamDirect(name, args...)
 	}
@@ -124,12 +123,12 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 	signal.Notify(winch, syscall.SIGWINCH)
 	defer signal.Stop(winch)
 	if f, ok := r.stdinReader().(*os.File); ok {
-		_ = pty.InheritSize(f, master)
+		_ = inheritPtySize(f, master)
 	}
 	go func() {
 		for range winch {
 			if f, ok := r.stdinReader().(*os.File); ok {
-				_ = pty.InheritSize(f, master)
+				_ = inheritPtySize(f, master)
 			}
 		}
 	}()

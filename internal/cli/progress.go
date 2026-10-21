@@ -6,7 +6,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/soubarnak/xbpretty/internal/summary"
 	"github.com/soubarnak/xbpretty/internal/xbps"
@@ -24,19 +23,6 @@ const (
 )
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
-// visibleWidth returns the terminal display width in runes, ignoring ANSI codes.
-func visibleWidth(s string) int {
-	return utf8.RuneCountInString(ansiRegex.ReplaceAllString(s, ""))
-}
-
-func padRight(s string, w int) string {
-	cur := visibleWidth(s)
-	if cur >= w {
-		return s
-	}
-	return s + strings.Repeat(" ", w-cur)
-}
 
 func progressBar(percent float64, width int, color bool, boxStyle string) string {
 	if width < 5 {
@@ -274,7 +260,7 @@ func (w *ProgressWidget) AttachToParser(p *StreamParser) {
 }
 
 func (w *ProgressWidget) buildTopBorder(title string, chars summary.BoxChars, colorSeq string) string {
-	titleWidth := visibleWidth(title)
+	titleWidth := summary.VisibleWidth(title)
 	fillWidth := w.width - titleWidth - 3
 	if fillWidth < 0 {
 		fillWidth = 0
@@ -303,7 +289,7 @@ func (w *ProgressWidget) frameLine(content string, chars summary.BoxChars, color
 	if innerW < 0 {
 		innerW = 0
 	}
-	padded := padRight(content, innerW)
+	padded := summary.PadRight(content, innerW)
 	if !w.color {
 		return chars.Vertical + padded + chars.Vertical
 	}
@@ -471,11 +457,7 @@ func (w *ProgressWidget) Finish(exitCode int, rawStderr string, rows []xbps.Row,
 	w.cleared = true
 
 	if w.renderedOnce {
-		fmt.Fprintf(w.out, "\x1b[5A\r")
-		for i := 0; i < 5; i++ {
-			fmt.Fprintf(w.out, "\x1b[2K\r\n")
-		}
-		fmt.Fprintf(w.out, "\x1b[5A\r")
+		fmt.Fprintf(w.out, "\x1b[5A\r\x1b[0J")
 		w.renderedOnce = false
 	}
 

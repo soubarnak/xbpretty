@@ -145,12 +145,9 @@ func TestProgressWidgetTeardownSuccess(t *testing.T) {
 	w.Finish(0, "", rows, "install")
 
 	out := buf.String()
-	// Should contain cursor up and line clear escape sequences
-	if !strings.Contains(out, "\x1b[5A\r") {
-		t.Errorf("expected cursor up in teardown, got:\n%s", out)
-	}
-	if !strings.Contains(out, "\x1b[2K") {
-		t.Errorf("expected line clear in teardown, got:\n%s", out)
+	// Should contain atomic clear escape sequence \x1b[5A\r\x1b[0J
+	if !strings.Contains(out, "\x1b[5A\r\x1b[0J") {
+		t.Errorf("expected atomic clear in teardown, got:\n%s", out)
 	}
 	// Should contain permanent completion line
 	if !strings.Contains(out, "✔ Transaction complete:") {
@@ -173,12 +170,9 @@ func TestProgressWidgetTeardownFailure(t *testing.T) {
 	w.Finish(1, rawErr, nil, "install")
 
 	out := buf.String()
-	// Should clear the 5 lines
-	if !strings.Contains(out, "\x1b[5A\r") {
-		t.Errorf("expected cursor up in teardown, got:\n%s", out)
-	}
-	if !strings.Contains(out, "\x1b[2K") {
-		t.Errorf("expected line clear in teardown, got:\n%s", out)
+	// Should clear the 5 lines with atomic clear sequence \x1b[5A\r\x1b[0J
+	if !strings.Contains(out, "\x1b[5A\r\x1b[0J") {
+		t.Errorf("expected atomic clear in teardown, got:\n%s", out)
 	}
 	// Should NOT contain completion banner on failure
 	if strings.Contains(out, "✔ Transaction complete:") {
