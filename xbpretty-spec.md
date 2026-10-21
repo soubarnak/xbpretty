@@ -1,27 +1,29 @@
-# xbpretty — Lite Spec (rev 4)
+# xbpretty — Lite Spec (rev 5)
 
-**Status:** Approved, 2026-10-15 (supersedes rev 3)
+**Status:** Approved, 2026-10-22 (supersedes rev 4)
 
 ## 1. Purpose
-A Go wrapper around the xbps CLIs for Void Linux that adds a colored transaction summary and a confirmation prompt, in the style of nala. Project: Bongbetic.
+A Go wrapper around the xbps CLIs for Void Linux that adds a rich, multicolored transaction summary, version diff highlighting, and live framed progress widgets in the style of nala (`volitank/nala`), with a confirmation prompt. Project: Bongbetic.
 
 ## 2. Scope
 **In scope**
 - Wrapping `install`, `remove`, `upgrade`, `autoremove`, `update` over `xbps-install` / `xbps-remove`
-- Dry-run preview, colored summary with sizes and a counts footer, `[Y/n]` prompt
-- Live streaming of xbps output during real execution, with signal forwarding
+- Dry-run preview, Nala-style rounded boxed summary tables with sizes, aligned columns, and a counts footer, `[Y/n]` prompt
+- Package version diff highlighting for upgrades (differentiating changed revision or upstream version components in ANSI 202 orange)
+- Real-time 5-line framed execution progress widget (download counters/speed/ETA, unpack/configure live spinner) driven by hybrid PTY/pipe streaming
+- Non-TTY plaintext graceful degradation for scripting/piping (`| grep`) and `NO_COLOR` support
 - Transaction log and post-run reboot hint
-- User config file for default flags (sudo/doas-aware)
+- User config file for default flags and visual preferences (`box_style`, `progress_bar`)
 - argv[0] aliases (`xbp`, `xbp-install`, etc.) and a `link` helper
 - Flag passthrough to xbps, verbose mode, shell completions, `--version`
 - xbps-src template for native packaging
 
 **Out of scope (v1)**
-- Parallel downloads
+- Parallel downloads (reimplementing xbps networking)
 - Undo / redo (the log in FR-013 records transactions but cannot replay them)
-- Mirror speed-test and selection
+- Mirror speed-test and selection (`nala fetch`)
 - Formatted `search` / `show`
-- libxbps bindings (CLI wrapping only)
+- libxbps CGO bindings (CLI wrapping only)
 - `/etc` config layer
 - Auto-retry or auto-elevation
 
@@ -46,10 +48,10 @@ A Go wrapper around the xbps CLIs for Void Linux that adds a colored transaction
 |---|---|---|
 | FR-009 | M | Default mode: run the xbps command with `-n`, print the summary (FR-011/FR-012), then apply FR-016. As root, prompt `[Y/n]` on stderr: empty input, `y` or `Y` proceeds; `n` or `N` aborts with exit 0; any other input re-prompts. On proceed, run the real command with xbps's `-y` appended, so xbps does not prompt a second time. |
 | FR-010 | M | Non-interactive rule: if stdin is not a TTY and neither `-y` nor `--dry-run` is given, print the summary, then exit 1 with a hint to pass `-y`. Never block waiting on a pipe. |
-| FR-011 | M | Summary groups packages into Install / Upgrade / Remove, plus a Hold group when the dry-run reports held packages. Sources: <br>• Install/upgrade/hold rows: parse the `-n` output columns (pkgver, action, arch, repository, installedsize, downloadsize). <br>• Old version and old installed size for upgrades: `xbps-query -p pkgver,installed_size <pkg>`, batched. <br>• Remove rows, including `autoremove`: `xbps-remove -n` for the package list, plus `xbps-query -p installed_size <pkg>` for sizes. <br>Upgrade rows show `old → new`. `configure` actions are counted but not listed. |
-| FR-012 | S | Render sizes human-readable (B/KiB/MiB/GiB) in aligned columns. End the summary with a footer, e.g. `3 install, 12 upgrade, 1 remove, 2 hold · 48.2 MiB download · +120.4 MiB disk`. The disk figure is the net delta (new installed size minus old installed size minus removed size). |
+| FR-011 | M | Summary groups packages into Install / Upgrade / Remove, plus a Hold group when the dry-run reports held packages. Enclosed in Unicode rounded box containers (`╭── Packages To Upgrade (N) ──╮`). Sources: <br>• Install/upgrade/hold rows: parse the `-n` output columns (pkgver, action, arch, repository, installedsize, downloadsize). <br>• Old version and old installed size for upgrades: `xbps-query -p pkgver,installed_size <pkg>`, batched. <br>• Remove rows, including `autoremove`: `xbps-remove -n` for the package list, plus `xbps-query -p installed_size <pkg>` for sizes. <br>Upgrade rows show `old → new` in a unified `Version Delta` column with version diff highlighting in ANSI 202 orange (`\x1b[38;5;202m`). Package names are color-coded (green for install, blue for upgrade, red for remove, orange for hold). `configure` actions are counted but not listed. |
+| FR-012 | S | Render sizes human-readable (B/KiB/MiB/GiB) in aligned columns. End the summary with a rounded Summary card, e.g. displaying operation counts per group, total download size, and net disk delta (`+X MiB disk` or `-X MiB disk`). When stdout is not a TTY or piped, box borders are omitted and clean space-aligned plaintext is rendered. |
 | FR-013 | S | After every real execution that exits 0, append one line to `$XDG_STATE_HOME/xbpretty/transactions.log` (fallback `<home>/.local/state/...`, with `<home>` resolved per FR-019): ISO-8601 timestamp, command, and the package list with versions. Create the directory on first use. Log failures are warnings, not errors. |
-| FR-014 | M | During real execution, stream xbps stdout and stderr live, unbuffered, so xbps's own progress output remains visible. Forward SIGINT and SIGTERM to the xbps child process, and exit with the child's exit code. |
+| FR-014 | M | During real execution in interactive mode (`isatty(1) == true`), stream xbps stdout through a PTY (forcing line-buffered output during unpack/configure) and stderr through a pipe, collapsed into an in-place 5-line rounded execution widget (`╭── Downloading... ──╮` and `╭── Running xbps... ──╮` with live spinner). Clears on completion to a single checkmark line. Non-TTY streams suppress the widget; `-v` streams raw unbuffered lines. Forward SIGINT and SIGTERM to the xbps child process, and exit with the child's exit code. |
 | FR-015 | M | If the dry-run yields no packages, print `Nothing to do.`, skip the prompt, and exit 0. |
 | FR-015a | C | After a successful `install` or `upgrade` that changed any `linux*` kernel package or `glibc`, print a one-line reboot hint. |
 
@@ -66,7 +68,7 @@ A Go wrapper around the xbps CLIs for Void Linux that adds a colored transaction
 
 | ID | Pri | Requirement |
 |---|---|---|
-| FR-019 | M | Read config from `$XDG_CONFIG_HOME/xbpretty/config.toml`, falling back to `<home>/.config/xbpretty/config.toml`. When euid is 0 and `SUDO_USER` or `DOAS_USER` is set, `<home>` is that user's home directory, not `/root`. Keys: `assume_yes`, `color`, `verbose`, `sync` (default true), `log` (default true), `xbps_install_path`, `xbps_remove_path`, `xbps_query_path`. Precedence: CLI flags > config > built-in defaults. A missing file is not an error. A malformed file exits 2 with the parse error and line. |
+| FR-019 | M | Read config from `$XDG_CONFIG_HOME/xbpretty/config.toml`, falling back to `<home>/.config/xbpretty/config.toml`. When euid is 0 and `SUDO_USER` or `DOAS_USER` is set, `<home>` is that user's home directory, not `/root`. Keys: `assume_yes`, `color`, `verbose`, `sync` (default true), `log` (default true), `box_style` (default `"rounded"`, options: `"rounded"`, `"classic"`, `"ascii"`), `progress_bar` (default `true`), `xbps_install_path`, `xbps_remove_path`, `xbps_query_path`. Precedence: CLI flags > config > built-in defaults. A missing file is not an error. A malformed file exits 2 with the parse error and line. |
 | FR-020 | M | Disable color when stdout is not a TTY or `NO_COLOR` is set. The config `color` key and a `--color=auto\|always\|never` flag override this. |
 | FR-021 | M | Flags: `-n/--dry-run`, `-y/--yes`, `-v/--verbose`, `--no-sync`, `--no-log`, `--color`. `-n` mirrors xbps's own dry-run flag. |
 | FR-022 | S | Arguments after `--` pass through verbatim to the underlying xbps command, in both the dry-run and the real run (e.g. `xbp install -- -f pkg`). |
