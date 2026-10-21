@@ -154,8 +154,10 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 			if r.parser != nil {
 				r.parser.FeedStdout(line)
 			}
-			if out := r.stdoutWriter(); out != nil {
-				fmt.Fprintln(out, line)
+			if r.widget == nil || !r.widget.IsRendered() {
+				if out := r.stdoutWriter(); out != nil {
+					fmt.Fprintln(out, line)
+				}
 			}
 		}
 	}()
@@ -165,7 +167,12 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 	go func() {
 		defer close(stderrDone)
 		pr, pw := io.Pipe()
-		mw := io.MultiWriter(&rawStderr, r.stderrWriter(), pw)
+		var mw io.Writer
+		if r.widget == nil {
+			mw = io.MultiWriter(&rawStderr, r.stderrWriter(), pw)
+		} else {
+			mw = io.MultiWriter(&rawStderr, pw)
+		}
 		parserDone := make(chan struct{})
 		go func() {
 			defer close(parserDone)
