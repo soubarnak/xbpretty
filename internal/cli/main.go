@@ -43,14 +43,16 @@ type runner struct {
 
 // state is everything one invocation of xbpretty needs.
 type state struct {
-	opts   *options
-	stdout io.Writer
-	stderr io.Writer
-	stdin  io.Reader
-	r      *runner
-	color  bool
-	sync   bool
-	log    bool
+	opts        *options
+	stdout      io.Writer
+	stderr      io.Writer
+	stdin       io.Reader
+	r           *runner
+	color       bool
+	sync        bool
+	log         bool
+	boxStyle    string
+	progressBar bool
 }
 
 // Main runs xbpretty with the process arguments and returns its exit code.
@@ -129,6 +131,14 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		st.log = !opts.noLog
 	}
 	st.color = wantColor(cfg.Color, opts)
+	st.boxStyle = cfg.BoxStyle
+	if opts.explicit["box_style"] {
+		st.boxStyle = opts.boxStyle
+	}
+	st.progressBar = cfg.ProgressBar
+	if opts.explicit["progress_bar"] && opts.progressBar != nil {
+		st.progressBar = *opts.progressBar
+	}
 	st.r = &runner{cfg: cfg, out: err, verbose: verbose}
 
 	if cmd == "" {

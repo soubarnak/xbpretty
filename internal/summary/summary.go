@@ -154,9 +154,11 @@ func (s *Summary) NetDiskBytes() int64 {
 
 // Renderer draws a summary to a writer, optionally with ANSI colour.
 type Renderer struct {
-	Color bool
-	Plain bool
-	Width int
+	Color       bool
+	Plain       bool
+	Width       int
+	BoxStyle    string
+	ProgressBar bool
 }
 
 // Render writes the grouped summary and its footer to w.
@@ -322,16 +324,17 @@ func (r Renderer) renderBoxes(w io.Writer, s *Summary) error {
 		})
 	}
 
+	chars := BoxCharacterSet(r.BoxStyle)
 	for _, g := range groups {
-		if err := r.renderBox(w, g.title, g.colorCode, g.headers, g.rows, termWidth); err != nil {
+		if err := r.renderBox(w, g.title, g.colorCode, g.headers, g.rows, termWidth, chars); err != nil {
 			return err
 		}
 	}
 
-	return r.renderSummaryCard(w, s, termWidth)
+	return r.renderSummaryCard(w, s, termWidth, chars)
 }
 
-func (r Renderer) renderBox(w io.Writer, title, colorCode string, headers []string, rows [][]string, termWidth int) error {
+func (r Renderer) renderBox(w io.Writer, title, colorCode string, headers []string, rows [][]string, termWidth int, chars BoxChars) error {
 	col0Min := visibleWidth(headers[0])
 	col1Min := visibleWidth(headers[1])
 	col2Min := visibleWidth(headers[2])
@@ -376,38 +379,38 @@ func (r Renderer) renderBox(w io.Writer, title, colorCode string, headers []stri
 	if dashes < 1 {
 		dashes = 1
 	}
-	top := "╭── " + colorCode + title + resetSeq + " " + strings.Repeat("─", dashes) + "╮\n"
+	top := chars.TopLeft + chars.Horizontal + chars.Horizontal + " " + colorCode + title + resetSeq + " " + strings.Repeat(chars.Horizontal, dashes) + chars.TopRight + "\n"
 	if _, err := io.WriteString(w, top); err != nil {
 		return err
 	}
 
-	hLine := "│  " + padRight(boldSeq+headers[0]+resetSeq, col0Width) +
+	hLine := chars.Vertical + "  " + padRight(boldSeq+headers[0]+resetSeq, col0Width) +
 		padRight(boldSeq+headers[1]+resetSeq, col1Width) +
 		padLeft(boldSeq+headers[2]+resetSeq, col2Width)
-	if _, err := io.WriteString(w, padRight(hLine, width-1)+"│\n"); err != nil {
+	if _, err := io.WriteString(w, padRight(hLine, width-1)+chars.Vertical+"\n"); err != nil {
 		return err
 	}
 
-	div := "├" + strings.Repeat("─", width-2) + "┤\n"
+	div := chars.DividerLeft + strings.Repeat(chars.Horizontal, width-2) + chars.DividerRight + "\n"
 	if _, err := io.WriteString(w, div); err != nil {
 		return err
 	}
 
 	for _, row := range rows {
-		rowLine := "│  " + padRight(row[0], col0Width) +
+		rowLine := chars.Vertical + "  " + padRight(row[0], col0Width) +
 			padRight(row[1], col1Width) +
 			padLeft(row[2], col2Width)
-		if _, err := io.WriteString(w, padRight(rowLine, width-1)+"│\n"); err != nil {
+		if _, err := io.WriteString(w, padRight(rowLine, width-1)+chars.Vertical+"\n"); err != nil {
 			return err
 		}
 	}
 
-	bottom := "╰" + strings.Repeat("─", width-2) + "╯\n\n"
+	bottom := chars.BottomLeft + strings.Repeat(chars.Horizontal, width-2) + chars.BottomRight + "\n\n"
 	_, err := io.WriteString(w, bottom)
 	return err
 }
 
-func (r Renderer) renderSummaryCard(w io.Writer, s *Summary, termWidth int) error {
+func (r Renderer) renderSummaryCard(w io.Writer, s *Summary, termWidth int, chars BoxChars) error {
 	width := termWidth
 	c := s.Counts()
 	var parts []string
@@ -449,22 +452,22 @@ func (r Renderer) renderSummaryCard(w io.Writer, s *Summary, termWidth int) erro
 	if dashes < 1 {
 		dashes = 1
 	}
-	top := "╭── " + boldSeq + title + resetSeq + " " + strings.Repeat("─", dashes) + "╮\n"
+	top := chars.TopLeft + chars.Horizontal + chars.Horizontal + " " + boldSeq + title + resetSeq + " " + strings.Repeat(chars.Horizontal, dashes) + chars.TopRight + "\n"
 	if _, err := io.WriteString(w, top); err != nil {
 		return err
 	}
 
-	line1 := "│  Changes:  " + countsText
-	if _, err := io.WriteString(w, padRight(line1, width-1)+"│\n"); err != nil {
+	line1 := chars.Vertical + "  Changes:  " + countsText
+	if _, err := io.WriteString(w, padRight(line1, width-1)+chars.Vertical+"\n"); err != nil {
 		return err
 	}
 
-	line2 := "│  " + statsText
-	if _, err := io.WriteString(w, padRight(line2, width-1)+"│\n"); err != nil {
+	line2 := chars.Vertical + "  " + statsText
+	if _, err := io.WriteString(w, padRight(line2, width-1)+chars.Vertical+"\n"); err != nil {
 		return err
 	}
 
-	bottom := "╰" + strings.Repeat("─", width-2) + "╯\n"
+	bottom := chars.BottomLeft + strings.Repeat(chars.Horizontal, width-2) + chars.BottomRight + "\n"
 	_, err := io.WriteString(w, bottom)
 	return err
 }

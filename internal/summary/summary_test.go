@@ -588,3 +588,122 @@ func TestNalaPlaintextFallback(t *testing.T) {
 		t.Errorf("plaintext fallback missing standard headers:\n%s", out)
 	}
 }
+
+func TestBoxCharacterSet(t *testing.T) {
+	rounded := BoxCharacterSet("rounded")
+	if rounded.TopLeft != "╭" || rounded.TopRight != "╮" || rounded.BottomLeft != "╰" || rounded.BottomRight != "╯" ||
+		rounded.Horizontal != "─" || rounded.Vertical != "│" || rounded.DividerLeft != "├" || rounded.DividerRight != "┤" {
+		t.Errorf("unexpected rounded chars: %+v", rounded)
+	}
+
+	classic := BoxCharacterSet("classic")
+	if classic.TopLeft != "┌" || classic.TopRight != "┐" || classic.BottomLeft != "└" || classic.BottomRight != "┘" ||
+		classic.Horizontal != "─" || classic.Vertical != "│" || classic.DividerLeft != "├" || classic.DividerRight != "┤" {
+		t.Errorf("unexpected classic chars: %+v", classic)
+	}
+
+	ascii := BoxCharacterSet("ascii")
+	if ascii.TopLeft != "+" || ascii.TopRight != "+" || ascii.BottomLeft != "+" || ascii.BottomRight != "+" ||
+		ascii.Horizontal != "-" || ascii.Vertical != "|" || ascii.DividerLeft != "+" || ascii.DividerRight != "+" {
+		t.Errorf("unexpected ascii chars: %+v", ascii)
+	}
+
+	def := BoxCharacterSet("")
+	if def != rounded {
+		t.Errorf("empty style should default to rounded, got %+v", def)
+	}
+}
+
+func TestNalaClassicBoxTables(t *testing.T) {
+	rows := []Row{
+		row("ripgrep", "14.1.0_1", "install", 2100000, 1100000, true, true),
+		row("linux6.8", "6.8.101_1", "update", 154000000, 80000000, true, true),
+	}
+	old := map[string]Old{
+		"linux6.8": {Version: "6.8.0_1", InstalledSize: 150000000, HasSize: true},
+	}
+	s := Build(rows, nil, old)
+
+	var b strings.Builder
+	r := Renderer{Color: true, Width: 80, BoxStyle: "classic", ProgressBar: true}
+	if err := r.Render(&b, s); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := b.String()
+	plainOut := stripANSI(out)
+
+	if !strings.Contains(plainOut, "┌── Packages To Install (1)") {
+		t.Errorf("missing classic install header:\n%s", out)
+	}
+	if !strings.Contains(plainOut, "┌── Packages To Upgrade (1)") {
+		t.Errorf("missing classic upgrade header:\n%s", out)
+	}
+	if !strings.Contains(plainOut, "┌── Summary") {
+		t.Errorf("missing classic summary card header:\n%s", out)
+	}
+	if strings.Contains(plainOut, "╭") || strings.Contains(plainOut, "╰") {
+		t.Errorf("classic output should not contain rounded runes:\n%s", out)
+	}
+
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		firstRune, _ := utf8.DecodeRuneInString(line)
+		if firstRune != '┌' && firstRune != '│' && firstRune != '├' && firstRune != '└' {
+			t.Errorf("line %d does not start with classic box rune: %q", i, line)
+		}
+		w := visibleWidth(line)
+		if w != 80 {
+			t.Errorf("line %d visible width = %d, want 80: %q", i, w, line)
+		}
+	}
+}
+
+func TestNalaASCIIBoxTables(t *testing.T) {
+	rows := []Row{
+		row("ripgrep", "14.1.0_1", "install", 2100000, 1100000, true, true),
+		row("linux6.8", "6.8.101_1", "update", 154000000, 80000000, true, true),
+	}
+	old := map[string]Old{
+		"linux6.8": {Version: "6.8.0_1", InstalledSize: 150000000, HasSize: true},
+	}
+	s := Build(rows, nil, old)
+
+	var b strings.Builder
+	r := Renderer{Color: true, Width: 80, BoxStyle: "ascii"}
+	if err := r.Render(&b, s); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := b.String()
+	plainOut := stripANSI(out)
+
+	if !strings.Contains(plainOut, "+-- Packages To Install (1)") {
+		t.Errorf("missing ascii install header:\n%s", out)
+	}
+	if !strings.Contains(plainOut, "+-- Packages To Upgrade (1)") {
+		t.Errorf("missing ascii upgrade header:\n%s", out)
+	}
+	if !strings.Contains(plainOut, "+-- Summary") {
+		t.Errorf("missing ascii summary card header:\n%s", out)
+	}
+	if strings.Contains(plainOut, "╭") || strings.Contains(plainOut, "┌") {
+		t.Errorf("ascii output should not contain unicode box runes:\n%s", out)
+	}
+
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		firstRune, _ := utf8.DecodeRuneInString(line)
+		if firstRune != '+' && firstRune != '|' {
+			t.Errorf("line %d does not start with ascii box char: %q", i, line)
+		}
+		w := visibleWidth(line)
+		if w != 80 {
+			t.Errorf("line %d visible width = %d, want 80: %q", i, w, line)
+		}
+	}
+}
