@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/soubarnak/xbpretty/internal/summary"
 	"github.com/soubarnak/xbpretty/internal/xbps"
 )
 
@@ -177,5 +178,58 @@ func TestProgressWidgetTeardownFailure(t *testing.T) {
 	// Should NOT contain completion banner on failure
 	if strings.Contains(out, "✔ Transaction complete:") {
 		t.Errorf("did not expect completion line on failure, got:\n%s", out)
+	}
+}
+
+func TestProgressWidgetExactLineWidths(t *testing.T) {
+	widths := []int{60, 80, 100, 120, 180}
+	styles := []string{"rounded", "classic", "ascii"}
+	colors := []bool{true, false}
+
+	for _, width := range widths {
+		for _, style := range styles {
+			for _, color := range colors {
+				// 1. Download phase
+				var dlBuf bytes.Buffer
+				wDl := NewProgressWidget(&dlBuf, style, color, width, 5, 1024*1024*50)
+				pDl := NewStreamParser(5, 1024*1024*50)
+				wDl.AttachToParser(pDl)
+				pDl.FeedStderr("[ 40%] firefox-158.0.1_1.x86_64.xbps: [20MB 40%] 12.5MB/s ETA: 00m03s\r")
+
+				dlLines := strings.Split(strings.TrimSuffix(dlBuf.String(), "\n"), "\n")
+				if len(dlLines) != 5 {
+					t.Fatalf("expected 5 lines in dl box, got %d for width %d, style %s, color %v", len(dlLines), width, style, color)
+				}
+				for i, line := range dlLines {
+					vw := summary.VisibleWidth(line)
+					if vw != width {
+						t.Errorf("dl width %d %s color=%v: line %d visible width = %d, want %d:\n%q",
+							width, style, color, i, vw, width, line)
+					}
+				}
+
+				// 2. Action / Unpack phase
+				var actBuf bytes.Buffer
+				wAct := NewProgressWidget(&actBuf, style, color, width, 5, 0)
+				pAct := NewStreamParser(5, 0)
+				wAct.AttachToParser(pAct)
+				pAct.FeedStdout("[*] Unpacking packages\n")
+				actBuf.Reset()
+				pAct.FeedStdout("firefox-158.0.1_1: unpacking ...\n")
+
+				actOutput := strings.TrimPrefix(actBuf.String(), "\x1b[5A\r")
+				actLines := strings.Split(strings.TrimSuffix(actOutput, "\n"), "\n")
+				if len(actLines) != 5 {
+					t.Fatalf("expected 5 lines in act box, got %d for width %d, style %s, color %v", len(actLines), width, style, color)
+				}
+				for i, line := range actLines {
+					vw := summary.VisibleWidth(line)
+					if vw != width {
+						t.Errorf("act width %d %s color=%v: line %d visible width = %d, want %d:\n%q",
+							width, style, color, i, vw, width, line)
+					}
+				}
+			}
+		}
 	}
 }

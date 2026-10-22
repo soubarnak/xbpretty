@@ -38,6 +38,7 @@ type runner struct {
 	out        io.Writer
 	verbose    bool
 	lastStderr string
+	lastStdout string
 	quiet      bool
 
 	stdout io.Writer

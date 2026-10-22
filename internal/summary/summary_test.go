@@ -749,3 +749,31 @@ func TestNalaBoxesWhenNoColor(t *testing.T) {
 		t.Errorf("upgrade row missing old -> new delta:\n%s", out)
 	}
 }
+
+func TestTruncateVisible(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		maxWidth int
+		wantW    int
+	}{
+		{"empty", "", 10, 0},
+		{"zero width", "hello", 0, 0},
+		{"short ascii", "hello", 10, 5},
+		{"exact ascii", "hello", 5, 5},
+		{"long ascii", "hello world", 5, 5},
+		{"colored string", "\x1b[1;32mTotal Packages:\x1b[0m 100", 8, 8},
+		{"unicode runes", "Phase: ⠋ Unpacking packages", 10, 10},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := TruncateVisible(tt.input, tt.maxWidth)
+			w := VisibleWidth(got)
+			if w != tt.wantW {
+				t.Errorf("TruncateVisible(%q, %d) visible width = %d, want %d (got %q)",
+					tt.input, tt.maxWidth, w, tt.wantW, got)
+			}
+		})
+	}
+}

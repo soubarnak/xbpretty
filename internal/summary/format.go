@@ -35,6 +35,52 @@ func visibleWidth(s string) int {
 	return VisibleWidth(s)
 }
 
+// TruncateVisible truncates s so its display width (ignoring ANSI escape codes)
+// does not exceed maxWidth. If s has ANSI styling and is truncated, a reset sequence is appended.
+func TruncateVisible(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if VisibleWidth(s) <= maxWidth {
+		return s
+	}
+
+	var buf strings.Builder
+	width := 0
+	hasColor := false
+
+	i := 0
+	b := []byte(s)
+	for i < len(b) {
+		if b[i] == 0x1b && i+1 < len(b) && b[i+1] == '[' {
+			end := i + 2
+			for end < len(b) && !((b[end] >= 'a' && b[end] <= 'z') || (b[end] >= 'A' && b[end] <= 'Z')) {
+				end++
+			}
+			if end < len(b) {
+				end++
+				buf.Write(b[i:end])
+				hasColor = true
+				i = end
+				continue
+			}
+		}
+
+		r, size := utf8.DecodeRune(b[i:])
+		if width+1 > maxWidth {
+			break
+		}
+		buf.WriteRune(r)
+		width++
+		i += size
+	}
+
+	if hasColor {
+		buf.WriteString("\x1b[0m")
+	}
+	return buf.String()
+}
+
 // BoxChars holds the characters used to render container borders.
 type BoxChars struct {
 	TopLeft      string

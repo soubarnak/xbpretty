@@ -136,16 +136,17 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 	}
 
 	// On failure:
-	// If widget was active, raw stderr was suppressed during run; print it now (FR-017).
-	hasStderrToFlush := widget != nil && stderr != ""
-	if hasStderrToFlush {
-		fmt.Fprint(st.stderr, stderr)
+	// If widget was active, raw output was suppressed during run; print it now (FR-017).
+	if widget != nil {
+		if st.r.lastStdout != "" {
+			fmt.Fprint(st.stdout, st.r.lastStdout)
+		}
+		if stderr != "" {
+			fmt.Fprint(st.stderr, stderr)
+		}
 	}
-	// FR-017: the raw xbps output stays, then one matching hint if any. Only
-	// stderr is kept from a real run: stdout goes straight to the terminal so
-	// xbps still sees one. A failure that lives on stdout alone is only caught
-	// when the dry run that came first already printed it (ADR-0006).
-	if h := hints.Lookup(code, hints.Output{Stderr: stderr}); h != nil {
+	// FR-017: the raw xbps output stays, then one matching hint if any.
+	if h := hints.Lookup(code, hints.Output{Stdout: st.r.lastStdout, Stderr: stderr}); h != nil {
 		fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
 	}
 	isRemovePlan := len(rows) > 0 && rows[0].Action == "remove"

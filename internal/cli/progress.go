@@ -131,6 +131,7 @@ func (w *ProgressWidget) Start() {
 		return
 	}
 	w.started = true
+	w.renderLocked()
 	w.mu.Unlock()
 
 	go func() {
@@ -260,8 +261,13 @@ func (w *ProgressWidget) AttachToParser(p *StreamParser) {
 }
 
 func (w *ProgressWidget) buildTopBorder(title string, chars summary.BoxChars, colorSeq string) string {
+	maxTitleW := w.width - 4
+	if maxTitleW < 0 {
+		maxTitleW = 0
+	}
+	title = summary.TruncateVisible(title, maxTitleW)
 	titleWidth := summary.VisibleWidth(title)
-	fillWidth := w.width - titleWidth - 3
+	fillWidth := w.width - titleWidth - 4
 	if fillWidth < 0 {
 		fillWidth = 0
 	}
@@ -289,6 +295,7 @@ func (w *ProgressWidget) frameLine(content string, chars summary.BoxChars, color
 	if innerW < 0 {
 		innerW = 0
 	}
+	content = summary.TruncateVisible(content, innerW)
 	padded := summary.PadRight(content, innerW)
 	if !w.color {
 		return chars.Vertical + padded + chars.Vertical
@@ -318,7 +325,10 @@ func (w *ProgressWidget) buildDownloadLine2() string {
 
 func (w *ProgressWidget) buildDownloadLine3() string {
 	pct := w.downloadPercent
-	bar := progressBar(pct, 20, w.color, w.boxStyle)
+	innerW := w.width - 2
+	if innerW < 0 {
+		innerW = 0
+	}
 
 	dlStr := summary.Human(uint64(w.downloadedBytes))
 	var totStr string
@@ -337,12 +347,27 @@ func (w *ProgressWidget) buildDownloadLine3() string {
 		eta = "-:--:--"
 	}
 
-	if w.color {
-		return fmt.Sprintf("  Time Remaining: %s  [%s] %s%.1f%%%s • %s%s/%s%s • %s%s%s",
-			eta, bar, boldSeq+blueSeq, pct, resetSeq, boldSeq+greenSeq, dlStr, totStr, resetSeq, boldSeq+greenSeq, rate, resetSeq)
+	label := "  Time Remaining: "
+	if w.width < 75 {
+		label = "  ETA: "
 	}
-	return fmt.Sprintf("  Time Remaining: %s  [%s] %.1f%% • %s/%s • %s",
-		eta, bar, pct, dlStr, totStr, rate)
+
+	baseW := summary.VisibleWidth(label) + summary.VisibleWidth(eta) + 17 + summary.VisibleWidth(dlStr) + summary.VisibleWidth(totStr) + summary.VisibleWidth(rate)
+	barWidth := innerW - baseW
+	if barWidth > 20 {
+		barWidth = 20
+	}
+	if barWidth < 6 {
+		barWidth = 6
+	}
+	bar := progressBar(pct, barWidth, w.color, w.boxStyle)
+
+	if w.color {
+		return fmt.Sprintf("%s%s  [%s] %s%.1f%%%s • %s%s/%s%s • %s%s%s",
+			label, eta, bar, boldSeq+blueSeq, pct, resetSeq, boldSeq+greenSeq, dlStr, totStr, resetSeq, boldSeq+greenSeq, rate, resetSeq)
+	}
+	return fmt.Sprintf("%s%s  [%s] %.1f%% • %s/%s • %s",
+		label, eta, bar, pct, dlStr, totStr, rate)
 }
 
 func (w *ProgressWidget) buildActionLine1() string {
@@ -382,7 +407,18 @@ func (w *ProgressWidget) buildActionLine3() string {
 	if pct < 0.0 {
 		pct = 0.0
 	}
-	bar := progressBar(pct, 24, w.color, w.boxStyle)
+	innerW := w.width - 2
+	if innerW < 0 {
+		innerW = 0
+	}
+	barWidth := innerW - 44
+	if barWidth > 24 {
+		barWidth = 24
+	}
+	if barWidth < 8 {
+		barWidth = 8
+	}
+	bar := progressBar(pct, barWidth, w.color, w.boxStyle)
 	if w.color {
 		return fmt.Sprintf("  Status:          [%s] %s%.1f%%%s • %d/%d actions",
 			bar, boldSeq+blueSeq, pct, resetSeq, w.completedActions, w.totalActions)

@@ -1792,6 +1792,20 @@ exit 0
 	if !strings.Contains(out, "DIRECT_PIPES_OK") {
 		t.Errorf("expected verbose run to use direct pipes, got out:\n%s\nerr:\n%s", out, errs)
 	}
+
+	// Case 4: Interactive mode with progress widget active (default, without --no-progress)
+	// -> child stdout should be consumed by the widget/parser and NOT leaked to stdout!
+	e.tty = true
+	code, out, errs = e.run("xbpretty", "install", "-y", "figlet")
+	if code != 0 {
+		t.Fatalf("interactive run with widget failed code %d: %s", code, errs)
+	}
+	if strings.Contains(out, "HYBRID_PTY_PIPE_OK") {
+		t.Errorf("expected child stdout to be suppressed from stdout when widget is active, got:\n%s", out)
+	}
+	if !strings.Contains(errs, "Transaction complete:") {
+		t.Errorf("expected completion message on stderr, got:\n%s", errs)
+	}
 }
 
 func TestHybridPTYLineBufferingDuringUnpack(t *testing.T) {

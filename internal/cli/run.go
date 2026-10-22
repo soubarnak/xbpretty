@@ -144,16 +144,19 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 		}
 	}()
 
+	var rawStdout bytes.Buffer
 	stdoutDone := make(chan struct{})
 	go func() {
 		defer close(stdoutDone)
 		scanner := bufio.NewScanner(master)
 		for scanner.Scan() {
 			line := scanner.Text()
+			rawStdout.WriteString(line)
+			rawStdout.WriteByte('\n')
 			if r.parser != nil {
 				r.parser.FeedStdout(line)
 			}
-			if r.widget == nil || !r.widget.IsRendered() {
+			if r.widget == nil {
 				if out := r.stdoutWriter(); out != nil {
 					fmt.Fprintln(out, line)
 				}
@@ -193,6 +196,7 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 	<-stderrDone
 
 	err = cmd.Wait()
+	r.lastStdout = rawStdout.String()
 	r.lastStderr = rawStderr.String()
 	if err == nil {
 		return 0, nil
