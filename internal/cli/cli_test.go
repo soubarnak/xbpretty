@@ -1799,8 +1799,8 @@ func TestHybridPTYLineBufferingDuringUnpack(t *testing.T) {
 	e.root = true
 	e.tty = true
 
-	// Custom stub script that uses python (or sh) to write an unbuffered line ending in \n,
-	// then sleeps. In a PTY, the line is flushed immediately on \n without waiting 4KB.
+	// Custom stub script that writes a line ending in \n, then sleeps.
+	// In a PTY, line-buffered output is flushed immediately on \n without waiting 4KB.
 	stubScript := filepath.Join(e.dir, "buffering-stub")
 	scriptContent := `#!/bin/sh
 case "${1:-}" in
@@ -1810,11 +1810,9 @@ case "${1:-}" in
     ;;
 esac
 
-python3 -c "import sys, time
-sys.stdout.write('[*] Unpacking packages\nfiglet-2.2.5_6: unpacking ...\n')
-time.sleep(0.4)
-sys.stdout.write('figlet-2.2.5_6: installed successfully.\n')
-"
+printf '[*] Unpacking packages\nfiglet-2.2.5_6: unpacking ...\n'
+sleep 0.4 2>/dev/null || sleep 1
+printf 'figlet-2.2.5_6: installed successfully.\n'
 exit 0
 `
 	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
