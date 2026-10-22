@@ -27,6 +27,8 @@ type Config struct {
 	Verbose     bool
 	Sync        bool
 	Log         bool
+	BoxStyle    string
+	ProgressBar bool
 	XBPSInstall string
 	XBPSRemove  string
 	XBPSQuery   string
@@ -41,6 +43,8 @@ func Defaults() Config {
 		Verbose:     false,
 		Sync:        true,
 		Log:         true,
+		BoxStyle:    "rounded",
+		ProgressBar: true,
 		XBPSInstall: "xbps-install",
 		XBPSRemove:  "xbps-remove",
 		XBPSQuery:   "xbps-query",
@@ -225,6 +229,18 @@ func apply(cfg *Config, key, value string) error {
 			return err
 		}
 		cfg.Log = b
+	case "box_style":
+		v := unquote(value)
+		if !validBoxStyle(v) {
+			return fmt.Errorf("box_style must be one of rounded, classic, ascii, got %q", v)
+		}
+		cfg.BoxStyle = v
+	case "progress_bar":
+		b, err := parseBool(value)
+		if err != nil {
+			return err
+		}
+		cfg.ProgressBar = b
 	case "xbps_install_path":
 		cfg.XBPSInstall = unquote(value)
 	case "xbps_remove_path":
@@ -250,6 +266,14 @@ func parseBool(value string) (bool, error) {
 func validColor(value string) bool {
 	switch value {
 	case "auto", "always", "never":
+		return true
+	}
+	return false
+}
+
+func validBoxStyle(value string) bool {
+	switch value {
+	case "rounded", "classic", "ascii":
 		return true
 	}
 	return false

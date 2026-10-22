@@ -20,6 +20,8 @@ color = "never"
 verbose = true
 sync = false
 log = false
+box_style = "classic"
+progress_bar = false
 xbps_install_path = "/usr/local/bin/xbps-install"
 xbps_remove_path = '/usr/local/bin/xbps-remove'
 xbps_query_path = /usr/local/bin/xbps-query
@@ -34,6 +36,8 @@ xbps_query_path = /usr/local/bin/xbps-query
 		Verbose:     true,
 		Sync:        false,
 		Log:         false,
+		BoxStyle:    "classic",
+		ProgressBar: false,
 		XBPSInstall: "/usr/local/bin/xbps-install",
 		XBPSRemove:  "/usr/local/bin/xbps-remove",
 		XBPSQuery:   "/usr/local/bin/xbps-query",
@@ -62,6 +66,8 @@ func TestParseErrors(t *testing.T) {
 		{"no equals sign", "assume_yes\n", 1},
 		{"bad bool", "assume_yes = maybe\n", 1},
 		{"bad color", "color = \"blue\"\n", 1},
+		{"bad box_style", "box_style = \"fancy\"\n", 1},
+		{"bad progress_bar", "progress_bar = maybe\n", 1},
 		{"unknown key", "verbose = true\nnope = 1\n", 2},
 		{"line number after comments", "# c\n\nsync = 1\n", 3},
 	}
@@ -79,6 +85,32 @@ func TestParseErrors(t *testing.T) {
 				t.Errorf("line = %d, want %d (error: %v)", pe.Line, tt.wantLine, pe)
 			}
 		})
+	}
+}
+
+func TestBoxStyleAndProgressBarOptions(t *testing.T) {
+	tests := []struct {
+		in          string
+		wantBox     string
+		wantBar     bool
+	}{
+		{"box_style = \"rounded\"\nprogress_bar = true\n", "rounded", true},
+		{"box_style = \"classic\"\nprogress_bar = false\n", "classic", false},
+		{"box_style = 'ascii'\nprogress_bar = true\n", "ascii", true},
+		{"box_style = ascii\nprogress_bar = false\n", "ascii", false},
+		{"", "rounded", true}, // defaults
+	}
+	for _, tt := range tests {
+		cfg, err := Parse(strings.NewReader(tt.in))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tt.in, err)
+		}
+		if cfg.BoxStyle != tt.wantBox {
+			t.Errorf("BoxStyle for %q = %q, want %q", tt.in, cfg.BoxStyle, tt.wantBox)
+		}
+		if cfg.ProgressBar != tt.wantBar {
+			t.Errorf("ProgressBar for %q = %v, want %v", tt.in, cfg.ProgressBar, tt.wantBar)
+		}
 	}
 }
 

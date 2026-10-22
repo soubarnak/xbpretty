@@ -1647,3 +1647,696 @@ func TestStubClassifiesEveryArgvShape(t *testing.T) {
 		}
 	}
 }
+
+func TestNalaRoundedContainersInteractive(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
+	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
+	code, out, errs := e.run("xbpretty", "upgrade", "-n", "--color=auto")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+
+	plain := ansiEscape.ReplaceAllString(out, "")
+	if !strings.Contains(plain, "╭── Packages To Upgrade (1)") {
+		t.Errorf("interactive output missing rounded upgrade box:\n%s", out)
+	}
+	if !strings.Contains(plain, "╭── Summary") {
+		t.Errorf("interactive output missing rounded summary card:\n%s", out)
+	}
+	if !strings.Contains(out, "\x1b[38;5;202m") {
+		t.Errorf("interactive output missing orange version diff:\n%s", out)
+	}
+	if !strings.Contains(out, "\x1b[1;34m") {
+		t.Errorf("interactive output missing blue action color:\n%s", out)
+	}
+	if !strings.Contains(plain, "0.60.7_1 → 0.60.8_1") {
+		t.Errorf("interactive output missing version arrow delta:\n%s", out)
+	}
+}
+
+func TestNalaPlaintextWhenPiped(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = false
+	e.set("XB_STUB_STDOUT", planCapture(t, "0607/upgrade.txt"))
+	code, out, errs := e.run("xbpretty", "upgrade", "-n")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+
+	if strings.Contains(out, "╭") || strings.Contains(out, "╰") || strings.Contains(out, "│") {
+		t.Errorf("piped output contains box border runes:\n%s", out)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Errorf("piped output contains ANSI escape codes:\n%s", out)
+	}
+	if !strings.Contains(out, "Upgrade") {
+		t.Errorf("piped output missing plaintext Upgrade header:\n%s", out)
+	}
+}
+
+func TestNalaPlaintextWhenNoColor(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+	e.set("NO_COLOR", "1")
+	e.set("XB_STUB_STDOUT", planCapture(t, "0607/upgrade.txt"))
+	code, out, errs := e.run("xbpretty", "upgrade", "-n")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+
+	// Interactive with NO_COLOR renders uncolored box layout (Issue 4)
+	if !strings.Contains(out, "╭") || !strings.Contains(out, "╰") || !strings.Contains(out, "│") {
+		t.Errorf("NO_COLOR interactive output missing box border runes:\n%s", out)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Errorf("NO_COLOR output contains ANSI escape codes:\n%s", out)
+	}
+}
+
+func TestCLIRunDirectSeam(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = false
+	e.set("XB_STUB_STDOUT", planCapture(t, "0607/upgrade.txt"))
+
+	var outBuf, errBuf strings.Builder
+	code := Run([]string{"xbpretty", "upgrade", "-n"}, strings.NewReader(""), &outBuf, &errBuf)
+	if code != 0 {
+		t.Fatalf("Run exit = %d, want 0\n%s", code, errBuf.String())
+	}
+	if !strings.Contains(outBuf.String(), "Upgrade") {
+		t.Errorf("Run output missing summary:\n%s", outBuf.String())
+	}
+}
+
+func TestHybridPTYExecutionInteractiveVsNonInteractive(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+
+	// Custom stub script that checks whether stdout is a TTY and whether stderr is a TTY.
+	stubScript := filepath.Join(e.dir, "custom-xbps-install")
+	scriptContent := `#!/bin/sh
+case "${1:-}" in
+  -*n*)
+    printf '%s' "${XB_STUB_STDOUT:-}"
+    exit 0
+    ;;
+esac
+
+# Check TTY status of stdout (fd 1) and stderr (fd 2)
+if [ -t 1 ] && ! [ -t 2 ]; then
+  echo "HYBRID_PTY_PIPE_OK"
+elif ! [ -t 1 ] && ! [ -t 2 ]; then
+  echo "DIRECT_PIPES_OK"
+else
+  echo "OTHER_STREAMS: stdout_tty=$( [ -t 1 ] && echo 1 || echo 0 ) stderr_tty=$( [ -t 2 ] && echo 1 || echo 0 )"
+fi
+exit 0
+`
+	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.pointInstallAt(stubScript)
+
+	// Case 1: Interactive mode (tty = true, no verbose) -> should spawn PTY on stdout and Pipe on stderr
+	e.tty = true
+	code, out, errs := e.run("xbpretty", "install", "-y", "--no-progress", "figlet")
+	if code != 0 {
+		t.Fatalf("interactive run failed code %d: %s", code, errs)
+	}
+	if !strings.Contains(out, "HYBRID_PTY_PIPE_OK") {
+		t.Errorf("expected interactive run to use PTY on stdout and pipe on stderr, got out:\n%s\nerr:\n%s", out, errs)
+	}
+
+	// Case 2: Non-interactive mode (tty = false) -> should fall back to direct pipes
+	e.tty = false
+	code, out, errs = e.run("xbpretty", "install", "-y", "figlet")
+	if code != 0 {
+		t.Fatalf("non-interactive run failed code %d: %s", code, errs)
+	}
+	if !strings.Contains(out, "DIRECT_PIPES_OK") {
+		t.Errorf("expected non-interactive run to use direct pipes, got out:\n%s\nerr:\n%s", out, errs)
+	}
+
+	// Case 3: Verbose mode with tty = true -> should fall back to direct pipes
+	e.tty = true
+	code, out, errs = e.run("xbpretty", "install", "-v", "-y", "figlet")
+	if code != 0 {
+		t.Fatalf("verbose run failed code %d: %s", code, errs)
+	}
+	if !strings.Contains(out, "DIRECT_PIPES_OK") {
+		t.Errorf("expected verbose run to use direct pipes, got out:\n%s\nerr:\n%s", out, errs)
+	}
+}
+
+func TestHybridPTYLineBufferingDuringUnpack(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+
+	// Custom stub script that uses python (or sh) to write an unbuffered line ending in \n,
+	// then sleeps. In a PTY, the line is flushed immediately on \n without waiting 4KB.
+	stubScript := filepath.Join(e.dir, "buffering-stub")
+	scriptContent := `#!/bin/sh
+case "${1:-}" in
+  -*n*)
+    printf '%s' "${XB_STUB_STDOUT:-}"
+    exit 0
+    ;;
+esac
+
+python3 -c "import sys, time
+sys.stdout.write('[*] Unpacking packages\nfiglet-2.2.5_6: unpacking ...\n')
+time.sleep(0.4)
+sys.stdout.write('figlet-2.2.5_6: installed successfully.\n')
+"
+exit 0
+`
+	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.pointInstallAt(stubScript)
+
+	start := time.Now()
+	code, out, errs := e.run("xbpretty", "install", "-y", "--no-progress", "figlet")
+	duration := time.Since(start)
+
+	if code != 0 {
+		t.Fatalf("run failed code %d: %s", code, errs)
+	}
+	if duration < 350*time.Millisecond {
+		t.Logf("child ran in %v", duration)
+	}
+	if !strings.Contains(out, "figlet-2.2.5_6: unpacking ...") {
+		t.Errorf("expected unpacking line in stdout, got:\n%s", out)
+	}
+	if !strings.Contains(out, "figlet-2.2.5_6: installed successfully.") {
+		t.Errorf("expected installed line in stdout, got:\n%s", out)
+	}
+}
+
+func TestHybridTelemetryStreamParsingWithStub(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+
+	// Stub simulates real xbps streaming stderr download ticks and stdout unpacking lines
+	stubScript := filepath.Join(e.dir, "telemetry-stub")
+	scriptContent := `#!/bin/sh
+case "${1:-}" in
+  -*n*)
+    printf '%s' "${XB_STUB_STDOUT:-}"
+    exit 0
+    ;;
+esac
+
+# Simulate stderr download ticks (TTY format with \r)
+printf '[ 0%%] figlet-2.2.5_6.x86_64.xbps: [87KB 50%%] 12MB/s ETA: 00m01s\033[K\r' >&2
+printf 'figlet-2.2.5_6.x86_64.xbps: 87KB [avg rate: 12MB/s]\033[K\n' >&2
+
+# Simulate stdout phase and unpack/configure lines
+printf '[*] Unpacking packages\n'
+printf 'figlet-2.2.5_6: unpacking ...\n'
+printf '[*] Configuring unpacked packages\n'
+printf 'figlet-2.2.5_6: configuring ...\n'
+printf 'figlet-2.2.5_6: installed successfully.\n'
+printf '\n1 downloaded, 1 installed, 0 updated, 1 configured, 0 removed, 0 on hold.\n'
+exit 0
+`
+	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.pointInstallAt(stubScript)
+
+	code, out, errs := e.run("xbpretty", "install", "-y", "--no-progress", "figlet")
+	if code != 0 {
+		t.Fatalf("run failed code %d: %s", code, errs)
+	}
+
+	if !strings.Contains(out, "figlet-2.2.5_6: unpacking ...") {
+		t.Errorf("expected unpack output in stdout, got:\n%s", out)
+	}
+	if !strings.Contains(out, "figlet-2.2.5_6: configuring ...") {
+		t.Errorf("expected configure output in stdout, got:\n%s", out)
+	}
+	if !strings.Contains(errs, "figlet-2.2.5_6.x86_64.xbps: 87KB [avg rate: 12MB/s]") {
+		t.Errorf("expected download completion line in stderr, got:\n%s", errs)
+	}
+}
+
+func TestHybridFailurePreservesStderrAndHint(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+
+	// Simulate failure in xbps matching a known hint
+	stubScript := filepath.Join(e.dir, "fail-stub")
+	scriptContent := `#!/bin/sh
+case "${1:-}" in
+  -*n*)
+    printf '%s' "${XB_STUB_STDOUT:-}"
+    exit 0
+    ;;
+esac
+
+printf 'ERROR: failed to open repodata: No such file or directory\n' >&2
+exit 2
+`
+	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.pointInstallAt(stubScript)
+
+	code, out, errs := e.run("xbpretty", "install", "-y", "figlet")
+	if code != 2 {
+		t.Fatalf("expected code 2, got %d. out:\n%s\nerrs:\n%s", code, out, errs)
+	}
+	if !strings.Contains(errs, "ERROR: failed to open repodata") {
+		t.Errorf("expected error message in stderr, got:\n%s", errs)
+	}
+	// Verify stale index hint matched
+	if !strings.Contains(errs, "hint:") {
+		t.Errorf("expected hint for stale index error, got:\n%s", errs)
+	}
+}
+
+func TestBoxStyleConfigClassic(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
+	content, _ := os.ReadFile(cfgPath)
+	_ = os.WriteFile(cfgPath, append(content, []byte("\nbox_style = \"classic\"\n")...), 0o644)
+	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
+	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
+
+	code, out, errs := e.run("xbpretty", "upgrade", "-n", "--color=auto")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	plain := ansiEscape.ReplaceAllString(out, "")
+	if !strings.Contains(plain, "┌── Packages To Upgrade (1)") {
+		t.Errorf("classic output missing classic header:\n%s", out)
+	}
+	if !strings.Contains(plain, "┌── Summary") {
+		t.Errorf("classic output missing classic summary card:\n%s", out)
+	}
+	if strings.Contains(plain, "╭") || strings.Contains(plain, "╰") {
+		t.Errorf("classic output contains rounded box runes:\n%s", out)
+	}
+}
+
+func TestBoxStyleConfigASCII(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
+	content, _ := os.ReadFile(cfgPath)
+	_ = os.WriteFile(cfgPath, append(content, []byte("\nbox_style = \"ascii\"\n")...), 0o644)
+	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
+	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
+
+	code, out, errs := e.run("xbpretty", "upgrade", "-n", "--color=auto")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	plain := ansiEscape.ReplaceAllString(out, "")
+	if !strings.Contains(plain, "+-- Packages To Upgrade (1)") {
+		t.Errorf("ascii output missing ascii header:\n%s", out)
+	}
+	if !strings.Contains(plain, "+-- Summary") {
+		t.Errorf("ascii output missing ascii summary card:\n%s", out)
+	}
+	if strings.Contains(plain, "╭") || strings.Contains(plain, "┌") {
+		t.Errorf("ascii output contains unicode box runes:\n%s", out)
+	}
+}
+
+func TestBoxStyleFlagOverridesConfig(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
+	content, _ := os.ReadFile(cfgPath)
+	_ = os.WriteFile(cfgPath, append(content, []byte("\nbox_style = \"rounded\"\n")...), 0o644)
+	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
+	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
+
+	code, out, errs := e.run("xbpretty", "upgrade", "-n", "--color=auto", "--box-style=classic")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	plain := ansiEscape.ReplaceAllString(out, "")
+	if !strings.Contains(plain, "┌── Packages To Upgrade (1)") {
+		t.Errorf("flag override output missing classic header:\n%s", out)
+	}
+}
+
+func TestMalformedBoxStyleConfigExits2(t *testing.T) {
+	e := newEnv(t)
+	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
+	content, _ := os.ReadFile(cfgPath)
+	_ = os.WriteFile(cfgPath, append(content, []byte("\nbox_style = \"neon\"\n")...), 0o644)
+
+	code, _, errs := e.run("xbpretty", "upgrade", "-n")
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2\n%s", code, errs)
+	}
+	if !strings.Contains(errs, "box_style") {
+		t.Errorf("stderr does not name box_style:\n%s", errs)
+	}
+}
+
+func TestMalformedProgressBarConfigExits2(t *testing.T) {
+	e := newEnv(t)
+	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
+	content, _ := os.ReadFile(cfgPath)
+	_ = os.WriteFile(cfgPath, append(content, []byte("\nprogress_bar = \"maybe\"\n")...), 0o644)
+
+	code, _, errs := e.run("xbpretty", "upgrade", "-n")
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2\n%s", code, errs)
+	}
+	if !strings.Contains(errs, "expected true or false") && !strings.Contains(errs, "progress_bar") {
+		t.Errorf("stderr does not name parse error:\n%s", errs)
+	}
+}
+
+func TestPrecedenceColorFlagAndNoColor(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
+	content, _ := os.ReadFile(cfgPath)
+	_ = os.WriteFile(cfgPath, append(content, []byte("\ncolor = \"auto\"\n")...), 0o644)
+	e.set("XB_STUB_STDOUT", planCapture(t, "0607/upgrade.txt"))
+
+	// 1. With NO_COLOR set, color is disabled under default/auto config
+	e.set("NO_COLOR", "1")
+	code, out, errs := e.run("xbpretty", "upgrade", "-n")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Errorf("NO_COLOR should disable color under auto config:\n%s", out)
+	}
+
+	// 2. Explicit --color=always overrides NO_COLOR and auto config
+	code, out, errs = e.run("xbpretty", "upgrade", "-n", "--color=always")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if !strings.Contains(out, "\x1b[") {
+		t.Errorf("--color=always should override NO_COLOR:\n%s", out)
+	}
+
+	// 3. Explicit --color=never disables color even if NO_COLOR is unset
+	e.set("NO_COLOR", "")
+	code, out, errs = e.run("xbpretty", "upgrade", "-n", "--color=never")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Errorf("--color=never should disable color:\n%s", out)
+	}
+
+	// 4. Config color="never" overridden by explicit --color=always
+	_ = os.WriteFile(cfgPath, append(content, []byte("\ncolor = \"never\"\n")...), 0o644)
+	code, out, errs = e.run("xbpretty", "upgrade", "-n", "--color=always")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if !strings.Contains(out, "\x1b[") {
+		t.Errorf("--color=always should override config color=never:\n%s", out)
+	}
+}
+
+func TestProgressBarOptionsAndFlags(t *testing.T) {
+	// 1. parseArgs --no-progress
+	o, err := parseArgs([]string{"upgrade", "--no-progress"}, "")
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if o.progressBar == nil || *o.progressBar != false {
+		t.Errorf("--no-progress did not set progressBar to false: %+v", o)
+	}
+
+	// 2. parseArgs --no-progress-bar
+	o, err = parseArgs([]string{"upgrade", "--no-progress-bar"}, "")
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if o.progressBar == nil || *o.progressBar != false {
+		t.Errorf("--no-progress-bar did not set progressBar to false: %+v", o)
+	}
+
+	// 3. parseArgs --progress-bar=false
+	o, err = parseArgs([]string{"upgrade", "--progress-bar=false"}, "")
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if o.progressBar == nil || *o.progressBar != false {
+		t.Errorf("--progress-bar=false did not set progressBar to false: %+v", o)
+	}
+
+	// 4. parseArgs --progress-bar=true
+	o, err = parseArgs([]string{"upgrade", "--progress-bar=true"}, "")
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if o.progressBar == nil || *o.progressBar != true {
+		t.Errorf("--progress-bar=true did not set progressBar to true: %+v", o)
+	}
+}
+
+func TestProgressWidgetEndToEndInteractiveSuccess(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+
+	stubScript := filepath.Join(e.dir, "widget-success-stub")
+	scriptContent := `#!/bin/sh
+case "${1:-}" in
+  -*n*)
+    printf '%s' "${XB_STUB_STDOUT:-}"
+    exit 0
+    ;;
+esac
+
+# Simulate stderr download ticks
+printf '[ 50%%] figlet-2.2.5_6.x86_64.xbps: [45KB 50%%] 10MB/s ETA: 00m01s\033[K\r' >&2
+printf 'figlet-2.2.5_6.x86_64.xbps: 92KB [avg rate: 10MB/s]\033[K\n' >&2
+
+# Simulate stdout unpack / configure lines
+printf '[*] Unpacking packages\n'
+printf 'figlet-2.2.5_6: unpacking ...\n'
+printf '[*] Configuring unpacked packages\n'
+printf 'figlet-2.2.5_6: configuring ...\n'
+printf 'figlet-2.2.5_6: installed successfully.\n'
+printf '\n1 downloaded, 1 installed, 0 updated, 1 configured, 0 removed, 0 on hold.\n'
+exit 0
+`
+	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.pointInstallAt(stubScript)
+
+	code, out, errs := e.run("xbpretty", "install", "-y", "figlet")
+	if code != 0 {
+		t.Fatalf("run failed code %d: %s", code, errs)
+	}
+
+	// 1. Verify Download Phase container rendered in stderr
+	if !strings.Contains(errs, "Downloading...") {
+		t.Errorf("expected Download Phase container in stderr, got:\n%s", errs)
+	}
+	if !strings.Contains(errs, "Total Packages:") {
+		t.Errorf("expected Total Packages in stderr, got:\n%s", errs)
+	}
+
+	// 2. Verify Unpack/Configure Phase container rendered in stderr
+	if !strings.Contains(errs, "Running xbps...") {
+		t.Errorf("expected Running xbps container in stderr, got:\n%s", errs)
+	}
+	if !strings.Contains(errs, "Current Target:") {
+		t.Errorf("expected Current Target in stderr, got:\n%s", errs)
+	}
+
+	// 3. Verify in-place cursor movement in stderr
+	if !strings.Contains(errs, "\x1b[5A\r") {
+		t.Errorf("expected cursor jumps in stderr, got:\n%s", errs)
+	}
+
+	// 4. Verify permanent completion line in stderr
+	if !strings.Contains(errs, "✔ Transaction complete:") {
+		t.Errorf("expected completion line in stderr, got:\n%s", errs)
+	}
+	if !strings.Contains(errs, "1 installed") {
+		t.Errorf("expected '1 installed' in summary, got:\n%s", errs)
+	}
+
+	// 5. Verify stdout holds strictly the plan summary (ADR-0005)
+	if !strings.Contains(out, "Packages To Install") {
+		t.Errorf("expected plan summary in stdout, got:\n%s", out)
+	}
+	if strings.Contains(out, "Downloading...") || strings.Contains(out, "Running xbps...") {
+		t.Errorf("interactive widget lines leaked to stdout:\n%s", out)
+	}
+}
+
+func TestProgressWidgetEndToEndFailureClearsBoxAndPrintsStderr(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+
+	stubScript := filepath.Join(e.dir, "widget-fail-stub")
+	scriptContent := `#!/bin/sh
+case "${1:-}" in
+  -*n*)
+    printf '%s' "${XB_STUB_STDOUT:-}"
+    exit 0
+    ;;
+esac
+
+printf '[ 10%%] figlet-2.2.5_6.x86_64.xbps: [10KB 10%%] 1MB/s ETA: 00m05s\033[K\r' >&2
+printf 'ERROR: [trans] failed to download figlet: Connection refused\n' >&2
+exit 1
+`
+	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.pointInstallAt(stubScript)
+
+	code, out, errs := e.run("xbpretty", "install", "-y", "figlet")
+	if code != 1 {
+		t.Fatalf("expected code 1, got %d. out:\n%s\nerrs:\n%s", code, out, errs)
+	}
+
+	// Widget should clear 5 lines in stderr using atomic clear
+	if !strings.Contains(errs, "\x1b[5A\r\x1b[0J") {
+		t.Errorf("expected cursor jump clearing box on failure in stderr, got:\n%s", errs)
+	}
+	// Completion banner should NOT be present
+	if strings.Contains(errs, "✔ Transaction complete:") || strings.Contains(out, "✔ Transaction complete:") {
+		t.Errorf("completion banner should not appear on failure:\n%s", errs)
+	}
+	// Raw error must be in stderr
+	if !strings.Contains(errs, "ERROR: [trans] failed to download figlet") {
+		t.Errorf("stderr missing error message:\n%s", errs)
+	}
+}
+
+func TestProgressWidgetSuppressedWhenNoProgressOrNonTTY(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+
+	stubScript := filepath.Join(e.dir, "widget-suppress-stub")
+	scriptContent := `#!/bin/sh
+case "${1:-}" in
+  -*n*)
+    printf '%s' "${XB_STUB_STDOUT:-}"
+    exit 0
+    ;;
+esac
+
+printf 'figlet-2.2.5_6.x86_64.xbps: 92KB [avg rate: 10MB/s]\n' >&2
+printf '[*] Unpacking packages\n'
+printf 'figlet-2.2.5_6: unpacking ...\n'
+exit 0
+`
+	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.pointInstallAt(stubScript)
+
+	// Case 1: --no-progress flag
+	e.tty = true
+	code, out, errs := e.run("xbpretty", "install", "-y", "--no-progress", "figlet")
+	if code != 0 {
+		t.Fatalf("code %d: %s", code, errs)
+	}
+	if strings.Contains(out, "\x1b[5A\r") {
+		t.Errorf("--no-progress should not emit cursor jumps:\n%s", out)
+	}
+	if strings.Contains(out, "╭── Downloading...") {
+		t.Errorf("--no-progress should not render container:\n%s", out)
+	}
+	if !strings.Contains(out, "figlet-2.2.5_6: unpacking ...") {
+		t.Errorf("--no-progress should stream raw lines directly:\n%s", out)
+	}
+
+	// Case 2: non-TTY stream (e.tty = false)
+	e.tty = false
+	code, out, errs = e.run("xbpretty", "install", "-y", "figlet")
+	if code != 0 {
+		t.Fatalf("code %d: %s", code, errs)
+	}
+	if strings.Contains(out, "\x1b[5A\r") {
+		t.Errorf("non-TTY should not emit cursor jumps:\n%s", out)
+	}
+	if strings.Contains(out, "╭── Downloading...") {
+		t.Errorf("non-TTY should not render container:\n%s", out)
+	}
+}
+
+func TestProgressWidgetBoxStylesEndToEnd(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+
+	stubScript := filepath.Join(e.dir, "widget-style-stub")
+	scriptContent := `#!/bin/sh
+case "${1:-}" in
+  -*n*)
+    printf '%s' "${XB_STUB_STDOUT:-}"
+    exit 0
+    ;;
+esac
+
+printf '[ 50%%] figlet-2.2.5_6.x86_64.xbps: [45KB 50%%] 10MB/s ETA: 00m01s\033[K\r' >&2
+printf '[*] Unpacking packages\n'
+printf 'figlet-2.2.5_6: unpacking ...\n'
+exit 0
+`
+	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.pointInstallAt(stubScript)
+
+	// Test classic box style
+	code, out, errs := e.run("xbpretty", "install", "-y", "--box-style=classic", "figlet")
+	if code != 0 {
+		t.Fatalf("classic code %d: %s", code, errs)
+	}
+	if !strings.Contains(out, "Packages To Install") {
+		t.Errorf("stdout missing classic plan summary:\n%s", out)
+	}
+	plain := ansiEscape.ReplaceAllString(errs, "")
+	if !strings.Contains(plain, "┌── Downloading...") {
+		t.Errorf("classic style missing classic download header in stderr:\n%s", errs)
+	}
+	if !strings.Contains(plain, "┌── Running xbps...") {
+		t.Errorf("classic style missing classic running header in stderr:\n%s", errs)
+	}
+
+	// Test ascii box style
+	code, out, errs = e.run("xbpretty", "install", "-y", "--box-style=ascii", "figlet")
+	if code != 0 {
+		t.Fatalf("ascii code %d: %s", code, errs)
+	}
+	if !strings.Contains(out, "Packages To Install") {
+		t.Errorf("stdout missing ascii plan summary:\n%s", out)
+	}
+	plain = ansiEscape.ReplaceAllString(errs, "")
+	if !strings.Contains(plain, "+-- Downloading...") {
+		t.Errorf("ascii style missing ascii download header in stderr:\n%s", errs)
+	}
+	if !strings.Contains(plain, "+-- Running xbps...") {
+		t.Errorf("ascii style missing ascii running header in stderr:\n%s", errs)
+	}
+}

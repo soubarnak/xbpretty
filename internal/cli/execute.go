@@ -49,7 +49,15 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	}
 
 	sum := st.planToSummary(rows)
-	if err := (summary.Renderer{Color: st.color}).Render(st.stdout, sum); err != nil {
+	isPlain := !isTTY(st.stdout)
+	termWidth := terminalWidth(st.stdout)
+	if err := (summary.Renderer{
+		Color:       st.color,
+		Plain:       isPlain,
+		Width:       termWidth,
+		BoxStyle:    st.boxStyle,
+		ProgressBar: st.progressBar,
+	}).Render(st.stdout, sum); err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
 		return exitRuntime
 	}
@@ -60,7 +68,9 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	}
 
 	// FR-010: never block on a pipe.
-	if !isTTY(st.stdin) && !(opts.yes || st.r.cfg.AssumeYes) {
+	stdinIsPipe := !isTTY(st.stdin)
+	autoAccept := opts.yes || st.r.cfg.AssumeYes
+	if stdinIsPipe && !autoAccept {
 		fmt.Fprintln(st.stderr, "xbpretty: stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed")
 		return exitRuntime
 	}
@@ -69,7 +79,7 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		st.privHint(cmd, opts)
 		return exitRuntime
 	}
-	if !(opts.yes || st.r.cfg.AssumeYes) {
+	if !autoAccept {
 		if !st.prompt() {
 			// FR-009 / AC-003: declining is not an error.
 			return exitOK
@@ -82,7 +92,32 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 
 // execute streams one xbps command live (FR-014) and handles its outcome.
 func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
+	var totalDl int64
+	for _, row := range rows {
+		if row.DownloadSize > 0 {
+			totalDl += int64(row.DownloadSize)
+		}
+	}
+	if st.r.parser == nil {
+		st.r.parser = NewStreamParser(len(rows), totalDl)
+	}
+
+	isInteractive := isTTY(st.stdout) && isTTY(st.stderr)
+	useWidget := st.progressBar && !st.r.verbose && isInteractive
+	var widget *ProgressWidget
+	if useWidget {
+		termWidth := terminalWidth(st.stderr)
+		widget = NewProgressWidget(st.stderr, st.boxStyle, st.color, termWidth, len(rows), totalDl)
+		widget.AttachToParser(st.r.parser)
+		widget.Start()
+		st.r.widget = widget
+	}
+
 	code, err := st.r.stream(bin, args...)
+	if widget != nil {
+		widget.Finish(code, st.r.lastStderr, rows, cmd)
+		st.r.widget = nil
+	}
 	if err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
 		return exitRuntime
@@ -100,6 +135,12 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 		return exitOK
 	}
 
+	// On failure:
+	// If widget was active, raw stderr was suppressed during run; print it now (FR-017).
+	hasStderrToFlush := widget != nil && stderr != ""
+	if hasStderrToFlush {
+		fmt.Fprint(st.stderr, stderr)
+	}
 	// FR-017: the raw xbps output stays, then one matching hint if any. Only
 	// stderr is kept from a real run: stdout goes straight to the terminal so
 	// xbps still sees one. A failure that lives on stdout alone is only caught
@@ -107,7 +148,8 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 	if h := hints.Lookup(code, hints.Output{Stderr: stderr}); h != nil {
 		fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
 	}
-	if len(rows) > 0 && rows[0].Action == "remove" {
+	isRemovePlan := len(rows) > 0 && rows[0].Action == "remove"
+	if isRemovePlan {
 		st.revdepsHint(optsArgs(rows))
 	}
 	return code

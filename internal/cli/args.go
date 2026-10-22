@@ -23,6 +23,8 @@ type options struct {
 	passthru   []string
 	dashDash   bool // a `--` was given, even with nothing after it
 	limit      int  // --limit N for `log`; 0 means not given
+	boxStyle    string
+	progressBar *bool
 	explicit   map[string]bool
 }
 
@@ -89,6 +91,34 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 				o.version = true
 			case "help":
 				o.help = true
+			case "box-style":
+				if !hasValue {
+					if i+1 >= len(argv) {
+						return nil, fmt.Errorf("--box-style needs a value: rounded, classic or ascii")
+					}
+					i++
+					value = argv[i]
+				}
+				if !validBoxStyle(value) {
+					return nil, fmt.Errorf("--box-style must be rounded, classic or ascii, got %q", value)
+				}
+				o.boxStyle = value
+				o.explicit["box_style"] = true
+			case "progress-bar":
+				val := true
+				if hasValue {
+					b, err := parseBool(value)
+					if err != nil {
+						return nil, fmt.Errorf("--progress-bar value error: %w", err)
+					}
+					val = b
+				}
+				o.progressBar = &val
+				o.explicit["progress_bar"] = true
+			case "no-progress", "no-progress-bar":
+				val := false
+				o.progressBar = &val
+				o.explicit["progress_bar"] = true
 			default:
 				return nil, fmt.Errorf("unknown flag --%s", name)
 			}
@@ -169,6 +199,24 @@ func validColor(value string) bool {
 		return true
 	}
 	return false
+}
+
+func validBoxStyle(value string) bool {
+	switch value {
+	case "rounded", "classic", "ascii":
+		return true
+	}
+	return false
+}
+
+func parseBool(value string) (bool, error) {
+	switch value {
+	case "true", "1", "yes":
+		return true, nil
+	case "false", "0", "no":
+		return false, nil
+	}
+	return false, fmt.Errorf("expected true or false, got %q", value)
 }
 
 const usageText = `xbpretty - a friendlier front end for xbps
