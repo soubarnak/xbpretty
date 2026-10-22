@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -159,6 +160,15 @@ func (w *ProgressWidget) IsRendered() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.renderedOnce
+}
+
+// SetWidth updates the progress widget width dynamically (e.g. on terminal resize / SIGWINCH).
+func (w *ProgressWidget) SetWidth(width int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if width > 0 {
+		w.width = width
+	}
 }
 
 // Stop stops the background ticker if started.
@@ -430,6 +440,11 @@ func (w *ProgressWidget) buildActionLine3() string {
 func (w *ProgressWidget) renderLocked() {
 	if w.cleared {
 		return
+	}
+	if f, ok := w.out.(*os.File); ok {
+		if tw := terminalWidth(f); tw > 0 {
+			w.width = tw
+		}
 	}
 	var lines [5]string
 	chars := summary.BoxCharacterSet(w.boxStyle)

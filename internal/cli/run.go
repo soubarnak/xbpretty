@@ -130,6 +130,13 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 			if f, ok := r.stdinReader().(*os.File); ok {
 				_ = inheritPtySize(f, master)
 			}
+			if r.widget != nil {
+				if f, ok := r.stderrWriter().(*os.File); ok {
+					if tw := terminalWidth(f); tw > 0 {
+						r.widget.SetWidth(tw)
+					}
+				}
+			}
 		}
 	}()
 

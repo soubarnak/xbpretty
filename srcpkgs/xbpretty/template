@@ -1,6 +1,6 @@
 # Template file for 'xbpretty'
 pkgname=xbpretty
-version=0.3.1
+version=0.3.2
 revision=1
 build_style=go
 go_import_path="github.com/soubarnak/xbpretty"

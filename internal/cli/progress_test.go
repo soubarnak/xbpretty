@@ -233,3 +233,43 @@ func TestProgressWidgetExactLineWidths(t *testing.T) {
 		}
 	}
 }
+
+func TestProgressWidgetDynamicResize(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewProgressWidget(&buf, "rounded", false, 80, 2, 1000)
+	p := NewStreamParser(2, 1000)
+	w.AttachToParser(p)
+
+	// Initial render at 80 cols
+	p.FeedStderr("[ 10%] pkg-1.0_1.x86_64.xbps: [100B 10%] 1MB/s ETA: 00m01s\r")
+	lines80 := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
+	for i, l := range lines80 {
+		if vw := summary.VisibleWidth(l); vw != 80 {
+			t.Errorf("line %d before resize visible width = %d, want 80", i, vw)
+		}
+	}
+
+	// Resize to 120 cols
+	w.SetWidth(120)
+	buf.Reset()
+	p.FeedStderr("[ 20%] pkg-1.0_1.x86_64.xbps: [200B 20%] 1MB/s ETA: 00m01s\r")
+	out120 := strings.TrimPrefix(buf.String(), "\x1b[5A\r")
+	lines120 := strings.Split(strings.TrimSuffix(out120, "\n"), "\n")
+	for i, l := range lines120 {
+		if vw := summary.VisibleWidth(l); vw != 120 {
+			t.Errorf("line %d after resize visible width = %d, want 120", i, vw)
+		}
+	}
+
+	// Resize down to 60 cols
+	w.SetWidth(60)
+	buf.Reset()
+	p.FeedStderr("[ 30%] pkg-1.0_1.x86_64.xbps: [300B 30%] 1MB/s ETA: 00m01s\r")
+	out60 := strings.TrimPrefix(buf.String(), "\x1b[5A\r")
+	lines60 := strings.Split(strings.TrimSuffix(out60, "\n"), "\n")
+	for i, l := range lines60 {
+		if vw := summary.VisibleWidth(l); vw != 60 {
+			t.Errorf("line %d after shrink visible width = %d, want 60", i, vw)
+		}
+	}
+}
