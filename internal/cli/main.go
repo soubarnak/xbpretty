@@ -21,6 +21,7 @@ const (
 	exitRuntime     = 1
 	exitUsage       = 2
 	exitNothingToDo = 0
+	exitInterrupted = 130
 )
 
 // isTerminalFn reports whether a file is a terminal. Tests replace it to
@@ -70,6 +71,7 @@ type state struct {
 	boxStyle    string
 	progressBar bool
 	unit        summary.SizeUnit
+	theme       summary.Theme
 	mode        config.UIMode
 	assumeYes   bool
 	autoRemove  bool
@@ -81,6 +83,12 @@ type state struct {
 	// (primary then implicit orphan), so a single scanner keeps the answers
 	// the first read may have buffered.
 	promptScanner *bufio.Scanner
+
+	// commandLine is argv without the program name, as typed, for FR-030's
+	// history `command` field. pendingHistory carries one real transaction's
+	// recording context between the prompt and a zero exit.
+	commandLine    []string
+	pendingHistory *historyPending
 }
 
 // Main runs xbpretty with the process arguments and returns its exit code.
@@ -119,15 +127,14 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		}
 		return exitUsage
 	}
-	// FR-018 points --print-uris at §3.3.7, which #71 owns. Until it lands the
-	// flag must be refused before config resolution, any child and any
-	// prompt, so it can never fall through to a real transaction.
-	if opts.printURIs {
-		fmt.Fprintln(err, "xbpretty: --print-uris is not implemented in this build")
-		return exitRuntime
-	}
-
 	st := &state{stdout: newResilientWriter(out), stderr: err, stdin: in}
+	// FR-030: the entry's command is the invocation without the program name.
+	// A link invocation (xbp-install ...) prepends its canonical verb.
+	if knownCmd != "" {
+		st.commandLine = append([]string{knownCmd}, args...)
+	} else {
+		st.commandLine = append([]string{}, args...)
+	}
 
 	// moo is hidden and never touches config or xbps.
 	if opts.command == "moo" {
@@ -191,6 +198,7 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		st.progressBar = *opts.progressBar
 	}
 	st.unit = summary.SizeUnit(resolved.unit)
+	st.theme = summaryTheme(cfg.Color.Theme)
 	st.r = &runner{
 		cfg:     cfg,
 		out:     err,
@@ -237,11 +245,16 @@ func (st *state) dispatch(opts *options) int {
 	case "fetch":
 		return st.runFetch(opts)
 	case "download":
-		// TODO(#72): the download command's archive fetch belongs to #72.
-		return st.runUnimplemented(opts.command, opts)
+		return st.runDownload(opts)
 	case "clean":
 		return st.runClean(opts)
-	case "history", "undo", "redo":
+	case "history":
+		if opts.subcommand == "clear" {
+			// TODO(#70): history clear <id|last> and --all belong to #70.
+			return st.runUnimplemented("history", opts)
+		}
+		return st.runHistory(opts)
+	case "undo", "redo":
 		return st.runUnimplemented(opts.command, opts)
 	}
 	fmt.Fprintf(st.stderr, "xbpretty: unknown command %q\n", opts.command)

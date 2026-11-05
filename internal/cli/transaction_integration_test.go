@@ -152,9 +152,10 @@ func TestIntegrationEPIPEKeepsTheRun(t *testing.T) {
 	}
 }
 
-// TestIntegrationPrintURIsRefusesBeforeAnyChild pins FR-018's #71 seam: the
-// flag prints one line, exits 1, runs no xbps child and writes no log.
-func TestIntegrationPrintURIsRefusesBeforeAnyChild(t *testing.T) {
+// TestIntegrationPrintURIsStopsBeforeAnyTransaction pins FR-028 through the
+// built binary: one NDJSON object per planned download, no sync, no -y, no
+// prompt, no log and no root.
+func TestIntegrationPrintURIsStopsBeforeAnyTransaction(t *testing.T) {
 	bin, logPath, cfgDir := integrationEnv(t)
 	env := map[string]string{
 		"XDG_CONFIG_HOME": cfgDir,
@@ -164,18 +165,20 @@ func TestIntegrationPrintURIsRefusesBeforeAnyChild(t *testing.T) {
 		"NO_COLOR":        "1",
 	}
 	code, out, errs := surfaceRun(t, bin, env, "upgrade", "--print-uris", "-y")
-	if code != 1 {
-		t.Errorf("exit = %d, want 1", code)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
-	want := "xbpretty: --print-uris is not implemented in this build\n"
-	if errs != want {
-		t.Errorf("stderr = %q, want exactly %q", errs, want)
+	want := `{"schema":1,"package":"figlet","pkgver":"figlet-2.2.5_6","repository":"https://repo-default.voidlinux.org/current","url":"https://repo-default.voidlinux.org/current/figlet-2.2.5_6.x86_64.xbps","signature_url":"https://repo-default.voidlinux.org/current/figlet-2.2.5_6.x86_64.xbps.sig2","size":94372,"sha256":null}` + "\n"
+	if out != want {
+		t.Errorf("stdout = %q, want exactly %q", out, want)
 	}
-	if out != "" {
-		t.Errorf("stdout = %q, want nothing", out)
+	if errs != "" {
+		t.Errorf("stderr = %q, want nothing", errs)
 	}
-	if calls := stubCalls(t, logPath); len(calls) != 0 {
-		t.Errorf("an xbps child ran before the refusal: %q", calls)
+	for _, call := range stubCalls(t, logPath) {
+		if strings.HasPrefix(call, "xbps-install -S") || strings.HasPrefix(call, "xbps-install -y") {
+			t.Errorf("--print-uris ran a sync or real transaction child: %q", call)
+		}
 	}
 	logPathTransaction := filepath.Join(filepath.Dir(cfgDir), "state", "xbpretty", "transactions.log")
 	if _, err := os.Stat(logPathTransaction); err == nil {

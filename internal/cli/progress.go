@@ -340,10 +340,10 @@ func (w *ProgressWidget) buildDownloadLine3() string {
 		innerW = 0
 	}
 
-	dlStr := summary.Human(uint64(w.downloadedBytes))
+	dlStr := summary.WidgetSize(uint64(w.downloadedBytes))
 	var totStr string
 	if w.totalDownload > 0 {
-		totStr = summary.Human(uint64(w.totalDownload))
+		totStr = summary.WidgetSize(uint64(w.totalDownload))
 	} else {
 		totStr = dlStr
 	}

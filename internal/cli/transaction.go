@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -155,6 +156,12 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		return exitRuntime
 	}
 
+	// FR-028: --print-uris stops before the sync step, any summary, prompt or
+	// download. It only needs the config and the plan, and never needs root.
+	if opts.printURIs {
+		return st.runPrintURIs(cmd, opts)
+	}
+
 	// The invocation-level guards below deliberately run before the index
 	// step. A command that is already going to refuse (a missing --reinstall
 	// target, or a remove whose every target is absent) must not refresh the
@@ -218,7 +225,7 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		return exitNothingToDo
 	}
 
-	if code := st.renderSummary(cmd, rows); code >= 0 {
+	if code := st.renderSummary(summaryCommand(cmd, opts), rows); code >= 0 {
 		return code
 	}
 
@@ -265,7 +272,13 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		return st.downloadOnlyStop(cmd, opts, rows)
 	}
 
-	code = st.execute(cmd, st.binaryFor(cmd), realArgv(cmd, opts, args), rows...)
+	// FR-030/FR-031: the before snapshot is taken after the prompt and
+	// before the real child. executePhases commits the entry once the whole
+	// command (every phase for a replay) exited 0, before the line log, the
+	// reboot hint and any implicit autoremove.
+	st.beginHistory(cmd, opts, rows)
+	code = st.executePhases(cmd, realArgv(cmd, opts, args), rows,
+		xbpsPhase{bin: st.binaryFor(cmd), args: realArgv(cmd, opts, args), rows: rows})
 	if code == 0 {
 		// FR-016: a successful real transaction runs the implicit orphan
 		// transaction. Its failure replaces the primary result.
@@ -292,20 +305,41 @@ func commandBinaries(cmd string) []string {
 // follows an install or purge.
 func (st *state) renderSummary(cmd string, rows []xbps.Row) int {
 	sum := st.planToSummary(cmd, rows)
-	isPlain := !isTTY(st.stdout)
-	termWidth := terminalWidth(st.stdout)
+	stdoutTTY := isTTY(st.stdout)
+	// FR-062: the rule width is the stdout terminal width, else a positive
+	// COLUMNS, else 80, and it is used even when piped. Table expansion is a
+	// separate decision: full width on a TTY, natural widths when piped.
+	width := 0
+	if stdoutTTY {
+		width = terminalWidth(st.stdout)
+	}
+	if width <= 0 {
+		width = columnsFromEnv()
+	}
+	if width <= 0 {
+		width = 80
+	}
 	if err := (summary.Renderer{
-		Color:       st.color,
-		Plain:       isPlain,
-		Width:       termWidth,
-		BoxStyle:    st.boxStyle,
-		ProgressBar: st.progressBar,
-		Unit:        st.unit,
+		Color:  st.color,
+		Simple: st.simple,
+		Width:  width,
+		Piped:  !stdoutTTY,
+		Unit:   st.unit,
+		Theme:  st.theme,
 	}).Render(st.stdout, sum); err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
 		return exitRuntime
 	}
 	return -1
+}
+
+// columnsFromEnv reads COLUMNS, ignoring missing or malformed values.
+func columnsFromEnv() int {
+	n, err := strconv.Atoi(os.Getenv("COLUMNS"))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 // allHeld reports whether every row of the plan is a hold row.
@@ -514,6 +548,22 @@ func (st *state) implicitAutoremoveEligible(cmd string, opts *options) bool {
 	return true
 }
 
+// summaryCommand is FR-062's operation label for the command that produced a
+// plan. A remove-family command carrying -f renders as its purge form, so the
+// label follows the argv rather than the command spelling alone.
+func summaryCommand(cmd string, opts *options) string {
+	if !purgeRequested(cmd, opts) {
+		return cmd
+	}
+	switch cmd {
+	case "remove":
+		return "purge"
+	case "autoremove":
+		return "autopurge"
+	}
+	return cmd
+}
+
 // orphanActionFlags is the orphan transaction's action set: -o, plus -f when
 // the primary command purged (FR-009, §3.2's argv table).
 func orphanActionFlags(cmd string, opts *options) []string {
@@ -629,22 +679,25 @@ func (st *state) runImplicitAutoremoveAfterSuccess(cmd string, opts *options) in
 	return st.executeOrphan(cmd, opts, rows)
 }
 
-// executeOrphan runs the confirmed orphan transaction. #69's history entry is
-// begun before the child starts: the transaction is a real one, and #69's
-// finishHistory inside execute publishes the pending entry.
+// executeOrphan runs the confirmed orphan transaction. Its history entry is
+// begun before the child starts with implicit true; executePhases publishes
+// the pending entry from finishHistory once the orphan committed, before its
+// line log and reboot hint.
 func (st *state) executeOrphan(cmd string, opts *options, rows []xbps.Row) int {
 	orphan := orphanCommand(cmd, opts)
+	argv := orphanRealArgv(cmd, opts)
 	st.beginImplicitAutoremoveHistory(orphan, opts, rows)
-	return st.execute(orphan, st.r.cfg.Xbps.RemovePath, orphanRealArgv(cmd, opts), rows...)
+	return st.executePhases(orphan, argv, rows,
+		xbpsPhase{bin: st.r.cfg.Xbps.RemovePath, args: argv, rows: rows})
 }
 
-// beginImplicitAutoremoveHistory is the #69 seam, called BEFORE the orphan
-// child runs. #69 fills it with
-// beginHistoryEntry(..., implicit: true, ...) and lets its finishHistory inside
-// execute publish the entry after a successful commit.
-func (st *state) beginImplicitAutoremoveHistory(_ string, _ *options, _ []xbps.Row) {
-	// TODO(#69): beginHistoryEntry(..., implicit: true, ...) for the orphan
-	// transaction before the child starts.
+// beginImplicitAutoremoveHistory begins FR-030's entry for the implicit
+// orphan transaction. It is called BEFORE the child runs, so #69's
+// finishHistory inside executePhases can publish it after a successful
+// commit.
+func (st *state) beginImplicitAutoremoveHistory(cmd string, opts *options, rows []xbps.Row) {
+	st.beginHistoryEntry(cmd, opts, rows, st.commandLine,
+		requestedTargets(cmd, opts), true, nil, "")
 }
 
 // lookupOld fills in the pre-upgrade version and installed size the summary
@@ -874,8 +927,9 @@ func rebootHint(rows []xbps.Row) string {
 // versions and hold state the summary needs, and carrying the command that
 // labels the Remove family section.
 func (st *state) planToSummary(cmd string, rows []xbps.Row) *summary.Summary {
+	held := st.heldPackages()
 	srows := make([]summary.Row, 0, len(rows))
-	var upgradeNames []string
+	var oldNames []string
 	for _, row := range rows {
 		srows = append(srows, summary.Row{
 			Name: row.Name, Version: row.Version, Action: row.Action,
@@ -883,12 +937,18 @@ func (st *state) planToSummary(cmd string, rows []xbps.Row) *summary.Summary {
 			DownloadSize: row.DownloadSize, HasInstalled: row.HasInstalled,
 			HasDownload: row.HasDownload,
 		})
-		if row.Action == "update" || row.Action == "reinstall" {
-			upgradeNames = append(upgradeNames, row.Name)
+		// The version diff applies to upgrades, reinstalls and held rows
+		// whose installed version differs (FR-063).
+		switch row.Action {
+		case "update", "reinstall", "hold":
+			oldNames = append(oldNames, row.Name)
+		default:
+			if held[row.Name] {
+				oldNames = append(oldNames, row.Name)
+			}
 		}
 	}
-	old := st.lookupOld(upgradeNames)
-	held := st.heldPackages()
+	old := st.lookupOld(oldNames)
 	sum := summary.Build(srows, held, old)
 	sum.Command = cmd
 	return sum

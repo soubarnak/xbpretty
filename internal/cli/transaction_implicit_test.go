@@ -127,6 +127,19 @@ func promptCount(stderr string) int {
 	return strings.Count(stderr, "Do you want to continue? [Y/n] ")
 }
 
+// hasSummarySection reports whether the rendered summary has a section label
+// line exactly equal to label. Rev 6 labels are one leading space plus the
+// operation name between two rules, so a substring match would accept
+// AutoRemove for Remove.
+func hasSummarySection(out, label string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == label {
+			return true
+		}
+	}
+	return false
+}
+
 // TestAC013ImplicitAutoremove drives FR-016 through the built binary: a
 // successful real install plans, summarises and prompts a second
 // `xbps-remove -n -o` transaction and runs it.
@@ -143,10 +156,10 @@ func TestAC013ImplicitAutoremove(t *testing.T) {
 		if !strings.Contains(out, "cups") {
 			t.Errorf("the orphan summary is missing:\n%s", out)
 		}
-		if !strings.Contains(out, "\nAutoRemove\n") {
+		if !hasSummarySection(out, "AutoRemove") {
 			t.Errorf("the implicit orphan summary is not labelled AutoRemove:\n%s", out)
 		}
-		if strings.Contains(out, "\nRemove\n") {
+		if hasSummarySection(out, "Remove") {
 			t.Errorf("the implicit orphan summary reused the primary command's Remove label:\n%s", out)
 		}
 		if got := promptCount(errs); got != 2 {
@@ -263,7 +276,7 @@ func TestAC013ImplicitAutoremove(t *testing.T) {
 		}
 		wantArgv(t, transactionArgv(t, implicitLog(env)),
 			[]string{"-n -f wget", "-y -f wget", "-n -o -f", "-y -o -f"})
-		if !strings.Contains(out, "\nAutoPurge\n") {
+		if !hasSummarySection(out, "AutoPurge") {
 			t.Errorf("the implicit orphan summary is not labelled AutoPurge:\n%s", out)
 		}
 	})
@@ -278,7 +291,7 @@ func TestAC013ImplicitAutoremove(t *testing.T) {
 		}
 		wantArgv(t, transactionArgv(t, implicitLog(env)),
 			[]string{"-n wget", "-y wget", "-n -o", "-y -o"})
-		if !strings.Contains(out, "\nAutoRemove\n") {
+		if !hasSummarySection(out, "AutoRemove") {
 			t.Errorf("the implicit orphan summary is not labelled AutoRemove:\n%s", out)
 		}
 	})
@@ -293,7 +306,7 @@ func TestAC013ImplicitAutoremove(t *testing.T) {
 		}
 		wantArgv(t, transactionArgv(t, implicitLog(env)),
 			[]string{"-n -f wget", "-y -f wget", "-n -o -f", "-y -o -f"})
-		if !strings.Contains(out, "\nAutoPurge\n") {
+		if !hasSummarySection(out, "AutoPurge") {
 			t.Errorf("the implicit orphan summary is not labelled AutoPurge:\n%s", out)
 		}
 	})
@@ -451,8 +464,10 @@ func TestAC013ImplicitAutoremove(t *testing.T) {
 		if code != 1 {
 			t.Errorf("exit = %d, want 1 (the #72 seam)\n%s", code, errs)
 		}
-		if calls := stubCalls(t, implicitLog(env)); len(calls) != 0 {
-			t.Errorf("download ran a child: %q", calls)
+		for _, c := range transactionArgv(t, implicitLog(env)) {
+			if strings.Contains(" "+c+" ", " -o ") {
+				t.Errorf("download planned or ran the orphan transaction: %q", c)
+			}
 		}
 	})
 

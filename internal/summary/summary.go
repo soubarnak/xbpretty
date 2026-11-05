@@ -1,11 +1,10 @@
-// Package summary renders the colored transaction summary printed after a
-// dry run.
+// Package summary renders the nala-faithful inline transaction summary.
 package summary
 
 import (
+	"fmt"
 	"io"
 	"strings"
-	"unicode/utf8"
 )
 
 // The actions an xbps plan row carries, as internal/xbps spells them.
@@ -18,12 +17,16 @@ const (
 	actionReinstall = "reinstall"
 )
 
+// manualHold is the only held reason xbps can supply.
+const manualHold = "Manual hold"
+
 // Row is one package line of an xbps dry-run transaction plan, as parsed by
 // internal/xbps.
 type Row struct {
 	Name          string
 	Version       string
 	Action        string
+	Reason        string
 	Repo          string
 	InstalledSize uint64
 	DownloadSize  uint64
@@ -39,19 +42,20 @@ type Old struct {
 	HasSize       bool
 }
 
-// Summary is one transaction's worth of rows, grouped and ready to render.
+// Summary is one transaction's worth of rows, grouped by nala operation and
+// ready to render.
 type Summary struct {
-	Install []Row
-	Upgrade []Row
-	Remove  []Row
-	Hold    []Row
-
-	// Command is the xbpretty operation that produced the plan (install,
-	// remove, purge, upgrade, autoremove, autopurge). FR-062's Remove family
-	// section label derives from it: an orphan plan from `autoremove` is
-	// AutoRemove, one from `autopurge` is AutoPurge, and a primary `purge`
-	// is Purge.
+	// Command is the xbps command that produced the plan. It selects the
+	// remove-family section label (Remove, AutoRemove, Purge, AutoPurge).
 	Command string
+
+	Remove    []Row
+	Install   []Row
+	ReInstall []Row
+	Upgrade   []Row
+	// Configure is listed separately from Install in rev 6.
+	Configure []Row
+	Hold      []Row
 
 	// Old maps upgraded package names to their installed version and size.
 	Old map[string]Old
@@ -63,8 +67,8 @@ type Summary struct {
 	AddBytes, RemoveBytes, OldBytes uint64
 }
 
-// Build groups rows into the Install, Upgrade, Remove and Hold groups and
-// totals the figures the footer reports.
+// Build groups rows into the nala operation groups and totals the figures the
+// footer reports.
 func Build(rows []Row, held map[string]bool, old map[string]Old) *Summary {
 	s := &Summary{Old: old}
 	if old == nil {
@@ -74,111 +78,59 @@ func Build(rows []Row, held map[string]bool, old map[string]Old) *Summary {
 		isHeld := held[row.Name] || row.Action == actionHold
 		if isHeld {
 			// A held package is left out of the transaction: xbps fetches
-			// and unpacks nothing for it, so it is reported under Hold and
+			// and unpacks nothing for it, so it is reported under Held and
 			// nowhere else (FR-011).
+			if row.Reason == "" {
+				row.Reason = manualHold
+			}
 			s.Hold = append(s.Hold, row)
 			continue
 		}
 		switch row.Action {
 		case actionRemove:
-			// A removal fetches nothing, so its download size stays out of
-			// the total; its installed size is what the transaction frees.
 			s.Remove = append(s.Remove, row)
 			if row.HasInstalled {
 				s.RemoveBytes += row.InstalledSize
 			}
-		case actionUpdate, actionReinstall:
+		case actionUpdate:
 			s.Upgrade = append(s.Upgrade, row)
-			if row.HasDownload {
-				s.Download += row.DownloadSize
-			}
-			if row.HasInstalled {
-				s.AddBytes += row.InstalledSize
-			}
-			old, hasOld := s.Old[row.Name]
-			hasOldSize := hasOld && old.HasSize
-			if hasOldSize {
+			s.addFetched(row)
+			if old, ok := s.Old[row.Name]; ok && old.HasSize {
 				s.OldBytes += old.InstalledSize
 			}
+		case actionReinstall:
+			s.ReInstall = append(s.ReInstall, row)
+			s.addFetched(row)
 		case actionInstall:
 			s.Install = append(s.Install, row)
-			if row.HasDownload {
-				s.Download += row.DownloadSize
-			}
-			if row.HasInstalled {
-				s.AddBytes += row.InstalledSize
-			}
+			s.addFetched(row)
 		case actionConfigure:
-			// FR-011 counts configure actions but does not list them. The
-			// package's files are already unpacked, so nothing is fetched or
-			// added to disk either.
-			s.Install = append(s.Install, row)
+			// Rev 6 lists configure rows in their own section; their files
+			// are already unpacked, so they contribute no fetch or disk bytes.
+			s.Configure = append(s.Configure, row)
 		}
 	}
 	return s
 }
 
-// listable drops the rows a group holds but does not list, which is the
-// configure action (FR-011).
-func listable(rows []Row) []Row {
-	out := make([]Row, 0, len(rows))
-	for _, row := range rows {
-		if row.Action != actionConfigure {
-			out = append(out, row)
-		}
+// addFetched adds the download and installed bytes of an install-family row.
+func (s *Summary) addFetched(row Row) {
+	if row.HasDownload {
+		s.Download += row.DownloadSize
 	}
-	return out
-}
-
-// hasListable reports whether a group has any row to list.
-func hasListable(rows []Row) bool {
-	return len(listable(rows)) > 0
-}
-
-// Counts holds the number of packages in each group.
-type Counts struct {
-	Install, Upgrade, Remove, Hold int
-}
-
-// removeLabel is FR-062's section label for the Remove family. The plan row
-// action alone cannot tell these apart: xbps reports every removal as
-// `remove`, so the command that asked for it decides the label.
-func (s *Summary) removeLabel() string {
-	switch s.Command {
-	case "autoremove":
-		return "AutoRemove"
-	case "autopurge":
-		return "AutoPurge"
-	case "purge":
-		return "Purge"
+	if row.HasInstalled {
+		s.AddBytes += row.InstalledSize
 	}
-	return "Remove"
-}
-
-// Counts returns how many packages landed in each group.
-func (s *Summary) Counts() Counts {
-	return Counts{
-		Install: len(s.Install),
-		Upgrade: len(s.Upgrade),
-		Remove:  len(s.Remove),
-		Hold:    len(s.Hold),
-	}
-}
-
-// Total returns whether the transaction would change anything.
-func (s *Summary) Total() int {
-	return len(s.Install) + len(s.Upgrade) + len(s.Remove)
 }
 
 // NetDiskBytes is FR-012's net delta: new installed size minus old installed
-// size minus removed size. An upgrade the lookups did not answer for brings
-// no old size with it, so only its new bytes count.
+// size minus removed size.
 func (s *Summary) NetDiskBytes() int64 {
 	return int64(s.AddBytes) - int64(s.OldBytes) - int64(s.RemoveBytes)
 }
 
 // SizeUnit selects the size base the summary prints. Binary uses 1024-based
-// KiB/MiB/GiB; Decimal uses 1000-based KB/MB/GB. The zero value is Binary.
+// KiB/MiB/GiB; Decimal uses 1000-based kB/MB/GB. The zero value is Binary.
 type SizeUnit string
 
 // The two [Ui] unit values.
@@ -189,446 +141,306 @@ const (
 
 // Renderer draws a summary to a writer, optionally with ANSI colour.
 type Renderer struct {
-	Color       bool
-	Plain       bool
-	Width       int
-	BoxStyle    string
-	ProgressBar bool
-	Unit        SizeUnit
+	Color bool
+	// Simple selects FR-062's --simple layout.
+	Simple bool
+	// Width is the rule width: the stdout terminal width, else COLUMNS, else
+	// 80. It is used even when piped.
+	Width int
+	// Piped disables full-width table expansion; tables keep natural widths.
+	Piped bool
+	Unit  SizeUnit
+	Theme Theme
+}
+
+// section is one rendered operation block.
+type section struct {
+	label string
+	op    string
+	rows  []Row
+}
+
+// sections returns the non-empty sections in nala's fixed operation order.
+func (s *Summary) sections() []section {
+	var out []section
+	if len(s.Remove) > 0 {
+		out = append(out, section{label: s.removeLabel(), op: "remove", rows: s.Remove})
+	}
+	if len(s.Install) > 0 {
+		out = append(out, section{label: "Install", op: "install", rows: s.Install})
+	}
+	if len(s.ReInstall) > 0 {
+		out = append(out, section{label: "ReInstall", op: "reinstall", rows: s.ReInstall})
+	}
+	if len(s.Upgrade) > 0 {
+		out = append(out, section{label: "Upgrade", op: "upgrade", rows: s.Upgrade})
+	}
+	// There is no Downgrade section on xbps: a downgrade is planned as an
+	// install or an update and lands under those sections (FR-062).
+	if len(s.Configure) > 0 {
+		out = append(out, section{label: "Configure", op: "configure", rows: s.Configure})
+	}
+	if len(s.Hold) > 0 {
+		out = append(out, section{label: "Held", op: "held", rows: s.Hold})
+	}
+	return out
+}
+
+// removeLabel maps the command that produced a remove-family plan to nala's
+// operation label.
+func (s *Summary) removeLabel() string {
+	switch s.Command {
+	case "autoremove":
+		return "AutoRemove"
+	case "purge":
+		return "Purge"
+	case "autopurge":
+		return "AutoPurge"
+	default:
+		return "Remove"
+	}
 }
 
 // Render writes the grouped summary and its footer to w.
 func (r Renderer) Render(w io.Writer, s *Summary) error {
-	if r.Plain {
-		return r.renderPlain(w, s)
-	}
-	return r.renderBoxes(w, s)
-}
-
-func (r Renderer) renderPlain(w io.Writer, s *Summary) error {
-	if hasListable(s.Install) {
-		if err := r.groupPlain(w, "Install", s.Install, s); err != nil {
-			return err
-		}
-	}
-	if hasListable(s.Upgrade) {
-		if err := r.groupPlain(w, "Upgrade", s.Upgrade, s); err != nil {
-			return err
-		}
-	}
-	if hasListable(s.Remove) {
-		if err := r.groupPlain(w, s.removeLabel(), s.Remove, s); err != nil {
-			return err
-		}
-	}
-	if hasListable(s.Hold) {
-		if err := r.groupPlain(w, "Hold", s.Hold, s); err != nil {
-			return err
-		}
-	}
-	_, err := io.WriteString(w, r.footer(s)+"\n")
-	return err
-}
-
-func (r Renderer) groupPlain(w io.Writer, title string, rows []Row, s *Summary) error {
-	header := title
-	if !r.Plain {
-		header = r.paint(boldSeq, title)
-	}
-	if _, err := io.WriteString(w, header+"\n"); err != nil {
+	sections := s.sections()
+	if len(sections) == 0 {
+		_, err := io.WriteString(w, "Nothing to do.\n")
 		return err
 	}
-	shown := listable(rows)
-	nameWidth := widest(func(i int) string { return shown[i].Name }, len(shown))
-	verWidth := widest(func(i int) string { return s.version(shown[i]) }, len(shown))
-	for i := range shown {
-		line := padRight(shown[i].Name, nameWidth) + "  " +
-			padRight(s.version(shown[i]), verWidth) + "  " +
-			r.size(shown[i])
-		if _, err := io.WriteString(w, line+"\n"); err != nil {
-			return err
-		}
-	}
-	_, err := io.WriteString(w, "\n")
-	return err
-}
-
-func (r Renderer) renderBoxes(w io.Writer, s *Summary) error {
-	termWidth := r.Width
-	if termWidth <= 0 {
-		termWidth = 80
-	}
-
-	type groupData struct {
-		title     string
-		colorCode string
-		headers   []string
-		rows      [][]string
-	}
-	var groups []groupData
-
-	if hasListable(s.Install) {
-		shown := listable(s.Install)
-		var rows [][]string
-		for _, row := range shown {
-			rows = append(rows, []string{
-				r.paint(greenSeq, row.Name),
-				row.Version,
-				r.size(row),
-			})
-		}
-		groups = append(groups, groupData{
-			title:     sprintf("Packages To Install (%d)", len(shown)),
-			colorCode: greenSeq,
-			headers:   []string{"Package", "Version", "Size"},
-			rows:      rows,
-		})
-	}
-
-	if hasListable(s.Upgrade) {
-		shown := listable(s.Upgrade)
-		var rows [][]string
-		for _, row := range shown {
-			name := r.paint(blueSeq, row.Name)
-			vDiff := row.Version
-			old, hasOld := s.Old[row.Name]
-			hasOldVersion := hasOld && old.Version != ""
-			if hasOldVersion {
-				oldVer := old.Version
-				if r.Color {
-					oldVer = dimSeq + old.Version + resetSeq
-				}
-				vDiff = oldVer + " → " + VersionDiff(old.Version, row.Version, r.Color)
-			}
-			rows = append(rows, []string{
-				name,
-				vDiff,
-				r.size(row),
-			})
-		}
-		groups = append(groups, groupData{
-			title:     sprintf("Packages To Upgrade (%d)", len(shown)),
-			colorCode: blueSeq,
-			headers:   []string{"Package", "Version Delta", "Size"},
-			rows:      rows,
-		})
-	}
-
-	if hasListable(s.Remove) {
-		shown := listable(s.Remove)
-		var rows [][]string
-		for _, row := range shown {
-			rows = append(rows, []string{
-				r.paint(redSeq, row.Name),
-				row.Version,
-				r.size(row),
-			})
-		}
-		groups = append(groups, groupData{
-			title:     sprintf("Packages To %s (%d)", s.removeLabel(), len(shown)),
-			colorCode: redSeq,
-			headers:   []string{"Package", "Version", "Size"},
-			rows:      rows,
-		})
-	}
-
-	if hasListable(s.Hold) {
-		shown := listable(s.Hold)
-		hasDelta := false
-		for _, row := range shown {
-			old, hasOld := s.Old[row.Name]
-			if hasOld && old.Version != "" {
-				hasDelta = true
-				break
-			}
-		}
-		headers := []string{"Package", "Version", "Size"}
-		if hasDelta {
-			headers[1] = "Version Delta"
-		}
-		var rows [][]string
-		for _, row := range shown {
-			name := r.paint(boldOrangeSeq, row.Name)
-			vDiff := row.Version
-			old, hasOld := s.Old[row.Name]
-			hasOldVersion := hasOld && old.Version != ""
-			if hasOldVersion {
-				oldVer := old.Version
-				if r.Color {
-					oldVer = dimSeq + old.Version + resetSeq
-				}
-				vDiff = oldVer + " → " + VersionDiff(old.Version, row.Version, r.Color)
-			}
-			rows = append(rows, []string{
-				name,
-				vDiff,
-				r.size(row),
-			})
-		}
-		groups = append(groups, groupData{
-			title:     sprintf("Packages To Hold (%d)", len(shown)),
-			colorCode: boldOrangeSeq,
-			headers:   headers,
-			rows:      rows,
-		})
-	}
-
-	chars := BoxCharacterSet(r.BoxStyle)
-	for _, g := range groups {
-		if err := r.renderBox(w, g.title, g.colorCode, g.headers, g.rows, termWidth, chars); err != nil {
-			return err
-		}
-	}
-
-	return r.renderSummaryCard(w, s, termWidth, chars)
-}
-
-func (r Renderer) renderBox(w io.Writer, title, colorCode string, headers []string, rows [][]string, termWidth int, chars BoxChars) error {
-	col0Min := visibleWidth(headers[0])
-	col1Min := visibleWidth(headers[1])
-	col2Min := visibleWidth(headers[2])
-	for _, row := range rows {
-		if v := visibleWidth(row[0]); v > col0Min {
-			col0Min = v
-		}
-		if v := visibleWidth(row[1]); v > col1Min {
-			col1Min = v
-		}
-		if v := visibleWidth(row[2]); v > col2Min {
-			col2Min = v
-		}
-	}
-
-	col0Width := col0Min + 2
-	if col0Width < 24 {
-		col0Width = 24
-	}
-	isVersionColumn := len(headers) > 1 && headers[1] == "Version"
-	needsExpandCol0 := isVersionColumn && col0Width < 34
-	if needsExpandCol0 {
-		col0Width = 34
-	}
-	col2Width := col2Min + 2
-	if col2Width < 12 {
-		col2Width = 12
-	}
-	col1Width := col1Min + 2
-	if col1Width < 28 {
-		col1Width = 28
-	}
-
-	width := termWidth
-	needed := 5 + col0Width + col1Width + col2Width
-	if needed > width {
-		width = needed
+	var lines []string
+	if r.Simple {
+		lines = r.simpleLines(s, sections)
 	} else {
-		col1Width = width - 5 - col0Width - col2Width
+		lines = r.fullLines(s, sections)
 	}
-
-	titleRunes := utf8.RuneCountInString(title)
-	dashes := width - titleRunes - 6
-	if dashes < 1 {
-		dashes = 1
-	}
-	top := chars.TopLeft + chars.Horizontal + chars.Horizontal + " " + r.paint(colorCode, title) + " " + strings.Repeat(chars.Horizontal, dashes) + chars.TopRight + "\n"
-	if _, err := io.WriteString(w, top); err != nil {
-		return err
-	}
-
-	hLine := chars.Vertical + "  " + padRight(r.paint(boldSeq, headers[0]), col0Width) +
-		padRight(r.paint(boldSeq, headers[1]), col1Width) +
-		padLeft(r.paint(boldSeq, headers[2]), col2Width)
-	if _, err := io.WriteString(w, padRight(hLine, width-1)+chars.Vertical+"\n"); err != nil {
-		return err
-	}
-
-	div := chars.DividerLeft + strings.Repeat(chars.Horizontal, width-2) + chars.DividerRight + "\n"
-	if _, err := io.WriteString(w, div); err != nil {
-		return err
-	}
-
-	for _, row := range rows {
-		rowLine := chars.Vertical + "  " + padRight(row[0], col0Width) +
-			padRight(row[1], col1Width) +
-			padLeft(row[2], col2Width)
-		if _, err := io.WriteString(w, padRight(rowLine, width-1)+chars.Vertical+"\n"); err != nil {
-			return err
-		}
-	}
-
-	bottom := chars.BottomLeft + strings.Repeat(chars.Horizontal, width-2) + chars.BottomRight + "\n\n"
-	_, err := io.WriteString(w, bottom)
+	_, err := io.WriteString(w, strings.Join(lines, "\n")+"\n")
 	return err
 }
 
-func (r Renderer) renderSummaryCard(w io.Writer, s *Summary, termWidth int, chars BoxChars) error {
-	width := termWidth
-	c := s.Counts()
-	var parts []string
-	if c.Install > 0 {
-		parts = append(parts, r.paint(greenSeq, count(c.Install, "install")))
+// fullLines renders FR-062's full inline summary.
+func (r Renderer) fullLines(s *Summary, sections []section) []string {
+	rule := strings.Repeat("=", r.ruleWidth())
+	var lines []string
+	for _, sec := range sections {
+		lines = append(lines, rule)
+		lines = append(lines, " "+r.paint(RoleHighlight, sec.label))
+		lines = append(lines, rule)
+		lines = append(lines, r.table(s, sec).render(r.ruleWidth(), !r.Piped, r)...)
 	}
-	if c.Upgrade > 0 {
-		parts = append(parts, r.paint(blueSeq, count(c.Upgrade, "upgrade")))
+	lines = append(lines, rule)
+	lines = append(lines, " Summary")
+	lines = append(lines, rule)
+	for _, sec := range sections {
+		lines = append(lines, " "+sec.label+" "+itoa(uint64(len(sec.rows))))
 	}
-	if c.Remove > 0 {
-		parts = append(parts, r.paint(redSeq, count(c.Remove, "remove")))
-	}
-	if c.Hold > 0 {
-		parts = append(parts, r.paint(boldOrangeSeq, count(c.Hold, "hold")))
-	}
-	countsText := strings.Join(parts, ", ")
+	lines = append(lines, "")
+	lines = append(lines, r.sizeLines(s)...)
+	lines = append(lines, "")
+	return lines
+}
 
-	var statParts []string
+// simpleLines renders FR-062's --simple layout: no rules, no Summary heading,
+// no version diff.
+func (r Renderer) simpleLines(s *Summary, sections []section) []string {
+	var lines []string
+	for _, sec := range sections {
+		lines = append(lines, r.paint(RoleHighlight, sec.label)+": "+itoa(uint64(len(sec.rows))))
+		names := make([]string, 0, len(sec.rows))
+		for _, row := range sec.rows {
+			name := row.Name
+			if row.Reason != "" {
+				name += " (" + row.Reason + ")"
+			}
+			names = append(names, name)
+		}
+		lines = append(lines, "  "+strings.Join(names, ", "))
+	}
+	lines = append(lines, "")
+	lines = append(lines, r.sizeLines(s)...)
+	lines = append(lines, "")
+	return lines
+}
+
+// sizeLines is the size block shared by the full and simple layouts.
+func (r Renderer) sizeLines(s *Summary) []string {
+	var out []string
 	if s.Download > 0 {
-		statParts = append(statParts, sprintf("Transfer: %s download", r.human(s.Download)))
+		out = append(out, " Total download size: "+HumanUnit(s.Download, r.Unit))
 	}
-	net := s.NetDiskBytes()
-	if net != 0 {
-		sign := "+"
-		abs := uint64(net)
-		if net < 0 {
-			sign = "-"
-			abs = uint64(-net)
-		}
-		statParts = append(statParts, sprintf("Disk: %s%s", sign, r.human(abs)))
+	delta := s.NetDiskBytes()
+	if delta >= 0 {
+		out = append(out, " Disk space required: "+HumanUnit(uint64(delta), r.Unit))
+	} else {
+		out = append(out, " Disk space to free: "+HumanUnit(uint64(-delta), r.Unit))
 	}
-	if len(statParts) == 0 {
-		statParts = append(statParts, "Transfer: 0 B  •  Disk: 0 B")
-	}
-	statsText := strings.Join(statParts, "  •  ")
-
-	title := "Summary"
-	dashes := width - utf8.RuneCountInString(title) - 6
-	if dashes < 1 {
-		dashes = 1
-	}
-	top := chars.TopLeft + chars.Horizontal + chars.Horizontal + " " + r.paint(boldSeq, title) + " " + strings.Repeat(chars.Horizontal, dashes) + chars.TopRight + "\n"
-	if _, err := io.WriteString(w, top); err != nil {
-		return err
-	}
-
-	line1 := chars.Vertical + "  Changes:  " + countsText
-	if _, err := io.WriteString(w, padRight(line1, width-1)+chars.Vertical+"\n"); err != nil {
-		return err
-	}
-
-	line2 := chars.Vertical + "  " + statsText
-	if _, err := io.WriteString(w, padRight(line2, width-1)+chars.Vertical+"\n"); err != nil {
-		return err
-	}
-
-	bottom := chars.BottomLeft + strings.Repeat(chars.Horizontal, width-2) + chars.BottomRight + "\n"
-	_, err := io.WriteString(w, bottom)
-	return err
+	return out
 }
 
-func (r Renderer) paint(code, text string) string {
-	skipPaint := !r.Color || r.Plain || code == ""
-	if skipPaint {
+func (r Renderer) table(s *Summary, sec section) table {
+	rows := make([][]string, 0, len(sec.rows))
+	for _, row := range sec.rows {
+		rows = append(rows, r.rowCells(s, sec, row))
+	}
+	return table{header: sectionHeaders(s, sec), rows: rows}
+}
+
+// sectionHeaders returns the column set for a section. nala derives it from
+// the section's rows; rev 6 normalises over the whole section so a held row
+// whose versions differ cannot shift a later row's cells.
+func sectionHeaders(s *Summary, sec section) []string {
+	hasDiff := sectionHasVersionDiff(s, sec)
+	hasReason := sectionHasReason(sec)
+	switch {
+	case hasDiff && hasReason:
+		return []string{"Package:", "Old Version:", "New Version:", "Reason:", "Size:"}
+	case hasDiff:
+		return []string{"Package:", "Old Version:", "New Version:", "Size:"}
+	case hasReason:
+		return []string{"Package:", "Version:", "Reason:", "Size:"}
+	default:
+		return []string{"Package:", "Version:", "Size:"}
+	}
+}
+
+func sectionHasReason(sec section) bool {
+	for _, row := range sec.rows {
+		if row.Reason != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func sectionHasVersionDiff(s *Summary, sec section) bool {
+	for _, row := range sec.rows {
+		if o, ok := s.oldVersion(row); ok && o != row.Version {
+			return true
+		}
+	}
+	return false
+}
+
+// oldVersion returns a row's installed version from the lookup, if known.
+func (s *Summary) oldVersion(row Row) (string, bool) {
+	o, ok := s.Old[row.Name]
+	if !ok || o.Version == "" {
+		return "", false
+	}
+	return o.Version, true
+}
+
+// rowCells produces one row's cells in the section's column shape.
+func (r Renderer) rowCells(s *Summary, sec section, row Row) []string {
+	nameRole := RoleSecondary
+	switch sec.op {
+	case "remove":
+		nameRole = RoleError
+	case "held", "reinstall", "configure":
+		nameRole = RoleNotice
+	}
+	name := r.paint(nameRole, row.Name)
+	version := row.Version
+	if version == "" {
+		version = "Unknown"
+	}
+	sizeText, hasSize := sectionSize(sec.op, row)
+	size := "—"
+	if hasSize {
+		size = HumanUnit(sizeText, r.Unit)
+	}
+	hasDiff := sectionHasVersionDiff(s, sec)
+	oldVer, hasOld := s.oldVersion(row)
+	differs := hasOld && oldVer != row.Version
+	switch {
+	case hasDiff && sec.rows[0].Reason != "":
+		return []string{name, oldVersionCell(oldVer, hasOld), r.diffCell(oldVer, version, differs), row.Reason, size}
+	case hasDiff:
+		return []string{name, oldVersionCell(oldVer, hasOld), r.diffCell(oldVer, version, differs), size}
+	case row.Reason != "":
+		return []string{name, version, row.Reason, size}
+	default:
+		return []string{name, version, size}
+	}
+}
+
+// oldVersionCell keeps the old version raw (FR-063).
+func oldVersionCell(oldVer string, ok bool) string {
+	if !ok {
+		return "—"
+	}
+	return oldVer
+}
+
+// diffCell highlights only the new version's changed components.
+func (r Renderer) diffCell(oldVer, newVer string, differs bool) string {
+	if !differs {
+		return newVer
+	}
+	return versionDiffWith(oldVer, newVer, func(part string) string {
+		return r.paint(RoleNotice, part)
+	})
+}
+
+// sectionSize applies the operation's Size: semantics. Removals and
+// configure rows show the installed size they free; the install family shows
+// the fetch size when there is one and falls back to the installed size.
+func sectionSize(op string, row Row) (uint64, bool) {
+	switch op {
+	case "remove", "configure":
+		return row.InstalledSize, row.HasInstalled
+	default:
+		if row.HasDownload {
+			return row.DownloadSize, true
+		}
+		return row.InstalledSize, row.HasInstalled
+	}
+}
+
+func (r Renderer) ruleWidth() int {
+	if r.Width > 0 {
+		return r.Width
+	}
+	return 80
+}
+
+func (r Renderer) paint(role Role, text string) string {
+	if !r.Color || text == "" {
 		return text
 	}
-	return code + text + resetSeq
-}
-
-func (s *Summary) version(row Row) string {
-	if o, ok := s.Old[row.Name]; ok && o.Version != "" {
-		return o.Version + " → " + row.Version
+	prefix := r.Theme.prefix(role)
+	if prefix == "" {
+		return text
 	}
-	return row.Version
+	return prefix + text + resetSeq
 }
 
-// size is the figure a row's column shows. A package the transaction fetches
-// is shown by what it downloads; a removal or a held package, which is not
-// fetched, by what it occupies on disk.
-func (r Renderer) size(row Row) string {
-	fetched := row.Action != actionRemove && row.Action != actionHold
-	switch {
-	case fetched && row.HasDownload:
-		return r.human(row.DownloadSize)
-	case row.HasInstalled:
-		return r.human(row.InstalledSize)
-	}
-	return "-"
-}
+// Human renders a widget size: Binary, precision 1 (FR-064). It is kept as
+// the precision-1 compatibility helper alongside WidgetSize.
+func Human(n uint64) string { return WidgetSize(n) }
 
-// Human renders a byte count the way the summary shows sizes, e.g. `48.2 MiB`
-// (FR-012), using the default Binary unit.
-func Human(n uint64) string { return HumanUnit(n, SizeBinary) }
+// WidgetSize renders a byte count the way the progress widget does: always
+// Binary, precision 1, independent of [Ui] unit (FR-064, ADR-0012 §5).
+func WidgetSize(n uint64) string { return formatUnit(n, SizeBinary, 1) }
 
-// HumanUnit renders a byte count with the requested [Ui] unit.
-func HumanUnit(n uint64, unit SizeUnit) string {
-	base := uint64(1024)
-	suffixes := [3]string{"KiB", "MiB", "GiB"}
+// HumanUnit renders a summary size: the requested [Ui] unit, precision 0, and
+// nala's strict '>' unit switch (FR-062).
+func HumanUnit(n uint64, unit SizeUnit) string { return formatUnit(n, unit, 0) }
+
+// formatUnit reproduces nala's UnitStr::str: precision digits, a strict '>'
+// unit switch, and no unit below the base.
+func formatUnit(n uint64, unit SizeUnit, precision int) string {
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
+	divisor := 1024.0
 	if unit == SizeDecimal {
-		base = 1000
-		suffixes = [3]string{"KB", "MB", "GB"}
+		units = []string{"B", "KB", "MB", "GB", "TB", "PB"}
+		divisor = 1000.0
 	}
-	kib := base
-	mib := kib * base
-	gib := mib * base
-	switch {
-	case n >= gib:
-		return trimZero(float64(n)/float64(gib)) + " " + suffixes[2]
-	case n >= mib:
-		return trimZero(float64(n)/float64(mib)) + " " + suffixes[1]
-	case n >= kib:
-		return trimZero(float64(n)/float64(kib)) + " " + suffixes[0]
+	value := float64(n)
+	u := 0
+	for u < len(units)-1 && value > divisor {
+		value /= divisor
+		u++
 	}
-	return formatInt(n) + " B"
-}
-
-func (r Renderer) human(n uint64) string { return HumanUnit(n, r.Unit) }
-
-func trimZero(v float64) string {
-	s := sprintf("%.1f", v)
-	if strings.HasSuffix(s, ".0") {
-		return s[:len(s)-2]
-	}
-	return s
-}
-
-func formatInt(n uint64) string {
-	return itoa(n)
-}
-
-// Footer is the counts, download total and net disk delta line.
-func (r Renderer) footer(s *Summary) string {
-	c := s.Counts()
-	parts := []string{}
-	if c.Install > 0 {
-		parts = append(parts, count(c.Install, "install"))
-	}
-	if c.Upgrade > 0 {
-		parts = append(parts, count(c.Upgrade, "upgrade"))
-	}
-	if c.Remove > 0 {
-		parts = append(parts, count(c.Remove, "remove"))
-	}
-	if c.Hold > 0 {
-		parts = append(parts, count(c.Hold, "hold"))
-	}
-	counts := strings.Join(parts, ", ")
-	line := counts
-	if s.Download > 0 {
-		line += " · " + r.human(s.Download) + " download"
-	}
-	net := s.NetDiskBytes()
-	if net == 0 {
-		return line
-	}
-	sign := "+"
-	abs := uint64(net)
-	if net < 0 {
-		sign = "-"
-		abs = uint64(-net)
-	}
-	line += " · " + sign + r.human(abs) + " disk"
-	return line
-}
-
-// count renders one group's tally. The nouns stay as FR-012's example spells
-// them, so three installs read `3 install`.
-func count(n int, noun string) string {
-	return itoa(uint64(n)) + " " + noun
+	return fmt.Sprintf("%.*f %s", precision, value, units[u])
 }

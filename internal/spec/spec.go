@@ -109,7 +109,7 @@ var Commands = []Command{
 	{Name: "update", Summary: "refresh the repository index", Group: GroupTransaction,
 		Binaries: []string{"install"}},
 	{Name: "download", Summary: "download package archives into the current directory", UsageArgs: "PKG...", Args: RequiredArgs, Group: GroupTransaction,
-		Binaries: []string{"install", "query"}},
+		Binaries: []string{"query"}},
 	{Name: "clean", Summary: "clean the package cache", Group: GroupTransaction, Flags: []string{"lists", "fetch"},
 		Binaries: []string{"remove"}},
 
