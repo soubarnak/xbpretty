@@ -1,10 +1,14 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/soubarnak/xbpretty/internal/config"
+	"github.com/soubarnak/xbpretty/internal/discovery"
 )
 
 // policyReposVerbose is the `xbps-query -L -v` shape measured on xbps
@@ -114,8 +118,8 @@ func TestAC022PolicyGlobalMachineObject(t *testing.T) {
 	if unsigned["signed"] != false {
 		t.Errorf("unsigned repo signed = %v", unsigned["signed"])
 	}
-	if _, present := unsigned["signed_by"]; present {
-		t.Errorf("unsigned repo carries signed_by: %#v", unsigned)
+	if signedBy, present := unsigned["signed_by"]; !present || signedBy != nil {
+		t.Errorf("unsigned repo signed_by = %#v, want present and null", unsigned["signed_by"])
 	}
 	if _, present := unsigned["fingerprint"]; present {
 		t.Errorf("unsigned repo carries fingerprint: %#v", unsigned)
@@ -459,4 +463,301 @@ func TestAC021PolicyPinWithBothBitsPrintsBothReasons(t *testing.T) {
 	if !strings.HasSuffix(out, wantPins) {
 		t.Errorf("pins =\n%s\nwant suffix:\n%s", out, wantPins)
 	}
+}
+
+// policyReposEdge covers the measured `-L -v` shapes the parser must keep:
+// a negative package count, a URI containing a space, a staged repository,
+// maybe-signed, and two signed repositories with different signers.
+const policyReposEdge = `-1 /media/My Repo/current (RSA maybe-signed)
+  42 /media/Toto/softs/linux/grok-bot/repo (Staged RSA signed)
+      Signed-by: Staged Signer
+      4096 aa:bb:cc
+   7 https://repo-a.example/current (RSA signed)
+      Signed-by: Signer A
+      4096 11:22:33
+   9 https://repo-b.example/current (RSA signed)
+      Signed-by: Signer B
+      4096 44:55:66
+   3 https://repo-c.example/current (RSA unsigned)
+`
+
+func TestAC021PolicyRepositoriesKeepOrdinalAndVariantShapes(t *testing.T) {
+	bin, env, _ := policyEnv(t)
+	env["XB_STUB_REPOS_VERBOSE"] = policyReposEdge
+	env["XB_STUB_HOLD"] = ""
+	env["XB_STUB_REPOLOCK"] = ""
+	code, out, errs := runDiscovery(t, bin, env, "policy")
+	if code != 0 {
+		t.Fatalf("policy exit = %d\n%s", code, errs)
+	}
+	want := "" +
+		"Package files:\n" +
+		" 1 /media/My Repo/current (RSA maybe-signed)\n" +
+		" 2 /media/Toto/softs/linux/grok-bot/repo (RSA signed)\n" +
+		"     Signed-by: Staged Signer\n" +
+		"     4096 aa:bb:cc\n" +
+		" 3 https://repo-a.example/current (RSA signed)\n" +
+		"     Signed-by: Signer A\n" +
+		"     4096 11:22:33\n" +
+		" 4 https://repo-b.example/current (RSA signed)\n" +
+		"     Signed-by: Signer B\n" +
+		"     4096 44:55:66\n" +
+		" 5 https://repo-c.example/current (RSA unsigned)\n" +
+		"Pinned packages:\n"
+	if out != want {
+		t.Errorf("stdout =\n%s\nwant:\n%s", out, want)
+	}
+}
+
+func TestAC022PolicyMachineRepositorySignatureShapes(t *testing.T) {
+	bin, env, _ := policyEnv(t)
+	env["XB_STUB_REPOS_VERBOSE"] = policyReposEdge
+	env["XB_STUB_HOLD"] = ""
+	env["XB_STUB_REPOLOCK"] = ""
+	code, out, errs := runDiscovery(t, bin, env, "policy", "-m")
+	if code != 0 {
+		t.Fatalf("policy -m exit = %d\n%s", code, errs)
+	}
+	var object map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &object); err != nil {
+		t.Fatalf("machine policy is not JSON: %v\n%s", err, out)
+	}
+	files := object["package_files"].([]any)
+	if len(files) != 5 {
+		t.Fatalf("package_files = %d, want all five rows", len(files))
+	}
+	byRepo := map[string]map[string]any{}
+	for _, entry := range files {
+		file := entry.(map[string]any)
+		byRepo[file["repository"].(string)] = file
+	}
+	maybe := byRepo["/media/My Repo/current"]
+	if maybe["precedence"] != float64(1) || maybe["signed"] != false || maybe["signed_by"] != nil {
+		t.Errorf("maybe-signed repo = %#v", maybe)
+	}
+	staged := byRepo["/media/Toto/softs/linux/grok-bot/repo"]
+	if staged["signed"] != true || staged["signed_by"] != "Staged Signer" || staged["fingerprint"] != "4096 aa:bb:cc" {
+		t.Errorf("staged signed repo = %#v", staged)
+	}
+	if byRepo["https://repo-a.example/current"]["signed_by"] != "Signer A" {
+		t.Errorf("repo-a signer = %v", byRepo["https://repo-a.example/current"]["signed_by"])
+	}
+	if byRepo["https://repo-b.example/current"]["signed_by"] != "Signer B" {
+		t.Errorf("repo-b signer = %v", byRepo["https://repo-b.example/current"]["signed_by"])
+	}
+	unsigned := byRepo["https://repo-c.example/current"]
+	if unsigned["signed"] != false || unsigned["signed_by"] != nil {
+		t.Errorf("unsigned repo = %#v", unsigned)
+	}
+	if _, present := unsigned["fingerprint"]; present {
+		t.Errorf("unsigned repo carries fingerprint: %#v", unsigned)
+	}
+}
+
+func TestAC021PolicyCanonicalisesResolvedRecordName(t *testing.T) {
+	for _, token := range []string{"a*", "zstd>=1.0", "zstd-1.5.7_1", "cmd:sh"} {
+		t.Run(token, func(t *testing.T) {
+			bin, env, _ := policyEnv(t)
+			env["XB_STUB_SHOW"] = "pkgname: alpha\npkgver: alpha-1.0_1\n"
+			env["XB_STUB_SHOW_REPO"] = "pkgname: alpha\npkgver: alpha-2.0_1\nrepository: https://repo-de.voidlinux.org/current\n"
+			code, out, errs := runDiscovery(t, bin, env, "policy", token)
+			if code != 0 {
+				t.Fatalf("policy %q exit = %d\n%s", token, code, errs)
+			}
+			if !strings.HasPrefix(out, "alpha:\n") {
+				t.Errorf("policy %q heading is not the resolved name:\n%s", token, out)
+			}
+			if !strings.Contains(out, "  *** 2.0_1 1\n") || !strings.Contains(out, "      1 https://repo-de.voidlinux.org/current\n") {
+				t.Errorf("policy %q did not look variants up under alpha:\n%s", token, out)
+			}
+			if errs != "" {
+				t.Errorf("policy %q stderr = %q", token, errs)
+			}
+		})
+	}
+}
+
+func TestAC018PolicyPlainRepositoryListFallback(t *testing.T) {
+	bin, env, logPath := policyEnv(t)
+	env["XB_STUB_REPOS_VERBOSE"] = ""
+	env["XB_STUB_REPOS"] = policyReposPlain
+	env["XB_STUB_HOLD"] = ""
+	env["XB_STUB_REPOLOCK"] = ""
+	code, out, errs := runDiscovery(t, bin, env, "policy")
+	if code != 0 {
+		t.Fatalf("policy exit = %d\n%s", code, errs)
+	}
+	want := "" +
+		"Package files:\n" +
+		" 1 https://repo-de.voidlinux.org/current (RSA signed)\n" +
+		" 2 https://repo-de.voidlinux.org/current/multilib (RSA signed)\n" +
+		" 3 /media/Toto/softs/linux/grok-bot/repo (RSA unsigned)\n" +
+		"Pinned packages:\n"
+	if out != want {
+		t.Errorf("stdout =\n%s\nwant:\n%s", out, want)
+	}
+	cmds := commandsFromLog(t, logPath)
+	for _, wantCall := range []string{"-L -v", "-L"} {
+		found := false
+		for _, got := range cmds {
+			if got == wantCall {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("fallback did not run %q:\n%s", wantCall, strings.Join(cmds, "\n"))
+		}
+	}
+}
+
+func TestAC021PolicyPinsSortByNameInHumanAndMachine(t *testing.T) {
+	bin, env, _ := policyEnv(t)
+	env["XB_STUB_HOLD"] = "zpkg-1.0_1\nheldpkg-1.0_1\n"
+	env["XB_STUB_REPOLOCK"] = "apkg-2.0_1\n"
+
+	code, out, errs := runDiscovery(t, bin, env, "policy")
+	if code != 0 {
+		t.Fatalf("policy exit = %d\n%s", code, errs)
+	}
+	wantPins := "" +
+		"Pinned packages:\n" +
+		"   apkg -> 2.0_1 (repolock)\n" +
+		"   heldpkg -> 1.0_1 (hold)\n" +
+		"   zpkg -> 1.0_1 (hold)\n"
+	if !strings.HasSuffix(out, wantPins) {
+		t.Errorf("human pins =\n%s\nwant suffix:\n%s", out, wantPins)
+	}
+
+	code, out, errs = runDiscovery(t, bin, env, "policy", "-m")
+	if code != 0 {
+		t.Fatalf("policy -m exit = %d\n%s", code, errs)
+	}
+	var object map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &object); err != nil {
+		t.Fatalf("machine policy is not JSON: %v", err)
+	}
+	pins := object["pinned_packages"].([]any)
+	got := make([]string, 0, len(pins))
+	for _, entry := range pins {
+		pin := entry.(map[string]any)
+		got = append(got, pin["name"].(string)+"/"+pin["reason"].(string))
+	}
+	want := []string{"apkg/repolock", "heldpkg/hold", "zpkg/hold"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("machine pin order = %v, want %v", got, want)
+	}
+}
+
+func TestAC022PolicyMachineNullAndEmptyShapes(t *testing.T) {
+	bin, env, _ := policyEnv(t)
+	env["XB_STUB_REPOS_VERBOSE"] = ""
+	env["XB_STUB_REPOS"] = ""
+	env["XB_STUB_HOLD"] = ""
+	env["XB_STUB_REPOLOCK"] = ""
+	code, out, errs := runDiscovery(t, bin, env, "policy", "-m")
+	if code != 0 {
+		t.Fatalf("empty global policy exit = %d\n%s", code, errs)
+	}
+	if got := strings.TrimSpace(out); got != `{"schema":1,"package_files":[],"pinned_packages":[]}` {
+		t.Errorf("empty global machine = %q", got)
+	}
+
+	env = policyEnvOnly(t)
+	env["XB_STUB_SHOW"] = "pkgname: local-only\npkgver: local-only-1.0_1\n"
+	env["XB_STUB_SHOW_REPO_EXIT"] = "2"
+	env["XB_STUB_SHOW_REPO"] = ""
+	code, out, errs = runDiscovery(t, bin, env, "policy", "-m", "local-only")
+	if code != 0 {
+		t.Fatalf("installed-only machine policy exit = %d\n%s", code, errs)
+	}
+	view := firstMachineView(t, out)
+	if view["installed"] != "1.0_1" || view["candidate"] != nil {
+		t.Errorf("installed-only machine view = %#v", view)
+	}
+	if versions, ok := view["versions"].([]any); !ok || len(versions) != 0 {
+		t.Errorf("installed-only versions = %#v, want []", view["versions"])
+	}
+
+	bin, env, _ = policyEnv(t)
+	env["XB_STUB_SHOW_EXIT"] = "2"
+	env["XB_STUB_SHOW"] = ""
+	env["XB_STUB_SHOW_REPO"] = "pkgname: beta\npkgver: beta-1.0_1\nrepository: https://repo-de.voidlinux.org/current\n"
+	code, out, errs = runDiscovery(t, bin, env, "policy", "-m", "beta")
+	if code != 0 {
+		t.Fatalf("repo-only machine policy exit = %d\n%s", code, errs)
+	}
+	view = firstMachineView(t, out)
+	if view["installed"] != nil || view["candidate"] != "1.0_1" {
+		t.Errorf("repo-only machine view = %#v", view)
+	}
+}
+
+func TestAC022PolicyInstalledMarksOneVariant(t *testing.T) {
+	bin, env, _ := policyEnv(t)
+	env["XB_STUB_REPO"] = "[-] dual-1.0_1 Dual package\n"
+	env["XB_STUB_ARCH"] = "" +
+		"dual-1.0_1: x86_64 (https://repo-b.example/current)\n" +
+		"dual-1.0_1: x86_64 (https://repo-a.example/current)\n"
+	env["XB_STUB_REPOS_VERBOSE"] = "" +
+		"  10 https://repo-a.example/current (RSA signed)\n" +
+		"   5 https://repo-b.example/current (RSA unsigned)\n"
+	env["XB_STUB_SHOW"] = "pkgname: dual\npkgver: dual-1.0_1\n"
+	env["XB_STUB_SHOW_REPO"] = "pkgname: dual\npkgver: dual-1.0_1\nrepository: https://repo-b.example/current\n"
+	code, out, errs := runDiscovery(t, bin, env, "policy", "-m", "dual")
+	if code != 0 {
+		t.Fatalf("policy -m dual exit = %d\n%s", code, errs)
+	}
+	view := firstMachineView(t, out)
+	versions := view["versions"].([]any)
+	if len(versions) != 2 {
+		t.Fatalf("versions = %d, want 2", len(versions))
+	}
+	first := versions[0].(map[string]any)
+	second := versions[1].(map[string]any)
+	if first["installed"] != true || second["installed"] != false {
+		t.Errorf("installed flags = %v/%v; want only the first-precedence variant",
+			first["installed"], second["installed"])
+	}
+	if first["candidate"] != false || second["candidate"] != true {
+		t.Errorf("candidate flags = %v/%v", first["candidate"], second["candidate"])
+	}
+}
+
+func TestAC021PolicyHumanWriteFailureIsCleanExit(t *testing.T) {
+	if writePolicyGlobal(failWriter{}, []discovery.PolicyFile{{Precedence: 1, Repository: "https://repo.example/current", Signature: "signed"}}, nil) {
+		t.Errorf("global write to a broken stream reported success")
+	}
+	if writePolicyPackages(failWriter{}, []discovery.MachinePackagePolicy{{Package: "alpha"}}) {
+		t.Errorf("package write to a broken stream reported success")
+	}
+
+	// A broken stdout must not turn the global view into a runtime error.
+	st := &state{
+		stdout: failWriter{},
+		stderr: &bytes.Buffer{},
+		r: &runner{cfg: config.Config{Xbps: config.XbpsConfig{
+			QueryPath: "true",
+		}}},
+	}
+	if code := st.runPolicyGlobal(&options{}); code != exitOK {
+		t.Errorf("global policy with broken stdout exit = %d, want 0", code)
+	}
+}
+
+func firstMachineView(t *testing.T, out string) map[string]any {
+	t.Helper()
+	var views []map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &views); err != nil {
+		t.Fatalf("machine policy is not a JSON array: %v\n%s", err, out)
+	}
+	if len(views) != 1 {
+		t.Fatalf("machine array = %d entries, want 1", len(views))
+	}
+	return views[0]
+}
+
+func policyEnvOnly(t *testing.T) map[string]string {
+	t.Helper()
+	_, env, _ := policyEnv(t)
+	return env
 }

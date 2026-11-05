@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
@@ -9,10 +10,15 @@ import (
 	"github.com/soubarnak/xbpretty/internal/discovery"
 )
 
-// repositoryLine matches one `xbps-query -L` / `-L -v` entry. The leading
-// number is the repository's package count; the precedence is its position in
-// this list.
-var repositoryLine = regexp.MustCompile(`^\s*[0-9]+\s+(\S+)\s+\(RSA (signed|unsigned)\)\s*$`)
+// repositoryLine matches one `xbps-query -L` / `-L -v` entry, including the
+// measured variants policy must preserve: a negative package count, a URI
+// containing spaces, and a staged repository. The leading number is the
+// repository's package count; precedence is the row's 1-based ordinal.
+var repositoryLine = regexp.MustCompile(`^\s*(-?\d+)\s+(.*?)\s+\((?:Staged )?RSA ([^)]+)\)\s*$`)
+
+// policyFingerprintLine is the key-size plus colon-separated hex shape xbps
+// prints under a signed repository's Signed-by line.
+var policyFingerprintLine = regexp.MustCompile(`^\s*[0-9]+\s+[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2})+\s*$`)
 
 // runPolicy implements FR-026: the global repository/pin view without names
 // and the package resolution view with them.
@@ -23,21 +29,19 @@ func (st *state) runPolicy(opts *options) int {
 	return st.runPolicyGlobal(opts)
 }
 
-// parsePolicyRepositories reads the plain or verbose repository list. A
-// verbose signed entry carries `Signed-by:` and the key length plus
-// fingerprint on the two indented lines after it.
+// parsePolicyRepositories reads the plain or verbose repository list. Every
+// RSA row is kept and numbered by its position. Only `Signed-by:` and
+// fingerprint-shaped continuation lines attach to the current row, so an
+// unrelated verbose line cannot steal a signature.
 func parsePolicyRepositories(stdout string) []discovery.PolicyFile {
 	var files []discovery.PolicyFile
 	for _, line := range strings.Split(stdout, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		if match := repositoryLine.FindStringSubmatch(trimmed); match != nil {
+		if match := repositoryLine.FindStringSubmatch(line); match != nil {
 			files = append(files, discovery.PolicyFile{
 				Precedence: len(files) + 1,
-				Repository: match[1],
-				Signed:     match[2] == "signed",
+				Repository: match[2],
+				Signature:  strings.TrimSpace(match[3]),
+				Signed:     match[3] == "signed",
 			})
 			continue
 		}
@@ -45,10 +49,11 @@ func parsePolicyRepositories(stdout string) []discovery.PolicyFile {
 			continue
 		}
 		current := &files[len(files)-1]
+		trimmed := strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(trimmed, "Signed-by:"):
 			current.SignedBy = strings.TrimSpace(strings.TrimPrefix(trimmed, "Signed-by:"))
-		case current.Signed && current.Fingerprint == "":
+		case policyFingerprintLine.MatchString(line) && current.Fingerprint == "":
 			current.Fingerprint = trimmed
 		}
 	}
@@ -108,8 +113,8 @@ func policyPinned(holds, repolocked map[string]string) []discovery.PinnedPackage
 	return out
 }
 
-// runPolicyGlobal prints FR-026's no-name view. It reads only -L -v, -H and
-// the repolock list: no package database pass, no repository scan.
+// runPolicyGlobal prints FR-026's no-name view. It reads only -L/-L -v, -H
+// and the repolock list: no package database pass, no repository scan.
 func (st *state) runPolicyGlobal(opts *options) int {
 	files, code, ok := st.loadPolicyRepositories()
 	if !ok {
@@ -127,54 +132,109 @@ func (st *state) runPolicyGlobal(opts *options) int {
 	pinned := policyPinned(parsePolicyPins(holdRes.stdout), parsePolicyPins(repolockRes.stdout))
 
 	if opts.machine {
-		object := discovery.MachineGlobalPolicy{
-			Schema:         discovery.SchemaVersion,
-			PackageFiles:   make([]discovery.MachinePolicyFile, 0, len(files)),
-			PinnedPackages: make([]discovery.MachinePinnedPackage, 0, len(pinned)),
-		}
-		for _, file := range files {
-			object.PackageFiles = append(object.PackageFiles, discovery.MachinePolicyFile{
-				Precedence:  file.Precedence,
-				Repository:  file.Repository,
-				Signed:      file.Signed,
-				SignedBy:    file.SignedBy,
-				Fingerprint: file.Fingerprint,
-			})
-		}
-		for _, pin := range pinned {
-			object.PinnedPackages = append(object.PinnedPackages, discovery.MachinePinnedPackage{
-				Name: pin.Name, Version: pin.Version, Reason: pin.Reason,
-			})
-		}
-		if err := discovery.WriteNDJSON(st.stdout, object); err != nil {
+		if err := discovery.WriteNDJSON(st.stdout, machineGlobalPolicy(files, pinned)); err != nil {
 			// FR-074: stop writing on EPIPE and keep the successful exit.
 			return exitOK
 		}
 		return exitOK
 	}
-
-	fmt.Fprintln(st.stdout, "Package files:")
-	for _, file := range files {
-		signature := "unsigned"
-		if file.Signed {
-			signature = "signed"
-		}
-		fmt.Fprintf(st.stdout, " %d %s (RSA %s)\n", file.Precedence, file.Repository, signature)
-		if !file.Signed {
-			continue
-		}
-		if file.SignedBy != "" {
-			fmt.Fprintf(st.stdout, "     Signed-by: %s\n", file.SignedBy)
-		}
-		if file.Fingerprint != "" {
-			fmt.Fprintf(st.stdout, "     %s\n", file.Fingerprint)
-		}
-	}
-	fmt.Fprintln(st.stdout, "Pinned packages:")
-	for _, pin := range pinned {
-		fmt.Fprintf(st.stdout, "   %s -> %s (%s)\n", pin.Name, pin.Version, pin.Reason)
+	if !writePolicyGlobal(st.stdout, files, pinned) {
+		// FR-074: a failed human write stops the view and keeps exit 0.
+		return exitOK
 	}
 	return exitOK
+}
+
+func machineGlobalPolicy(files []discovery.PolicyFile, pinned []discovery.PinnedPackage) discovery.MachineGlobalPolicy {
+	object := discovery.MachineGlobalPolicy{
+		Schema:         discovery.SchemaVersion,
+		PackageFiles:   make([]discovery.MachinePolicyFile, 0, len(files)),
+		PinnedPackages: make([]discovery.MachinePinnedPackage, 0, len(pinned)),
+	}
+	for _, file := range files {
+		entry := discovery.MachinePolicyFile{
+			Precedence:  file.Precedence,
+			Repository:  file.Repository,
+			Signed:      file.Signed,
+			Fingerprint: file.Fingerprint,
+		}
+		if file.SignedBy != "" {
+			signedBy := file.SignedBy
+			entry.SignedBy = &signedBy
+		}
+		object.PackageFiles = append(object.PackageFiles, entry)
+	}
+	for _, pin := range pinned {
+		object.PinnedPackages = append(object.PinnedPackages, discovery.MachinePinnedPackage{
+			Name: pin.Name, Version: pin.Version, Reason: pin.Reason,
+		})
+	}
+	return object
+}
+
+// policyText writes human policy output and remembers the first failure, so
+// a broken pipe stops the remaining lines without changing the exit code.
+type policyText struct {
+	out    io.Writer
+	broken bool
+}
+
+func (w *policyText) printf(format string, args ...any) bool {
+	if w.broken {
+		return false
+	}
+	if _, err := fmt.Fprintf(w.out, format, args...); err != nil {
+		w.broken = true
+		return false
+	}
+	return true
+}
+
+func (w *policyText) println(args ...any) bool {
+	if w.broken {
+		return false
+	}
+	if _, err := fmt.Fprintln(w.out, args...); err != nil {
+		w.broken = true
+		return false
+	}
+	return true
+}
+
+// writePolicyGlobal writes the no-name view. It returns false when a write
+// failed, which the caller turns into a clean exit 0.
+func writePolicyGlobal(out io.Writer, files []discovery.PolicyFile, pinned []discovery.PinnedPackage) bool {
+	w := &policyText{out: out}
+	if !w.println("Package files:") {
+		return false
+	}
+	for _, file := range files {
+		signature := file.Signature
+		if signature == "" {
+			signature = "unsigned"
+			if file.Signed {
+				signature = "signed"
+			}
+		}
+		if !w.printf(" %d %s (RSA %s)\n", file.Precedence, file.Repository, signature) {
+			return false
+		}
+		if file.SignedBy != "" && !w.printf("     Signed-by: %s\n", file.SignedBy) {
+			return false
+		}
+		if file.Fingerprint != "" && !w.printf("     %s\n", file.Fingerprint) {
+			return false
+		}
+	}
+	if !w.println("Pinned packages:") {
+		return false
+	}
+	for _, pin := range pinned {
+		if !w.printf("   %s -> %s (%s)\n", pin.Name, pin.Version, pin.Reason) {
+			return false
+		}
+	}
+	return true
 }
 
 // policyPrecedence maps a repository URL to its 1-based -L precedence. When
@@ -196,18 +256,31 @@ func policyPrecedence(files []discovery.PolicyFile, s *snapshot) map[string]int 
 
 // policyVersionEntry builds one version-table row for a variant. A version
 // is a variant in this view: the same version in two repositories stays two
-// rows, each with its own repository line and precedence.
-func policyVersionEntry(variant discovery.Row, precedence int, installed, candidate *string, candidateRepository string) discovery.MachinePolicyVersion {
+// rows, each with its own repository line and precedence. Installed marks
+// the first-precedence variant whose pkgver is the installed one, mirroring
+// how the row model attaches installed state to one variant.
+func policyVersionEntry(variant discovery.Row, precedence int, installed bool, candidate *string, candidateRepository string) discovery.MachinePolicyVersion {
 	version := variant.FullVersion()
 	return discovery.MachinePolicyVersion{
 		Version:    version,
 		Precedence: precedence,
-		Installed:  installed != nil && *installed == version,
+		Installed:  installed,
 		Candidate:  candidate != nil && *candidate == version && (candidateRepository == "" || candidateRepository == variant.Repository),
 		Repositories: []discovery.MachinePolicyRepository{{
 			Precedence: precedence, Repository: variant.Repository,
 		}},
 	}
+}
+
+// policyRecordName is the canonical package name a -S/-R -S record resolved
+// to. xbps accepts globs, pkgspecs and virtual names on those queries, so the
+// heading and the variant lookup use this name, not the raw token.
+func policyRecordName(rec *xbpsRecord) string {
+	if name := strings.TrimSpace(rec.scalar["pkgname"]); name != "" {
+		return name
+	}
+	name, _ := discovery.SplitPkgverVersion(rec.scalar["pkgver"])
+	return name
 }
 
 // runPolicyPackages implements FR-026's with-names view and FR-027's array.
@@ -224,18 +297,29 @@ func (st *state) runPolicyPackages(opts *options) int {
 
 	views := make([]discovery.MachinePackagePolicy, 0, len(opts.args))
 	var missing []string
-	for _, name := range opts.args {
-		installedRec, installedFound, code := st.record("-S", name)
+	for _, token := range opts.args {
+		installedRec, installedFound, code := st.record("-S", token)
 		if code >= 0 {
 			return code
 		}
-		candidateRec, candidateFound, code := st.record("-R", "-S", name)
+		candidateRec, candidateFound, code := st.record("-R", "-S", token)
 		if code >= 0 {
 			return code
+		}
+
+		name := token
+		switch {
+		case installedFound:
+			name = policyRecordName(installedRec)
+		case candidateFound:
+			name = policyRecordName(candidateRec)
+		}
+		if name == "" {
+			name = token
 		}
 		variants := s.repo[name]
 		if !installedFound && !candidateFound && len(variants) == 0 {
-			missing = append(missing, name)
+			missing = append(missing, token)
 			continue
 		}
 
@@ -265,9 +349,15 @@ func (st *state) runPolicyPackages(opts *options) int {
 			Candidate: candidateVersion,
 			Versions:  make([]discovery.MachinePolicyVersion, 0, len(variants)),
 		}
+		installedMarked := false
 		for _, variant := range variants {
+			variantInstalled := false
+			if !installedMarked && installedVersion != nil && variant.FullVersion() == *installedVersion {
+				variantInstalled = true
+				installedMarked = true
+			}
 			view.Versions = append(view.Versions, policyVersionEntry(
-				variant, precedence[variant.Repository], installedVersion, candidateVersion, deref(candidateRepository),
+				variant, precedence[variant.Repository], variantInstalled, candidateVersion, deref(candidateRepository),
 			))
 		}
 		views = append(views, view)
@@ -278,16 +368,12 @@ func (st *state) runPolicyPackages(opts *options) int {
 			// FR-074: stop writing on EPIPE and keep the successful exit.
 			return exitOK
 		}
-	} else {
-		for i, view := range views {
-			if i > 0 {
-				fmt.Fprintln(st.stdout)
-			}
-			printPolicyPackage(st.stdout, view)
-		}
+	} else if !writePolicyPackages(st.stdout, views) {
+		// FR-074: a failed human write stops the view and keeps exit 0.
+		return exitOK
 	}
-	for _, name := range missing {
-		fmt.Fprintf(st.stderr, "Notice: '%s' was not found\n", name)
+	for _, token := range missing {
+		fmt.Fprintf(st.stderr, "Notice: '%s' was not found\n", token)
 	}
 	return exitOK
 }
@@ -305,22 +391,50 @@ func deref(value *string) string {
 	return *value
 }
 
-// printPolicyPackage writes one FR-026 package block.
-func printPolicyPackage(out interface{ Write([]byte) (int, error) }, view discovery.MachinePackagePolicy) {
-	fmt.Fprintf(out, "%s:\n", view.Package)
-	fmt.Fprintf(out, "  Installed: %s\n", policyVersionText(view.Installed))
-	fmt.Fprintf(out, "  Candidate: %s\n", policyVersionText(view.Candidate))
-	fmt.Fprintln(out, "  Version table:")
+// writePolicyPackages writes the with-names blocks, separating them with one
+// blank line. It returns false on the first failed write.
+func writePolicyPackages(out io.Writer, views []discovery.MachinePackagePolicy) bool {
+	w := &policyText{out: out}
+	for i, view := range views {
+		if i > 0 && !w.println("") {
+			return false
+		}
+		if !writePolicyPackage(w, view) {
+			return false
+		}
+	}
+	return true
+}
+
+// writePolicyPackage writes one FR-026 package block.
+func writePolicyPackage(w *policyText, view discovery.MachinePackagePolicy) bool {
+	if !w.printf("%s:\n", view.Package) {
+		return false
+	}
+	if !w.printf("  Installed: %s\n", policyVersionText(view.Installed)) {
+		return false
+	}
+	if !w.printf("  Candidate: %s\n", policyVersionText(view.Candidate)) {
+		return false
+	}
+	if !w.println("  Version table:") {
+		return false
+	}
 	for _, version := range view.Versions {
 		marker := "   "
 		if version.Candidate {
 			marker = "***"
 		}
-		fmt.Fprintf(out, "  %s %s %d\n", marker, version.Version, version.Precedence)
+		if !w.printf("  %s %s %d\n", marker, version.Version, version.Precedence) {
+			return false
+		}
 		for _, repository := range version.Repositories {
-			fmt.Fprintf(out, "      %d %s\n", repository.Precedence, repository.Repository)
+			if !w.printf("      %d %s\n", repository.Precedence, repository.Repository) {
+				return false
+			}
 		}
 	}
+	return true
 }
 
 func policyVersionText(version *string) string {

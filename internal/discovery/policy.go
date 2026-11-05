@@ -6,9 +6,12 @@ package discovery
 
 // PolicyFile is one configured repository in the global policy view. The
 // precedence is 1-based `xbps-query -L` order, not xbps's package count.
+// Signature is the raw state xbps reported (`signed`, `unsigned` or
+// `maybe-signed`); Signed is true only for `signed`.
 type PolicyFile struct {
 	Precedence  int
 	Repository  string
+	Signature   string
 	Signed      bool
 	SignedBy    string
 	Fingerprint string
@@ -23,12 +26,15 @@ type PinnedPackage struct {
 }
 
 // MachinePolicyFile is one repository object in the global machine view.
+// signed_by is always present and null when xbps reported no signer, so the
+// FR-027 field list is honoured; fingerprint stays omitted when there is
+// none (the unsigned shapes carry no fingerprint).
 type MachinePolicyFile struct {
-	Precedence  int    `json:"precedence"`
-	Repository  string `json:"repository"`
-	Signed      bool   `json:"signed"`
-	SignedBy    string `json:"signed_by,omitempty"`
-	Fingerprint string `json:"fingerprint,omitempty"`
+	Precedence  int     `json:"precedence"`
+	Repository  string  `json:"repository"`
+	Signed      bool    `json:"signed"`
+	SignedBy    *string `json:"signed_by"`
+	Fingerprint string  `json:"fingerprint,omitempty"`
 }
 
 // MachinePinnedPackage is one pinned package object.
