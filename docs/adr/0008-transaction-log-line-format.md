@@ -1,6 +1,7 @@
 # ADR-0008: The transaction log line format is a contract
 
-- Status: Accepted
+- Status: Accepted, amended by ADR-0013 (rev 6 history) and ADR-0018
+  (the line log is permanently audit-only)
 - Date: 2026-10-18
 - Relates to: FR-013, FR-019, AC-012
 - Changes: what FR-013 records (held packages are dropped)
@@ -93,3 +94,12 @@ the same shape and are read as they are; nothing rewrites them.
   `--verbose` are accepted and have no effect.
 - `log` is reached as `xbp log` or `xbpretty log` only. There is no `xbp-log`
   link, so the binary keeps its six names and AC-026 stands.
+
+## Amendment (rev 6)
+
+ADR-0013 keeps the line shape and the append-only rule and extends the
+`<command>` vocabulary with `purge`, `autopurge`, `undo` and `redo`. A
+successful transaction now also writes a JSON history entry; the line log and
+the history store are dual-written with distinct roles. The line log remains
+permanently audit-only and is never imported into history (ADR-0018). The
+`--limit`/package-filter contract above is unchanged.

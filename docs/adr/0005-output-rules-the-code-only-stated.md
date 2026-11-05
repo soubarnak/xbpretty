@@ -1,6 +1,7 @@
 # ADR-0005: Output rules the code only stated
 
-- Status: Accepted
+- Status: Accepted, amended by ADR-0012 (rev 6 visual system) and ADR-0017
+  (full-screen TUI exception)
 - Date: 2026-10-15
 - Relates to: FR-013, FR-014, FR-017, FR-020, AC-012, AC-014
 - Answers: what the rev 4 spec leaves open about a successful exit, the log's
@@ -70,3 +71,13 @@ who owns state written as root, and what code a signal-killed child reports.
   gets SIGINT that way. Under a terminal — the Ctrl-C AC-014 describes — the
   forwarding is live, and the interrupted run writes no log line.
 - The spec stays frozen at rev 4; this ADR and ADR-002 carry the deltas.
+
+## Amendment (rev 6)
+
+ADR-0012 keeps the prompt on stderr and extends the durable-output rule to the
+new surfaces (update count line, download block, discovery rows/JSON, fetch
+table). It also corrects decision 1: a successful plan forwards xbps's stderr
+before the summary (#43), so a stale or already-installed message is never
+silent. ADR-0017 adds the single stated exception: in `Tui` mode the
+transaction summary screen replaces stdout for that transaction. The rest of
+this ADR stands.

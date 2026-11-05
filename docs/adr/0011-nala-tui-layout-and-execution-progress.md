@@ -3,7 +3,9 @@
 Date: 2026-10-22
 
 ## Status
-Accepted
+Superseded by ADR-0012 (rev 6 visual system), except decision 1
+(zero-dependency VT100 engine), which survives and is extended by ADR-0017.
+The history is kept unchanged below; do not rewrite it.
 
 ## Context
 `xbpretty` was initially built with a minimalist summary (plain group headers, unaligned raw columns, and standard ANSI color sequences) and streamed raw `xbps` child process output directly to stdout/stderr. While functional, this provided a barebones experience compared to modern package managers like Nala on Debian/Ubuntu (`volitank/nala`), which present rich tabular layouts with version diff highlighting and live in-place execution progress widgets.
