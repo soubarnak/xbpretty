@@ -401,7 +401,7 @@ func TestAC046MirrorScoreView(t *testing.T) {
 	e.set("TERM", "xterm")
 
 	code, _, errs := e.run("xbpretty", "fetch")
-	if code != 1 { // #74's write seam still refuses
+	if code != 0 {
 		t.Fatalf("exit = %d\n%s", code, errs)
 	}
 	frames := progressFrames(errs)
