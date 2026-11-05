@@ -502,7 +502,7 @@ func startPtyCombined(t *testing.T, bin string, env map[string]string, args []st
 	if err != nil {
 		t.Fatalf("GetState before start: %v", err)
 	}
-	r := &ptyRun{master: master, slave: slave, cmd: cmd, cap: &capture{}, stderr: &syncBuffer{}, wait: make(chan error, 1), before: before}
+	r := &ptyRun{master: master, slave: slave, cmd: cmd, cap: &capture{}, stderr: &syncBuffer{}, wait: make(chan error, 1), exited: make(chan struct{}), before: before}
 	t.Cleanup(func() {
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
@@ -514,7 +514,11 @@ func startPtyCombined(t *testing.T, bin string, env map[string]string, args []st
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("starting the binary: %v", err)
 	}
-	go func() { r.wait <- cmd.Wait() }()
+	go func() {
+		err := cmd.Wait()
+		r.wait <- err
+		close(r.exited)
+	}()
 	return r
 }
 
@@ -570,7 +574,7 @@ func startPtyDetached(t *testing.T, bin string, env map[string]string, args []st
 	if err != nil {
 		t.Fatalf("GetState before start: %v", err)
 	}
-	r := &ptyRun{master: master, slave: slave, cmd: cmd, cap: &capture{}, stderr: &syncBuffer{}, wait: make(chan error, 1), before: before}
+	r := &ptyRun{master: master, slave: slave, cmd: cmd, cap: &capture{}, stderr: &syncBuffer{}, wait: make(chan error, 1), exited: make(chan struct{}), before: before}
 	cmd.Stderr = r.stderr
 	t.Cleanup(func() {
 		if cmd.Process != nil {
@@ -582,7 +586,11 @@ func startPtyDetached(t *testing.T, bin string, env map[string]string, args []st
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("starting the binary: %v", err)
 	}
-	go func() { r.wait <- cmd.Wait() }()
+	go func() {
+		err := cmd.Wait()
+		r.wait <- err
+		close(r.exited)
+	}()
 	return r
 }
 

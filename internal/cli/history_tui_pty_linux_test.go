@@ -434,15 +434,15 @@ func TestHistoryDetailGateMatrix(t *testing.T) {
 				}
 				return
 			}
-			// The text path exits on its own; collect its output before the
-			// exit code so the pty reader has drained the stream.
-			// Wait for the last line of the text detail so the pty reader has
-			// drained the whole stream before the exit code is collected.
-			out := waitCapture(t, r, "the text detail", func(s string) bool {
-				return strings.Contains(s, "Install:")
-			})
+			// The text path exits on its own. Collecting the exit code stops
+			// the reader and drains the pty, so the capture is complete and
+			// deterministic; polling for a line before the exit is racy.
 			if code := r.exitCode(t); code != 0 {
 				t.Fatalf("text fallback exit = %d, want 0\nstderr:\n%s", code, r.stderr.String())
+			}
+			out := r.cap.String()
+			if !strings.Contains(out, "Install:") {
+				t.Fatalf("the text detail did not render; captured:\n%q\nstderr:\n%s", out, r.stderr.String())
 			}
 			if strings.Contains(out, term.AltEnter) {
 				t.Errorf("an excluded gate opened the alternate screen: %q", out)
