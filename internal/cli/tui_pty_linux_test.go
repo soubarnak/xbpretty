@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -177,15 +178,17 @@ func (s *syncBuffer) String() string {
 
 // ptyRun is one live binary on a real pty.
 type ptyRun struct {
-	master *os.File
-	slave  *os.File
-	cmd    *exec.Cmd
-	cap    *capture
-	stderr *syncBuffer
-	wait   chan error
-	stop   chan struct{}
-	done   chan struct{}
-	before term.State
+	master   *os.File
+	slave    *os.File
+	cmd      *exec.Cmd
+	cap      *capture
+	stderr   *syncBuffer
+	wait     chan error
+	exited   chan struct{}
+	stop     chan struct{}
+	stopOnce sync.Once
+	done     chan struct{}
+	before   term.State
 }
 
 func startPty(t *testing.T, bin string, env map[string]string, args []string, cols, rows int) *ptyRun {
@@ -205,7 +208,7 @@ func startPty(t *testing.T, bin string, env map[string]string, args []string, co
 	if err != nil {
 		t.Fatalf("GetState before start: %v", err)
 	}
-	r := &ptyRun{master: master, slave: slave, cmd: cmd, cap: &capture{}, stderr: &syncBuffer{}, wait: make(chan error, 1), stop: make(chan struct{}), done: make(chan struct{}), before: before}
+	r := &ptyRun{master: master, slave: slave, cmd: cmd, cap: &capture{}, stderr: &syncBuffer{}, wait: make(chan error, 1), exited: make(chan struct{}), stop: make(chan struct{}), done: make(chan struct{}), before: before}
 	cmd.Stderr = r.stderr
 	t.Cleanup(func() {
 		if cmd.Process != nil {
@@ -218,7 +221,11 @@ func startPty(t *testing.T, bin string, env map[string]string, args []string, co
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("starting the binary: %v", err)
 	}
-	go func() { r.wait <- cmd.Wait() }()
+	go func() {
+		err := cmd.Wait()
+		r.wait <- err
+		close(r.exited)
+	}()
 	return r
 }
 
@@ -251,6 +258,9 @@ func (r *ptyRun) startReader() {
 			}
 			ready, err := ptyReadable(fd, 20*time.Millisecond)
 			if err != nil {
+				if errors.Is(err, syscall.EINTR) {
+					continue
+				}
 				return
 			}
 			if !ready {
@@ -260,16 +270,34 @@ func (r *ptyRun) startReader() {
 			if n > 0 {
 				r.cap.add(buf[:n])
 			}
-			if err != nil {
+			if err != nil && !errors.Is(err, syscall.EINTR) && !errors.Is(err, syscall.EAGAIN) {
 				return
 			}
 		}
 	}()
 }
 
+// settle stops the reader (once), waits for its done signal and drains the
+// tail. It is the explicit completion signal the wait helpers use instead of a
+// capture poll alone.
+func (r *ptyRun) settle(t *testing.T) {
+	t.Helper()
+	if r.done == nil {
+		return
+	}
+	r.stopOnce.Do(func() { close(r.stop) })
+	select {
+	case <-r.done:
+	case <-time.After(2 * time.Second):
+		t.Log("the pty reader did not stop within 2s")
+		return
+	}
+	r.drainCapture(t)
+}
+
 // drainCapture reads the pty buffer that the stopped reader left behind. The
-// deadline only bounds an already-exited child's buffered tail; data returns
-// immediately, so this is not a fixed-sleep heuristic.
+// child has exited, so every remaining byte is already buffered; the select
+// runs with a zero timeout and never sleeps.
 func (r *ptyRun) drainCapture(t *testing.T) {
 	t.Helper()
 	buf := make([]byte, 4096)
@@ -284,6 +312,9 @@ func (r *ptyRun) drainCapture(t *testing.T) {
 			r.cap.add(buf[:n])
 			continue
 		}
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
 		if n == 0 || err != nil {
 			return
 		}
@@ -293,6 +324,9 @@ func (r *ptyRun) drainCapture(t *testing.T) {
 // ptyReadable reports whether fd has bytes ready, waiting up to timeout.
 func ptyReadable(fd int, timeout time.Duration) (bool, error) {
 	var set syscall.FdSet
+	if fd < 0 || fd >= len(set.Bits)*64 {
+		return false, syscall.EBADF
+	}
 	set.Bits[fd/64] |= 1 << (uint(fd) % 64)
 	tv := syscall.NsecToTimeval(timeout.Nanoseconds())
 	n, err := syscall.Select(fd+1, &set, nil, nil, &tv)
@@ -310,15 +344,7 @@ func (r *ptyRun) exitCode(t *testing.T) int {
 		// Stop the reader with an expired read deadline, wait for it to close
 		// done, then drain the buffer synchronously. The slave stays open for
 		// tests that inspect the restored termios state.
-		if r.done != nil {
-			close(r.stop)
-			select {
-			case <-r.done:
-			case <-time.After(2 * time.Second):
-				t.Log("the pty reader did not stop within 2s")
-			}
-			r.drainCapture(t)
-		}
+		r.settle(t)
 		if err == nil {
 			return 0
 		}
@@ -340,6 +366,18 @@ func waitCapture(t *testing.T, r *ptyRun, desc string, pred func(string) bool) s
 		s := r.cap.String()
 		if pred(s) {
 			return s
+		}
+		select {
+		case <-r.exited:
+			// The process is gone. Stop the reader, drain its tail and give
+			// the predicate one last look instead of polling an empty
+			// capture for the rest of the timeout.
+			r.settle(t)
+			if s := r.cap.String(); pred(s) {
+				return s
+			}
+			t.Fatalf("%s: process exited before it was seen; captured:\n%q\nstderr:\n%s", desc, r.cap.String(), r.stderr.String())
+		default:
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
