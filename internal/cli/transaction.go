@@ -155,6 +155,14 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		return exitRuntime
 	}
 
+	// The invocation-level guards below deliberately run before the index
+	// step. A command that is already going to refuse (a missing --reinstall
+	// target, or a remove whose every target is absent) must not refresh the
+	// index first: the refusal would be obscured by network work and by a
+	// stale-index warning that changes nothing. FR-014 puts the sync step
+	// before the dry run, not before these checks, and the dry run still
+	// starts only after the sync.
+
 	// FR-007: --reinstall is guarded before the dry run.
 	if cmd == "install" && opts.reinstall {
 		if code := st.reinstallGuard(opts); code >= 0 {
@@ -420,8 +428,8 @@ func (st *state) runUpdate(opts *options) int {
 }
 
 // planUpdate runs FR-012's count-only dry run. Its argv is exactly
-// `xbps-install -n -u`: update takes no positionals and, unlike a transaction,
-// has no `--` passthrough to append.
+// `xbps-install -n -u`: update takes no positionals, and validateInvocation
+// has already rejected a `--` passthrough, so none can be appended.
 func (st *state) planUpdate() ([]xbps.Row, int) {
 	return st.planTransaction("upgrade", &options{}, nil)
 }

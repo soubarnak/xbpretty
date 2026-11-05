@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,13 +26,17 @@ const updateOldFixture = "alpha-1.0_1\n657KB\n"
 
 // syncRootEnv builds the tagged binary and an environment whose effective uid
 // is euid. The config trust hook reads the same variable, so a layer written
-// by the test process is trusted even when the test pretends to be root.
+// by the test process is trusted even when the test pretends to be root. The
+// stub's real-run branches are silenced so only the plan and explicit
+// overrides produce output: the sync step must not echo the plan fixture.
 func syncRootEnv(t *testing.T, euid int) (string, testEnv) {
 	t.Helper()
 	bin := taggedBinary(t)
 	env := cleanEnv(t, t.TempDir()).
 		with("XBPRETTY_TEST_EUID", strconv.Itoa(euid)).
-		with("XBPRETTY_TEST_TRUST_UID", strconv.Itoa(os.Getuid()))
+		with("XBPRETTY_TEST_TRUST_UID", strconv.Itoa(os.Getuid())).
+		with("XB_STUB_RUN_STDOUT", "").
+		with("XB_STUB_RUN_STDERR", "")
 	return bin, env
 }
 
@@ -393,6 +398,11 @@ func TestIntegrationAC009UpdateCount(t *testing.T) {
 		if out != want {
 			t.Errorf("stdout = %q, want exactly %q", out, want)
 		}
+		// With the silent stubs, a clean update writes nothing to stderr:
+		// no summary, no prompt, no sync noise.
+		if errs != "" {
+			t.Errorf("stderr = %q, want empty", errs)
+		}
 		if strings.Contains(errs, "Do you want to continue?") {
 			t.Errorf("update prompted:\n%s", errs)
 		}
@@ -492,20 +502,110 @@ func TestIntegrationUpdateExitCodeFollowsXbps(t *testing.T) {
 	assertInstallArgv(t, env, "-S", "-n -u")
 }
 
-// TestIntegrationUpdateArgvIsExactlyNAndU pins FR-012's count command: update
-// takes no positionals, so a `--` passthrough must not leak into the argv.
-func TestIntegrationUpdateArgvIsExactlyNAndU(t *testing.T) {
-	bin, env := syncRootEnv(t, 0)
-	env = env.with("XB_STUB_STDOUT", updatePlanFixture).
-		with("XB_STUB_OLD", updateOldFixture)
-
-	out, errs, code := runBinary(t, bin, env, "update", "--", "figlet")
-	if code != 0 {
-		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+// TestIntegrationUpdateRejectsPassthrough pins FR-012/FR-021: update has no
+// transaction to pass `--` arguments to, so the passthrough is a usage error
+// and no child runs. Silently dropping it (or appending it to the count argv)
+// would make `xbp update -- figlet` mean something it does not say.
+func TestIntegrationUpdateRejectsPassthrough(t *testing.T) {
+	for _, args := range [][]string{
+		{"update", "--", "figlet"},
+		{"update", "--"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			bin, env := syncRootEnv(t, 0)
+			env = env.with("XB_STUB_STDOUT", updatePlanFixture)
+			out, errs, code := runBinary(t, bin, env, args...)
+			if code != 2 {
+				t.Fatalf("exit = %d, want 2\n%s", code, errs)
+			}
+			if out != "" {
+				t.Errorf("stdout = %q, want empty", out)
+			}
+			want := "xbpretty: update takes no arguments and no -- passthrough\n"
+			if !strings.Contains(errs, want) {
+				t.Errorf("stderr = %q, want %q", errs, want)
+			}
+			if got := stubInstallArgs(t, env); len(got) != 0 {
+				t.Errorf("a child ran despite the usage error: %q", got)
+			}
+		})
 	}
-	assertInstallArgv(t, env, "-S", "-n -u")
-	if !strings.Contains(out, "3 package(s) can be upgraded.") {
-		t.Errorf("stdout = %q, want the count line", out)
+}
+
+// TestIntegrationInvocationGuardsPrecedeSync pins the intentional order: a
+// command that is already going to refuse must not refresh the index, and a
+// non-root run must not print the stale-index warning for a refusal that
+// changes nothing. FR-014 puts the sync before the dry run; these guards are
+// invocation checks that FR-007/FR-008 place before the dry run as well.
+func TestIntegrationInvocationGuardsPrecedeSync(t *testing.T) {
+	for _, euid := range []int{0, 1000} {
+		name := "root"
+		if euid != 0 {
+			name = "non-root"
+		}
+
+		t.Run(name+" remove with no installed target", func(t *testing.T) {
+			bin, env := syncRootEnv(t, euid)
+			env = env.with("XB_STUB_NOT_INSTALLED", "nano")
+			out, errs, code := runBinary(t, bin, env, "remove", "nano", "--update", "--dry-run")
+			if code != 0 {
+				t.Fatalf("exit = %d, want 0\n%s", code, errs)
+			}
+			if out != "Nothing to do.\n" {
+				t.Errorf("stdout = %q, want Nothing to do.", out)
+			}
+			if !strings.Contains(errs, "xbpretty: nano is not installed") {
+				t.Errorf("the missing target was not reported:\n%s", errs)
+			}
+			if strings.Contains(errs, "stale") {
+				t.Errorf("the refused run printed the stale-index warning:\n%s", errs)
+			}
+			if got := stubInstallArgs(t, env); len(got) != 0 {
+				t.Errorf("the refused run performed the sync: %q", got)
+			}
+		})
+
+		t.Run(name+" reinstall of a missing target", func(t *testing.T) {
+			bin, env := syncRootEnv(t, euid)
+			env = env.with("XB_STUB_NOT_INSTALLED", "figlet")
+			out, errs, code := runBinary(t, bin, env,
+				"install", "figlet", "--reinstall", "--update", "--dry-run")
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1\n%s", code, errs)
+			}
+			if out != "" {
+				t.Errorf("stdout = %q, want empty", out)
+			}
+			if !strings.Contains(errs, "xbpretty: figlet is not installed, so it cannot be reinstalled") {
+				t.Errorf("missing the reinstall refusal:\n%s", errs)
+			}
+			if strings.Contains(errs, "stale") {
+				t.Errorf("the refused run printed the stale-index warning:\n%s", errs)
+			}
+			if got := stubInstallArgs(t, env); len(got) != 0 {
+				t.Errorf("the refused run performed the sync: %q", got)
+			}
+		})
+	}
+}
+
+// TestRootTestHookIsAbsentFromOrdinaryBuilds keeps the test-only euid override
+// from becoming a production escape hatch: the tagged build carries the
+// variable name, the ordinary build never does.
+func TestRootTestHookIsAbsentFromOrdinaryBuilds(t *testing.T) {
+	ordinary, err := os.ReadFile(buildBinary(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(ordinary, []byte("XBPRETTY_TEST_EUID")) {
+		t.Error("the ordinary build contains XBPRETTY_TEST_EUID; the root hook leaked out of xbpretty_testroot")
+	}
+	tagged, err := os.ReadFile(taggedBinary(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(tagged, []byte("XBPRETTY_TEST_EUID")) {
+		t.Error("the xbpretty_testroot build is missing XBPRETTY_TEST_EUID; the root hook did not compile in")
 	}
 }
 
