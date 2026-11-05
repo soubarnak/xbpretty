@@ -162,7 +162,7 @@ for __xbpretty_cmd in xbpretty xbp xbp-install xbp-remove xbp-upgrade xbp-autore
     complete -c $__xbpretty_cmd -s h -l help -d 'print this help'
     complete -c $__xbpretty_cmd -s v -l verbose -d 'print every xbps command before running it'
     complete -c $__xbpretty_cmd -l debug -d 'dump the resolved configuration'
-    complete -c $__xbpretty_cmd -l config -x -d 'read FILE instead of the user config file'
+    complete -c $__xbpretty_cmd -l config -x -d 'read FILE instead of the system and user config files'
     complete -c $__xbpretty_cmd -l color -x -a 'auto always never' -d 'colour output: auto, always or never'
     complete -c $__xbpretty_cmd -l no-color -d 'never emit ANSI colour'
     complete -c $__xbpretty_cmd -l tui -d 'force the full-screen interface'
@@ -209,7 +209,7 @@ for __xbpretty_cmd in xbpretty xbp xbp-install xbp-remove xbp-upgrade xbp-autore
     complete -c $__xbpretty_cmd -n 'test (__xbpretty_verb) = fetch' -l https-only -d 'probe and write https mirrors only'
     complete -c $__xbpretty_cmd -n 'test (__xbpretty_verb) = fetch' -l non-free -d 'include the non-free repository paths'
 
-    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install download show list search' -a '(__xbpretty_available)'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install download list search show' -a '(__xbpretty_available)'
     complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) remove purge policy log' -a '(__xbpretty_installed)'
     complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) history undo redo' -a '(__xbpretty_history_ids)'
     complete -c $__xbpretty_cmd -n 'test (__xbpretty_verb) = completion' -a 'bash zsh fish'

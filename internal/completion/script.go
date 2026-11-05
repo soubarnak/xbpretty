@@ -117,6 +117,29 @@ func rootWords() []string {
 	return out
 }
 
+// commandsWithCompletion lists the visible commands whose positional argument
+// completes from the given source. The table in internal/spec is the only
+// source, so a new command joins the right group automatically.
+func commandsWithCompletion(kind spec.CompletionKind) []string {
+	var out []string
+	for _, c := range spec.VisibleCommands() {
+		if c.Completion == kind {
+			out = append(out, c.Name)
+		}
+	}
+	return out
+}
+
+// flagValues returns an enum flag's allowed values from the shared table.
+func flagValues(long string) []string {
+	for _, f := range spec.Flags {
+		if f.Long == long {
+			return f.Values
+		}
+	}
+	return nil
+}
+
 func quotedWords(words []string) string {
 	return strings.Join(words, " ")
 }
@@ -149,7 +172,7 @@ _xbpretty_history_ids() {
 // bashScanCase maps one word to a canonical command, or returns "".
 func bashScanCase() string {
 	var b strings.Builder
-	b.WriteString("        install|remove|purge|autoremove|autopurge|upgrade|full-upgrade|safe-upgrade|update|download|clean|list|search|show|policy|history|undo|redo|fetch|completion|link|log)\n")
+	b.WriteString("        " + strings.Join(visibleNames(), "|") + ")\n")
 	b.WriteString("          sub=\"${COMP_WORDS[i]}\"; break ;;\n")
 	for _, pair := range aliasPairs() {
 		fmt.Fprintf(&b, "        %s)\n          sub=%s; break ;;\n", pair[0], pair[1])
@@ -194,7 +217,7 @@ _xbpretty() {
 
   case "$prev" in
     --color)
-      COMPREPLY=( $(compgen -W "auto always never" -- "$cur") ); return 0 ;;
+      COMPREPLY=( $(compgen -W "` + strings.Join(flagValues("color"), " ") + `" -- "$cur") ); return 0 ;;
     --config|--history-dir|--country|-c|--auto|--limit)
       return 0 ;;
   esac
@@ -215,13 +238,13 @@ _xbpretty() {
   fi
 
   case "$sub" in
-    install|download|show|list|search)
+    ` + strings.Join(commandsWithCompletion(spec.CompletionAvailablePackages), "|") + `)
       COMPREPLY=( $(compgen -W "$(_xbpretty_available "$cur")" -- "$cur") ) ;;
-    remove|purge|policy|log)
+    ` + strings.Join(commandsWithCompletion(spec.CompletionInstalledPackages), "|") + `)
       COMPREPLY=( $(compgen -W "$(_xbpretty_installed)" -- "$cur") ) ;;
-    history|undo|redo)
+    ` + strings.Join(commandsWithCompletion(spec.CompletionHistoryIDs), "|") + `)
       COMPREPLY=( $(compgen -W "$(_xbpretty_history_ids)" -- "$cur") ) ;;
-    completion)
+    ` + strings.Join(commandsWithCompletion(spec.CompletionShells), "|") + `)
       COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") ) ;;
   esac
   return 0
@@ -233,7 +256,7 @@ complete -F _xbpretty ` + quotedWords(completionNames()) + `
 
 func zshScanCase() string {
 	var b strings.Builder
-	b.WriteString("        install|remove|purge|autoremove|autopurge|upgrade|full-upgrade|safe-upgrade|update|download|clean|list|search|show|policy|history|undo|redo|fetch|completion|link|log)\n")
+	b.WriteString("        " + strings.Join(visibleNames(), "|") + ")\n")
 	b.WriteString("          sub=\"${words[i]}\"; break ;;\n")
 	for _, pair := range aliasPairs() {
 		fmt.Fprintf(&b, "        %s)\n          sub=%s; break ;;\n", pair[0], pair[1])
@@ -317,7 +340,7 @@ _xbpretty() {
   [[ "${words[CURRENT-1]}" == --limit ]] && return
   case "${words[CURRENT-1]}" in
     --color)
-      _values 'colour mode' auto always never; return ;;
+      _values 'colour mode' ` + strings.Join(flagValues("color"), " ") + `; return ;;
     --config|--history-dir|--country|-c|--auto)
       return ;;
   esac
@@ -330,10 +353,10 @@ _xbpretty() {
   fi
 
   case "$sub" in
-    install|download|show|list|search) _xbpretty_available "${words[CURRENT]}" ;;
-    remove|purge|policy|log) _xbpretty_installed ;;
-    history|undo|redo) _xbpretty_history_ids ;;
-    completion) _values 'shell' bash zsh fish ;;
+    ` + strings.Join(commandsWithCompletion(spec.CompletionAvailablePackages), "|") + `) _xbpretty_available "${words[CURRENT]}" ;;
+    ` + strings.Join(commandsWithCompletion(spec.CompletionInstalledPackages), "|") + `) _xbpretty_installed ;;
+    ` + strings.Join(commandsWithCompletion(spec.CompletionHistoryIDs), "|") + `) _xbpretty_history_ids ;;
+    ` + strings.Join(commandsWithCompletion(spec.CompletionShells), "|") + `) _values 'shell' bash zsh fish ;;
   esac
 }
 _xbpretty "$@"
@@ -437,10 +460,10 @@ for __xbpretty_cmd in ` + quotedWords(completionNames()) + `
 		writeFishFlag(&b, "$__xbpretty_cmd", f, fishCondition(f.Commands))
 	}
 	b.WriteString(`
-    complete -c $__xbpretty_cmd -n '` + fishCondition([]string{"install", "download", "show", "list", "search"}) + `' -a '(__xbpretty_available)'
-    complete -c $__xbpretty_cmd -n '` + fishCondition([]string{"remove", "purge", "policy", "log"}) + `' -a '(__xbpretty_installed)'
-    complete -c $__xbpretty_cmd -n '` + fishCondition([]string{"history", "undo", "redo"}) + `' -a '(__xbpretty_history_ids)'
-    complete -c $__xbpretty_cmd -n '` + fishCondition([]string{"completion"}) + `' -a 'bash zsh fish'
+    complete -c $__xbpretty_cmd -n '` + fishCondition(commandsWithCompletion(spec.CompletionAvailablePackages)) + `' -a '(__xbpretty_available)'
+    complete -c $__xbpretty_cmd -n '` + fishCondition(commandsWithCompletion(spec.CompletionInstalledPackages)) + `' -a '(__xbpretty_installed)'
+    complete -c $__xbpretty_cmd -n '` + fishCondition(commandsWithCompletion(spec.CompletionHistoryIDs)) + `' -a '(__xbpretty_history_ids)'
+    complete -c $__xbpretty_cmd -n '` + fishCondition(commandsWithCompletion(spec.CompletionShells)) + `' -a 'bash zsh fish'
 end
 `)
 	return b.String()

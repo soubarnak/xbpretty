@@ -155,7 +155,7 @@ _xbpretty() {
   fi
 
   case "$sub" in
-    install|download|show|list|search) _xbpretty_available "${words[CURRENT]}" ;;
+    install|download|list|search|show) _xbpretty_available "${words[CURRENT]}" ;;
     remove|purge|policy|log) _xbpretty_installed ;;
     history|undo|redo) _xbpretty_history_ids ;;
     completion) _values 'shell' bash zsh fish ;;

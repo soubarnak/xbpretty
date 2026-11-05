@@ -44,6 +44,17 @@ type Flag struct {
 	NoOp      bool     // accepted and silently does nothing (FR-019)
 }
 
+// CompletionKind says what a command's positional arguments complete to.
+type CompletionKind int
+
+const (
+	CompletionNone CompletionKind = iota
+	CompletionAvailablePackages
+	CompletionInstalledPackages
+	CompletionHistoryIDs
+	CompletionShells
+)
+
 // Command is one canonical command.
 type Command struct {
 	Name    string
@@ -61,6 +72,9 @@ type Command struct {
 	// checks existence only for these, at runtime. Values are the config keys
 	// without the Xbps prefix: "install", "remove" or "query".
 	Binaries []string
+	// Completion says what the shell completions offer for this command's
+	// positional argument (FR-005).
+	Completion CompletionKind
 }
 
 // Groups keep the help and completions in a stable, readable order.
@@ -84,13 +98,13 @@ func upgradeNames() []string {
 var Commands = []Command{
 	{Name: "install", Summary: "install packages from repositories", UsageArgs: "PKG...", Args: RequiredArgs, Group: GroupTransaction,
 		Binaries: []string{"install", "query"},
-		Flags:    commandFlags("install")},
+		Flags:    commandFlags("install"), Completion: CompletionAvailablePackages},
 	{Name: "remove", Aliases: []string{"uninstall"}, Summary: "remove installed packages", UsageArgs: "PKG...", Args: RequiredArgs, Group: GroupTransaction,
 		Binaries: []string{"remove", "query"},
-		Flags:    commandFlags("remove")},
+		Flags:    commandFlags("remove"), Completion: CompletionInstalledPackages},
 	{Name: "purge", Summary: "remove packages and their configuration files", UsageArgs: "PKG...", Args: RequiredArgs, Group: GroupTransaction,
 		Binaries: []string{"remove", "query"},
-		Flags:    commandFlags("purge")},
+		Flags:    commandFlags("purge"), Completion: CompletionInstalledPackages},
 	{Name: "autoremove", Summary: "remove orphaned packages", Group: GroupTransaction,
 		Binaries: []string{"remove", "query"},
 		Flags:    commandFlags("autoremove")},
@@ -109,34 +123,34 @@ var Commands = []Command{
 	{Name: "update", Summary: "refresh the repository index", Group: GroupTransaction,
 		Binaries: []string{"install"}},
 	{Name: "download", Summary: "download package archives into the current directory", UsageArgs: "PKG...", Args: RequiredArgs, Group: GroupTransaction,
-		Binaries: []string{"query"}},
+		Binaries: []string{"query"}, Completion: CompletionAvailablePackages},
 	{Name: "clean", Summary: "clean the package cache", Group: GroupTransaction, Flags: []string{"lists", "fetch"},
 		Binaries: []string{"remove"}},
 
 	{Name: "list", Summary: "list packages matching the given globs", UsageArgs: "[PKG...]", Args: OptionalArgs, Group: GroupDiscovery,
 		Binaries: []string{"query"},
-		Flags:    []string{"all-versions", "all-arches", "installed", "upgradable", "virtual", "description", "summary", "machine"}},
+		Flags:    []string{"all-versions", "all-arches", "installed", "upgradable", "virtual", "description", "summary", "machine"}, Completion: CompletionAvailablePackages},
 	{Name: "search", Summary: "search package names and descriptions", UsageArgs: "PATTERN...", Args: RequiredArgs, Group: GroupDiscovery,
 		Binaries: []string{"query"},
-		Flags:    []string{"all-versions", "all-arches", "installed", "upgradable", "virtual", "description", "summary", "machine", "names"}},
+		Flags:    []string{"all-versions", "all-arches", "installed", "upgradable", "virtual", "description", "summary", "machine", "names"}, Completion: CompletionAvailablePackages},
 	{Name: "show", Aliases: []string{"info"}, Summary: "show package details", UsageArgs: "PKG...", Args: RequiredArgs, Group: GroupDiscovery,
 		Binaries: []string{"query"},
-		Flags:    []string{"all-versions", "all-arches", "machine"}},
+		Flags:    []string{"all-versions", "all-arches", "machine"}, Completion: CompletionAvailablePackages},
 	{Name: "policy", Summary: "show repository precedence and pinned packages", UsageArgs: "[PKG...]", Args: OptionalArgs, Group: GroupDiscovery,
 		Binaries: []string{"query"},
-		Flags:    []string{"machine"}},
+		Flags:    []string{"machine"}, Completion: CompletionInstalledPackages},
 	{Name: "history", Summary: "list, inspect, undo, redo or clear transaction history", UsageArgs: "[ID|last|info|show|undo|redo|clear]", Args: OptionalArgs, Group: GroupHistory,
-		Flags: []string{"all"}},
+		Flags: []string{"all"}, Completion: CompletionHistoryIDs},
 	{Name: "undo", Summary: "revert a recorded transaction", UsageArgs: "[ID|last]", Args: OptionalArgs, Group: GroupHistory,
-		Flags: []string{"yes", "assume-no", "no-log"}},
+		Flags: []string{"yes", "assume-no", "no-log"}, Completion: CompletionHistoryIDs},
 	{Name: "redo", Summary: "reapply a recorded transaction", UsageArgs: "[ID|last]", Args: OptionalArgs, Group: GroupHistory,
-		Flags: []string{"yes", "assume-no", "no-log"}},
+		Flags: []string{"yes", "assume-no", "no-log"}, Completion: CompletionHistoryIDs},
 	{Name: "fetch", Summary: "rank Void mirrors and configure repositories", Args: NoArgs, Group: GroupFetch,
 		Flags: []string{"country", "auto", "https-only", "non-free", "dry-run", "sources", "debian", "ubuntu", "devuan"}},
-	{Name: "completion", Summary: "print a shell completion script", UsageArgs: "bash|zsh|fish", Args: RequiredArgs, Group: GroupTooling},
+	{Name: "completion", Summary: "print a shell completion script", UsageArgs: "bash|zsh|fish", Args: RequiredArgs, Group: GroupTooling, Completion: CompletionShells},
 	{Name: "link", Summary: "create the six xbp symlinks in a directory", UsageArgs: "[DIR]", Args: OptionalArgs, Group: GroupTooling},
 	{Name: "log", Summary: "print the transaction log", UsageArgs: "[PKG...]", Args: OptionalArgs, Group: GroupTooling,
-		Flags: []string{"limit"}},
+		Flags: []string{"limit"}, Completion: CompletionInstalledPackages},
 	{Name: "moo", Summary: "moo.", Hidden: true, Group: GroupTooling},
 }
 
@@ -168,7 +182,7 @@ var Flags = []Flag{
 	{Long: "version", Short: 'V', Kind: BoolFlag, Summary: "print version information", Global: true},
 	{Long: "verbose", Short: 'v', Kind: BoolFlag, Summary: "print every xbps command before running it", Global: true},
 	{Long: "debug", Kind: BoolFlag, Summary: "dump the resolved configuration", Global: true},
-	{Long: "config", Kind: ValueFlag, ValueName: "FILE", Summary: "read FILE instead of the user config file", Global: true},
+	{Long: "config", Kind: ValueFlag, ValueName: "FILE", Summary: "read FILE instead of the system and user config files", Global: true},
 	{Long: "color", Kind: ValueFlag, ValueName: "WHEN", Values: []string{"auto", "always", "never"}, Summary: "colour output: auto, always or never", Global: true},
 	{Long: "no-color", Kind: BoolFlag, Summary: "never emit ANSI colour", Global: true},
 	{Long: "tui", Kind: BoolFlag, Summary: "force the full-screen interface", Global: true},

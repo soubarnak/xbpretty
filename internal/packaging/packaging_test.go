@@ -3,11 +3,77 @@ package packaging
 import (
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/soubarnak/xbpretty/internal/spec"
 )
+
+var installedFiles = []string{
+	"/usr/share/bash-completion/completions/xbpretty",
+	"/usr/share/zsh/site-functions/_xbpretty",
+	"/usr/share/fish/vendor_completions.d/xbpretty.fish",
+	"/usr/share/man/man8/xbpretty.8",
+	"/usr/share/man/man5/xbpretty.conf.5",
+	"/usr/share/doc/xbpretty/config.toml.example",
+	"/usr/share/doc/xbpretty/migration-rev6.md",
+	"/usr/share/licenses/xbpretty/LICENSE",
+}
+
+var installedSources = []string{
+	"completions/xbpretty.bash",
+	"completions/_xbpretty",
+	"completions/xbpretty.fish",
+	"man/xbpretty.8",
+	"man/xbpretty.conf.5",
+	"docs/config.toml.example",
+	"docs/migration-rev6.md",
+	"LICENSE",
+}
+
+func aliasLoopList(source string) []string {
+	marker := "for alias in "
+	start := strings.Index(source, marker)
+	if start < 0 {
+		return nil
+	}
+	rest := source[start+len(marker):]
+	end := strings.Index(rest, ";")
+	if end < 0 {
+		return nil
+	}
+	return strings.Fields(rest[:end])
+}
+
+var man8LinkPattern = regexp.MustCompile(`ln -s xbpretty\.8 "[^"]*/([^/"]+)"`)
+
+func man8LinkSet(source string) []string {
+	var links []string
+	for _, match := range man8LinkPattern.FindAllStringSubmatch(source, -1) {
+		if strings.HasSuffix(match[1], ".8") {
+			links = append(links, match[1])
+		}
+	}
+	sort.Strings(links)
+	return links
+}
+
+func wantMan8Links() []string {
+	links := make([]string, 0, len(spec.LinkNames()))
+	for _, alias := range spec.LinkNames() {
+		links = append(links, alias+".8")
+	}
+	sort.Strings(links)
+	return links
+}
+
+func sortedCopy(items []string) []string {
+	out := append([]string(nil), items...)
+	sort.Strings(out)
+	return out
+}
 
 func read(t *testing.T, path string) string {
 	t.Helper()
@@ -65,6 +131,52 @@ func TestTemplateInstallsTheCompleteSurface(t *testing.T) {
 	}
 }
 
+func TestAliasSetsAreExactlySix(t *testing.T) {
+	wantBinary := sortedCopy(spec.LinkNames())
+	wantMan8 := wantMan8Links()
+	for _, source := range []struct {
+		name string
+		path string
+	}{
+		{"template", "srcpkgs/xbpretty/template"},
+		{"build script", "tools/build-xbps.sh"},
+	} {
+		text := read(t, source.path)
+		if got := sortedCopy(aliasLoopList(text)); strings.Join(got, ",") != strings.Join(wantBinary, ",") {
+			t.Errorf("%s binary alias set = %v, want exactly %v", source.name, got, wantBinary)
+		}
+		if got := man8LinkSet(text); strings.Join(got, ",") != strings.Join(wantMan8, ",") {
+			t.Errorf("%s man8 alias set = %v, want exactly %v", source.name, got, wantMan8)
+		}
+	}
+}
+
+func TestTemplateAndBuildScriptInstallTheSameFiles(t *testing.T) {
+	template := read(t, "srcpkgs/xbpretty/template")
+	script := read(t, "tools/build-xbps.sh")
+	man8 := read(t, "man/xbpretty.8")
+	if len(installedFiles) != len(installedSources) {
+		t.Fatal("installed file and source lists disagree")
+	}
+	for i, path := range installedFiles {
+		if !strings.Contains(script, path) {
+			t.Errorf("build script does not install %s", path)
+		}
+		if !strings.Contains(template, installedSources[i]) {
+			t.Errorf("template does not install source %s", installedSources[i])
+		}
+		if !strings.Contains(man8, path) {
+			t.Errorf("xbpretty.8 FILES does not document installed path %s", path)
+		}
+	}
+	if !strings.Contains(script, "$root/usr/bin/$alias") {
+		t.Error("build script does not install the binary aliases")
+	}
+	if !strings.Contains(template, "${DESTDIR}/usr/bin/${alias}") {
+		t.Error("template does not install the binary aliases")
+	}
+}
+
 // TestBuildScriptMatchesTheTemplate pins the offline path: the same version
 // stamp, the same install paths and the same no-/etc rule.
 func TestBuildScriptMatchesTheTemplate(t *testing.T) {
@@ -90,8 +202,8 @@ func TestBuildScriptMatchesTheTemplate(t *testing.T) {
 			t.Errorf("build script does not install alias %q", alias)
 		}
 	}
-	if strings.Contains(script, "conf_files") || strings.Contains(script, "/etc/xbpretty") {
-		t.Error("build script installs an /etc/xbpretty config")
+	if strings.Contains(script, "conf_files") || strings.Contains(script, "/etc") {
+		t.Error("build script installs or mentions an /etc path")
 	}
 }
 
@@ -108,6 +220,8 @@ func TestMakefileExposesGenerationAndReleaseChecks(t *testing.T) {
 		"bash -n completions/xbpretty.bash",
 		"zsh -n completions/_xbpretty",
 		"fish -n completions/xbpretty.fish",
+		"RELEASE_STRICT",
+		"skipped",
 	} {
 		if !strings.Contains(makefile, want) {
 			t.Errorf("Makefile is missing %q", want)

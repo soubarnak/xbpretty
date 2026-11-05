@@ -240,6 +240,20 @@ func hasFlag(flags []Flag, name string) bool {
 	return false
 }
 
+func TestConfigFlagReplacesBothDefaultLayers(t *testing.T) {
+	flag, ok := LookupFlag("config")
+	if !ok {
+		t.Fatal("config is missing")
+	}
+	want := "read FILE instead of the system and user config files"
+	if flag.Summary != want {
+		t.Errorf("config summary = %q, want %q", flag.Summary, want)
+	}
+	if !strings.Contains(Usage(), want) {
+		t.Errorf("help does not contain %q", want)
+	}
+}
+
 func TestDryRunIsLongOnlyAndAssumeNoTakesTheShortN(t *testing.T) {
 	dry, ok := LookupFlag("dry-run")
 	if !ok {
