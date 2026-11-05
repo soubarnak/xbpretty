@@ -44,13 +44,25 @@ for arch in $archs; do
 	install -Dm644 "$here/completions/xbpretty.bash" "$root/usr/share/bash-completion/completions/xbpretty"
 	install -Dm644 "$here/completions/_xbpretty" "$root/usr/share/zsh/site-functions/_xbpretty"
 	install -Dm644 "$here/completions/xbpretty.fish" "$root/usr/share/fish/vendor_completions.d/xbpretty.fish"
+	install -Dm644 "$here/man/xbpretty.8" "$root/usr/share/man/man8/xbpretty.8"
+	install -Dm644 "$here/man/xbpretty.conf.5" "$root/usr/share/man/man5/xbpretty.conf.5"
+	# One man8 alias link per installed name; the page itself is the shared
+	# generated xbpretty.8 (FR-076, AC-059).
+	ln -s xbpretty.8 "$root/usr/share/man/man8/xbp.8"
+	ln -s xbpretty.8 "$root/usr/share/man/man8/xbp-install.8"
+	ln -s xbpretty.8 "$root/usr/share/man/man8/xbp-remove.8"
+	ln -s xbpretty.8 "$root/usr/share/man/man8/xbp-upgrade.8"
+	ln -s xbpretty.8 "$root/usr/share/man/man8/xbp-autoremove.8"
+	ln -s xbpretty.8 "$root/usr/share/man/man8/xbp-update.8"
+	install -Dm644 "$here/docs/config.toml.example" "$root/usr/share/doc/xbpretty/config.toml.example"
+	install -Dm644 "$here/docs/migration-rev6.md" "$root/usr/share/doc/xbpretty/migration-rev6.md"
 	install -Dm644 "$here/LICENSE" "$root/usr/share/licenses/xbpretty/LICENSE"
 
 	pkg="xbpretty-${version}_${revision}"
 	rm -f "$repo/$pkg.$arch.xbps"
 	(cd "$repo" && xbps-create -A "$arch" -n "$pkg" \
 	    -s "Friendlier front end for the xbps package manager" \
-	    -D "xbps>=0" -l MIT -H https://github.com/soubarnak/xbpretty \
+	    -D "xbps>=0.60.0" -l MIT -H https://github.com/soubarnak/xbpretty \
 	    -m "soubarnak <soubarna@live.in>" "$root")
 	XBPS_ARCH=$arch xbps-rindex -f -a "$repo/$pkg.$arch.xbps"
 	echo "built $repo/$pkg.$arch.xbps"

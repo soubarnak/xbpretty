@@ -175,10 +175,10 @@ func TestShippedScriptsAreCurrent(t *testing.T) {
 		}
 		got, err := os.ReadFile(filepath.Join("..", "..", "completions", name))
 		if err != nil {
-			t.Fatalf("read shipped %s script: %v (run `make completions`)", shell, err)
+			t.Fatalf("completion scripts are stale: run make completions")
 		}
 		if string(got) != want {
-			t.Errorf("completion scripts are stale: run make completions (%s)", name)
+			t.Errorf("completion scripts are stale: run make completions")
 		}
 	}
 }

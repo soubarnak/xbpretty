@@ -1,0 +1,470 @@
+.Dd November 5, 2026
+.Dt XBPRETTY 8
+.Os
+.Sh NAME
+.Nm xbpretty
+.Nd friendlier front end for the xbps package manager
+.Sh SYNOPSIS
+.Nm
+.Op Ar command
+.Op Ar options
+.Op Ar arguments ...
+.Nm xbp
+.Op Ar options
+.Op Ar arguments ...
+.Nm xbp-install
+.Op Ar options
+.Op Ar arguments ...
+.Nm xbp-remove
+.Op Ar options
+.Op Ar arguments ...
+.Nm xbp-upgrade
+.Op Ar options
+.Op Ar arguments ...
+.Nm xbp-autoremove
+.Op Ar options
+.Op Ar arguments ...
+.Nm xbp-update
+.Op Ar options
+.Op Ar arguments ...
+.Sh DESCRIPTION
+.Nm
+previews an xbps transaction, prints a nala-style summary, asks once, and then
+runs the underlying xbps command.
+It wraps xbps-install, xbps-remove and xbps-query; it does not replace them.
+One binary is installed under seven names: xbpretty plus the six aliases xbp,
+xbp-install, xbp-remove, xbp-upgrade, xbp-autoremove and xbp-update.
+The argv[0] name selects or fixes the command.
+.Pp
+Durable output is written to standard output.
+Live, interactive and diagnostic output, including the confirmation prompt,
+the progress widget, forwarded child output, hints, warnings and errors, is
+written to standard error.
+Standard input is read only for the confirmation prompt and for history
+selectors that a subcommand accepts.
+.Pp
+The command surface, the flag table and the shell completions all derive from
+one internal table, so a command that is not listed here does not exist.
+Arguments after the option terminator are passed to xbps unchanged in both the
+dry and the real run.
+.Sh COMMANDS
+Commands are grouped as transaction, discovery, history, fetch and tooling
+commands.
+Global options are accepted before or after the command, up to the option
+terminator.
+.Bl -tag -width Ds
+.It Cm install PKG...
+install packages from repositories.
+.It Cm remove PKG...
+remove installed packages.
+Aliases: uninstall.
+.It Cm purge PKG...
+remove packages and their configuration files.
+.It Cm autoremove
+remove orphaned packages.
+.It Cm autopurge
+remove orphaned packages and their configuration files.
+.It Cm upgrade
+upgrade all installed packages.
+Undocumented aliases: up, dist-up.
+.It Cm full-upgrade
+upgrade all installed packages (same as upgrade).
+Aliases: dist-upgrade.
+.It Cm safe-upgrade
+upgrade all installed packages (same as upgrade).
+.It Cm update
+refresh the repository index.
+.It Cm download PKG...
+download package archives into the current directory.
+.It Cm clean
+clean the package cache.
+.It Cm list [PKG...]
+list packages matching the given globs.
+.It Cm search PATTERN...
+search package names and descriptions.
+.It Cm show PKG...
+show package details.
+Aliases: info.
+.It Cm policy [PKG...]
+show repository precedence and pinned packages.
+.It Cm history [ID|last|info|show|undo|redo|clear]
+list, inspect, undo, redo or clear transaction history.
+.It Cm undo [ID|last]
+revert a recorded transaction.
+.It Cm redo [ID|last]
+reapply a recorded transaction.
+.It Cm fetch
+rank Void mirrors and configure repositories.
+.It Cm completion bash|zsh|fish
+print a shell completion script.
+.It Cm link [DIR]
+create the six xbp symlinks in a directory.
+.It Cm log [PKG...]
+print the transaction log.
+.It Cm moo
+moo.
+Hidden easter egg; not advertised by --help.
+.El
+.Sh OPTIONS
+Options are either global or accepted by the commands named in their
+description.
+A flag passed to a command that does not accept it is a usage error and exits
+2.
+.Ss Global options
+.Bl -tag -width Ds
+.It Cm -h , --help
+print this help.
+Accepted on every command.
+.It Cm -V , --version
+print version information.
+Accepted on every command.
+.It Cm -v , --verbose
+print every xbps command before running it.
+Accepted on every command.
+.It Cm --debug
+dump the resolved configuration.
+Accepted on every command.
+.It Cm --config Ar FILE
+read FILE instead of the user config file.
+Accepted on every command.
+.It Cm --color Ar WHEN
+colour output: auto, always or never.
+Accepted on every command.
+Values: auto, always, never.
+.It Cm --no-color
+never emit ANSI colour.
+Accepted on every command.
+.It Cm --tui
+force the full-screen interface.
+Accepted on every command.
+.It Cm --no-tui
+disable the full-screen interface.
+Accepted on every command.
+.It Cm --history-dir Ar DIR
+read history from DIR.
+Accepted on every command.
+Hidden from --help.
+.El
+.Ss Command options
+.Bl -tag -width Ds
+.It Cm -V , --virtual
+list virtual packages.
+Accepted by: list, search.
+.It Cm -c , --country Ar COUNTRY
+restrict mirrors to a country or region (repeatable).
+Accepted by: fetch.
+.It Cm --dry-run
+show the plan without changing anything.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade, fetch.
+.It Cm -y , --yes , --assume-yes
+answer yes and skip the prompt.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade, undo, redo.
+.It Cm -n , --assume-no
+refuse at the prompt.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade, undo, redo.
+.It Cm -d , --download-only
+download the plan's archives and stop.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+.It Cm --simple
+print the simple summary.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+.It Cm --update
+refresh the repository index first.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+.It Cm --no-update
+do not refresh the repository index.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+.It Cm --no-sync
+do not refresh the repository index.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+.It Cm --purge
+also remove configuration files.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+.It Cm --reinstall
+reinstall packages that are already installed.
+Accepted by: install.
+.It Cm --auto-remove , --autoremove
+force the implicit orphan removal.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+.It Cm --no-auto-remove , --no-autoremove
+skip the implicit orphan removal.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+.It Cm --full
+accepted no-op; xbps -u never removes packages.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+.It Cm --no-full
+accepted no-op; wins over --full.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+.It Cm --safe
+accepted no-op for nala compatibility.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+.It Cm --print-uris
+print the plan's download URLs and stop.
+Accepted by: upgrade, full-upgrade, safe-upgrade.
+.It Cm --no-log
+do not append to the transaction log.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade, update, undo, redo.
+.It Cm --box-style Ar STYLE
+summary border style.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+Values: rounded, classic, ascii.
+Hidden from --help.
+.It Cm --progress-bar Ar BOOL
+force the progress widget on or off.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+Hidden from --help.
+.It Cm --no-progress
+disable the progress widget.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+Hidden from --help.
+.It Cm --no-progress-bar
+disable the progress widget.
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+Hidden from --help.
+.It Cm --allow-unauthenticated
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+Not available: \-\-allow-unauthenticated is not available on xbps: xbps
+verifies repository signatures and has no unauthenticated mode.
+.It Cm -o , --option Ar OPTION
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+Not available: -o/\-\-option is not available on xbps: apt configuration
+options have no xbps equivalent; repository settings live in
+/etc/xbps.d/*.conf.
+.It Cm -f , --fix-broken
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+Not available: -f/\-\-fix-broken is not available on xbps: xbps has no
+broken-dependency repair mode.
+Check the pkgdb with xbps-pkgdb \-\-checks dependencies, or force a reinstall
+with xbp install \-\- -f PKG.
+.It Cm -t , --target-release Ar RELEASE
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+Not available: -t/\-\-target-release is not available on xbps: xbps has no
+default-release targeting; pin a repository with a repository= line in
+/etc/xbps.d.
+.It Cm --install-recommends
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+Not available: \-\-install-recommends is not available on xbps: xbps has no
+recommends metadata; every declared run_depends dependency is installed.
+.It Cm --install-suggests
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+Not available: \-\-install-suggests is not available on xbps: xbps has no
+suggests metadata.
+.It Cm --remove-essential
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+Not available: \-\-remove-essential is not available on xbps: xbps has no
+essential-package protection to override.
+.It Cm --remove-config
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+Not available: \-\-remove-config is not available on xbps: xbps has no
+config-files state; xbps-remove -f removes files, it does not create a
+config-only removal.
+.It Cm --exclude Ar PATTERN
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+Not available: \-\-exclude is not available on xbps: xbps has no upgrade
+exclusion; hold the package with xbps-pkgdb -m hold PKG (release with -m
+unhold).
+.It Cm --sources
+Accepted by: fetch.
+Not available: \-\-sources is not available: Void repositories contain no
+source packages
+.It Cm --debian
+Accepted by: fetch.
+Not available: \-\-debian is not available: xbpretty targets Void Linux only
+.It Cm --ubuntu
+Accepted by: fetch.
+Not available: \-\-ubuntu is not available: xbpretty targets Void Linux only
+.It Cm --devuan
+Accepted by: fetch.
+Not available: \-\-devuan is not available: xbpretty targets Void Linux only
+.It Cm --no-fix-broken
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+Accepted and ignored.
+.It Cm --no-install-recommends
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+Accepted and ignored.
+.It Cm --no-install-suggests
+Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
+full-upgrade, safe-upgrade.
+Accepted and ignored.
+.It Cm -a , --all-versions
+show every version of a package.
+Accepted by: list, search, show.
+.It Cm -A , --all-arches
+accepted no-op; xbps covers all architectures.
+Accepted by: list, search, show.
+Accepted and ignored.
+.It Cm -i , --installed
+show installed packages only.
+Accepted by: list, search.
+.It Cm -u , --upgradable
+show upgradable packages only.
+Accepted by: list, search.
+.It Cm --description
+print the long description under each row.
+Accepted by: list, search.
+.It Cm --summary
+print the short summary under each row.
+Accepted by: list, search.
+.It Cm -m , --machine
+emit NDJSON schema 1.
+Accepted by: list, search, show, policy.
+.It Cm -n , --names , --names-only
+search names only.
+Accepted by: search.
+.It Cm --limit Ar N
+keep only the last N matching log entries.
+Accepted by: log.
+.It Cm --lists
+delete cached repodata files.
+Accepted by: clean.
+.It Cm --fetch
+restore the repository configuration written by fetch.
+Accepted by: clean.
+.It Cm --all
+with history clear: delete every entry.
+Accepted by: history.
+.It Cm --auto Ar N
+validate the N fastest mirrors (default 3).
+Accepted by: fetch.
+.It Cm --https-only
+probe and write https mirrors only.
+Accepted by: fetch.
+.It Cm --non-free
+include the non-free repository paths.
+Accepted by: fetch.
+.El
+.Sh STREAMS
+.Bl -tag -width Ds
+.It standard output
+Durable output only: the summary, Nothing to do., update counts, discovery
+rows and NDJSON, download results, the fetch table, --help, --version and
+completion scripts.
+.It standard error
+Everything live, interactive or diagnostic: the prompt, progress widget,
+verbose lines, forwarded child output, plan output, notices, warnings, hints
+and errors.
+.It standard input
+Answers the confirmation prompt.
+A non-terminal stdin is never read as a prompt; use -y to proceed.
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev NO_COLOR
+When set and non-empty, disables ANSI colour under color mode Auto.
+.It Ev XDG_CONFIG_HOME
+Absolute base for the user configuration layer.
+Ignored for an invoking sudo/doas user.
+.It Ev XDG_STATE_HOME
+Base for the transaction log.
+Ignored for an invoking sudo/doas user.
+.It Ev XBPRETTY_HISTORY_DIR
+History directory, overridden by --history-dir.
+.It Ev SUDO_USER , Ev DOAS_USER
+Selects the invoking user's home for configuration and state.
+.It Ev TERM , Ev COLUMNS
+TERM=dumb disables the live UI; COLUMNS supplies the summary width when
+standard output is not a terminal.
+.It Ev HTTP_PROXY , Ev HTTPS_PROXY , Ev NO_PROXY
+Proxy settings for predownload and fetch.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/xbpretty/config.toml
+Optional system configuration layer, read before the user layer.
+It is absent by default and the package never creates it.
+.It Pa ~/.config/xbpretty/config.toml
+User configuration layer, or
+.Pa $XDG_CONFIG_HOME/xbpretty/config.toml
+when XDG_CONFIG_HOME is an absolute path.
+Under sudo or doas the invoking user's home is used.
+.It Pa /var/lib/xbpretty/history/
+Replayable history entries, one JSON file per transaction.
+Override with --history-dir or XBPRETTY_HISTORY_DIR.
+.It Pa $XDG_STATE_HOME/xbpretty/transactions.log
+Append-only audit log, falling back to
+~/.local/state/xbpretty/transactions.log.
+.It Pa /var/cache/xbps
+The package cache used by predownload, download-only and undo/redo restores.
+.It Pa /etc/xbps.d
+xbps repository configuration written by fetch and clean --fetch, not xbpretty
+configuration.
+.It Pa /usr/share/bash-completion/completions/xbpretty
+Installed bash completion.
+.It Pa /usr/share/zsh/site-functions/_xbpretty
+Installed zsh completion.
+.It Pa /usr/share/fish/vendor_completions.d/xbpretty.fish
+Installed fish completion.
+.It Pa /usr/share/doc/xbpretty/config.toml.example
+Canonical configuration example; it parses to the built-in defaults.
+.It Pa /usr/share/doc/xbpretty/migration-rev6.md
+Rev 5 to rev 6 migration guide.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width Ds
+.It Cm 0
+Success, nothing to do, a dry run, a completed download-only run, clean,
+update, discovery with no matches, history list/detail, or a successful fetch.
+.It Cm 1
+Refused confirmation, non-terminal stdin, non-root execution, missing package
+arguments, runtime failure, missing or corrupt history, an unreplayable row, a
+missing archive, an invalid prompt answer, a cancelled fetch, or a partial
+download.
+.It Cm 2
+Usage error, conflicting flags, an N/A flag, invalid configuration,
+--print-uris combined with another stop flag, or a TUI conflict.
+Configuration errors reported by the loader also exit 2.
+.It Cm 130
+Interrupted by SIGINT.
+.It other
+An xbps child's exit status is passed through unchanged.
+.El
+.Sh SECURITY
+When effective UID is 0, a privileged [Xbps] path from a configuration layer
+is honoured only when the supplying file is a regular file owned by UID 0 with
+no group or world write bit, checked on the descriptor that is read.
+An untrusted path is ignored and never executed; one warning per key is
+printed.
+Non-privileged keys from the same layer still apply.
+.Pp
+Repository signatures are always verified by xbps.
+xbpretty never disables signature checking and never installs packages itself.
+A local undo/redo replay repository verifies only the SHA-256 of a cached
+archive, relying on the signature verified when xbps downloaded it.
+.Pp
+The package installs no configuration file under /etc and no conf_files entry;
+the optional system layer is administrator-created.
+fetch writes repository lines under /etc/xbps.d as package-manager state.
+.Sh SEE ALSO
+xbpretty.conf(5)
+.Pp
+https://github.com/soubarnak/xbpretty
