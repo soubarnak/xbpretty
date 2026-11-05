@@ -918,3 +918,19 @@ func TestAC020ShowAllVariantUsesRepositoryRecordQuery(t *testing.T) {
 		t.Errorf("show -a did not use the repository-specific record query:\n%s", strings.Join(commandsFromLog(t, logPath), "\n"))
 	}
 }
+
+func TestAC018DiscoveryRunsRootFree(t *testing.T) {
+	bin, _, _, env := discoveryEnv(t)
+	code, out, errs := runDiscovery(t, bin, env, "list", "beta")
+	if code != 0 {
+		t.Fatalf("list exit = %d\n%s", code, errs)
+	}
+	if out != "beta (1.0_1) [repo-de.voidlinux.org/current] []\n" {
+		t.Errorf("stdout = %q", out)
+	}
+	for _, word := range []string{"root", "sudo", "doas"} {
+		if strings.Contains(strings.ToLower(errs), word) {
+			t.Errorf("root-free discovery printed %q:\n%s", word, errs)
+		}
+	}
+}

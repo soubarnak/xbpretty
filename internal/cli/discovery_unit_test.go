@@ -1,7 +1,11 @@
 package cli
 
 import (
+	"bytes"
+	"syscall"
 	"testing"
+
+	"github.com/soubarnak/xbpretty/internal/discovery"
 )
 
 func TestRepositorySuffixAcceptsSchemesAndLocalPaths(t *testing.T) {
@@ -49,3 +53,15 @@ func TestParseRecordAlternativesAndLists(t *testing.T) {
 		t.Errorf("properties[alternatives] = %T", rec.properties["alternatives"])
 	}
 }
+
+func TestMachineWriteFailureKeepsSuccess(t *testing.T) {
+	st := &state{stdout: failWriter{}, stderr: bytes.NewBuffer(nil)}
+	code := st.renderDiscoveryRows([]discovery.Row{{Name: "alpha", Pkgver: "alpha-1.0_1", Version: "1.0", Revision: "1"}}, &options{machine: true}, newSnapshot())
+	if code != exitOK {
+		t.Errorf("machine write failure exit = %d, want 0", code)
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, syscall.EPIPE }
