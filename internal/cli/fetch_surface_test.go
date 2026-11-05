@@ -120,6 +120,7 @@ func TestFetchTestHooksAreAbsentFromOrdinaryBuilds(t *testing.T) {
 		"XBPRETTY_TEST_FETCH_ARCH",
 		"XBPRETTY_TEST_FETCH_WRITE_DIR",
 		"XBPRETTY_TEST_FETCH_MANIFEST",
+		"XBPRETTY_TEST_FETCH_RANKED",
 	} {
 		if bytes.Contains(ordinary, []byte(name)) {
 			t.Errorf("the ordinary build contains %s; the fetch hook leaked out of xbpretty_testroot", name)

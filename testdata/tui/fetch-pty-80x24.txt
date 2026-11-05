@@ -1,0 +1,24 @@
+╭──────────────────────────────  xbpretty Fetch  ──────────────────────────────╮
+│  Mirrors:                             Region: Tier: Latency:    Speed: Score:│
+│✓ http://127.0.0.1:00000/eu            EU          1    18 ms 4.1 MiB/s     18│
+│☐ http://127.0.0.1:00000/de            EU          2    31 ms 3.2 MiB/s     31│
+│☐ http://127.0.0.1:00000/us            NA          2    47 ms 2.8 MiB/s     47│
+│☐ http://127.0.0.1:00000/jp            AS          3   112 ms 1.9 MiB/s    112│
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│  Score is how many milliseconds it takes to download the repository index.   │
+│                                                                              │
+│                  Use ↓↑ to move, Home/End to go top/bottom,                  │
+│                      q/Enter to select, Esc to cancel.                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
