@@ -6,7 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func testEntry() Entry {
@@ -215,12 +218,16 @@ func TestStoreLoadErrors(t *testing.T) {
 // a leftover temp file.
 func TestStoreUnknownKeysAreIgnoredAndTempsSwept(t *testing.T) {
 	dir := t.TempDir()
-	body := `{"schema_version":1,"id":1,"future_key":true,"packages":[]}`
+	body := `{"schema_version":1,"id":1,"status":"Applied","requested_by":"root (0)","command":[],"packages":[],"future_key":true}`
 	if err := os.WriteFile(filepath.Join(dir, "1.json"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	stale := filepath.Join(dir, "9.json.tmp")
 	if err := os.WriteFile(stale, []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * staleTempAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
 		t.Fatal(err)
 	}
 	s := New(dir)
@@ -268,6 +275,10 @@ func TestStoreDeleteAndClear(t *testing.T) {
 	if err := os.WriteFile(stale, []byte("stale"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	old := time.Now().Add(-2 * staleTempAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
 	n, err := s.Clear()
 	if err != nil {
 		t.Fatalf("Clear: %v", err)
@@ -283,5 +294,142 @@ func TestStoreDeleteAndClear(t *testing.T) {
 	}
 	if second.ID != 2 {
 		t.Errorf("ids shifted: %d", second.ID)
+	}
+}
+
+// writeEntryFile writes a raw JSON body at <dir>/1.json and returns the store.
+func writeEntryFile(t *testing.T, body string) (*Store, string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "1.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return New(dir), path
+}
+
+// TestStoreValidatesRequiredFields pins the read-side schema contract beyond
+// schema_version/id: status enum, operation enum, non-empty names and the
+// required top-level fields.
+func TestStoreValidatesRequiredFields(t *testing.T) {
+	const valid = `{"schema_version":1,"id":1,"status":"Applied","requested_by":"root (0)","command":["install","x"],"packages":[{"name":"x","operation":"Install"}]}`
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"bogus status", strings.Replace(valid, `"Applied"`, `"Bogus"`, 1), `invalid status "Bogus"`},
+		{"unknown operation", strings.Replace(valid, `"Install"`, `"Reinstall?"`, 1), `invalid operation "Reinstall?"`},
+		{"empty name", strings.Replace(valid, `"name":"x"`, `"name":""`, 1), `packages[0] has no name`},
+		{"missing requested_by", strings.Replace(valid, `,"requested_by":"root (0)"`, "", 1), `missing requested_by`},
+		{"missing command", strings.Replace(valid, `,"command":["install","x"]`, "", 1), `missing command`},
+		{"missing packages", strings.Replace(valid, `,"packages":[{"name":"x","operation":"Install"}]`, "", 1), `missing packages`},
+		{"missing schema", strings.Replace(valid, `"schema_version":1,`, "", 1), `unsupported schema_version 0`},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			store, path := writeEntryFile(t, tt.body)
+			_, err := store.Load(1)
+			if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("Load error = %v, want %q naming %s", err, tt.want, path)
+			}
+			if _, err := store.List(); err == nil || !strings.Contains(err.Error(), path) {
+				t.Errorf("List error = %v, want the file named", err)
+			}
+		})
+	}
+}
+
+// TestStoreNonRegularAndOversizedEntries pins the read guards: a FIFO is not
+// an entry and never blocks the read, and an oversized file is corrupt.
+func TestStoreNonRegularAndOversizedEntries(t *testing.T) {
+	t.Run("fifo", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := syscall.Mkfifo(filepath.Join(dir, "1.json"), 0o644); err != nil {
+			t.Skipf("mkfifo: %v", err)
+		}
+		store := New(dir)
+		entries, err := store.List()
+		if err != nil || len(entries) != 0 {
+			t.Errorf("List = %+v, %v; want a FIFO ignored without blocking", entries, err)
+		}
+	})
+	t.Run("oversized", func(t *testing.T) {
+		store, path := writeEntryFile(t, strings.Repeat("x", maxEntryBytes+1))
+		if _, err := store.Load(1); err == nil || !strings.Contains(err.Error(), path) {
+			t.Errorf("Load error = %v, want the oversized file named", err)
+		}
+	})
+}
+
+// TestStoreCreatesPermissiveAncestorsUnderUmask pins FR-029's 0755 store mode
+// even under a restrictive umask: non-root readers must be able to traverse
+// to the leaf.
+func TestStoreCreatesPermissiveAncestorsUnderUmask(t *testing.T) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+	root := filepath.Join(t.TempDir(), "a", "b", "history")
+	if _, err := New(root).Write(testEntry()); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{filepath.Join(filepath.Dir(root), ".."), filepath.Dir(root), root} {
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o755 {
+			t.Errorf("%s mode = %04o, want 0755 under umask 077", dir, info.Mode().Perm())
+		}
+	}
+	info, err := os.Stat(filepath.Join(root, "1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("entry mode = %04o, want 0644 under umask 077", info.Mode().Perm())
+	}
+}
+
+// TestStoreConcurrentWriters pins max+1 allocation under concurrency: no lost
+// entries, no duplicate ids, no sweep of a live temp file.
+func TestStoreConcurrentWriters(t *testing.T) {
+	dir := t.TempDir()
+	s := New(dir)
+	const writers, each = 4, 10
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < each; j++ {
+				if _, err := s.Write(testEntry()); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("concurrent Write: %v", err)
+	}
+	entries, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != writers*each {
+		t.Errorf("entries = %d, want %d", len(entries), writers*each)
+	}
+	seen := map[uint32]bool{}
+	for _, entry := range entries {
+		if seen[entry.ID] {
+			t.Errorf("duplicate id %d", entry.ID)
+		}
+		seen[entry.ID] = true
+	}
+	if _, err := os.Stat(filepath.Join(dir, "1.json.tmp")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("live temp survived: %v", err)
 	}
 }

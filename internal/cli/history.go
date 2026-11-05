@@ -131,10 +131,15 @@ func requestedTargets(cmd string, opts *options) []string {
 // requestedBy renders FR-030's `<user> (<uid>)`, preferring the sudo/doas
 // invoking user over the effective root account.
 func requestedBy() string {
-	for _, key := range []string{"SUDO_USER", "DOAS_USER"} {
-		name := os.Getenv(key)
+	for _, keys := range [][2]string{{"SUDO_USER", "SUDO_UID"}, {"DOAS_USER", "DOAS_UID"}} {
+		name := os.Getenv(keys[0])
 		if name == "" {
 			continue
+		}
+		// The calling uid is authoritative; the passwd lookup is only a
+		// fallback when sudo/doas did not export it.
+		if uid, err := strconv.Atoi(os.Getenv(keys[1])); err == nil {
+			return fmt.Sprintf("%s (%d)", name, uid)
 		}
 		if u, err := user.Lookup(name); err == nil {
 			if uid, err := strconv.Atoi(u.Uid); err == nil {
@@ -214,10 +219,11 @@ func (st *state) historyBulkQuery(args ...string) (string, error) {
 // snapshots and the plan action (FR-030).
 func (st *state) buildTransitions(pending *historyPending, after map[string]history.PackageState) []history.Transition {
 	transitions := make([]history.Transition, 0, len(pending.rows))
+	force := effectiveForce(pending.cmd, pending.opts)
 	for _, row := range pending.rows {
 		before := statePointer(pending.before, row.Name)
 		afterState := statePointer(after, row.Name)
-		operation := st.deriveOperation(row, before, afterState, pending.cmd, pending.opts)
+		operation := st.deriveOperation(row, before, afterState, pending.cmd, force)
 		if operation == "" {
 			continue
 		}
@@ -249,8 +255,25 @@ func statePointer(states map[string]history.PackageState, name string) *history.
 	return &copy
 }
 
+// effectiveForce is the transaction's actual -f: an explicit purge, --purge,
+// or a passthrough flag cluster such as `-- -f` / `-- -fy`.
+func effectiveForce(cmd string, opts *options) bool {
+	if purgeRequested(cmd, opts) {
+		return true
+	}
+	for _, arg := range opts.passthru {
+		if strings.HasPrefix(arg, "--") {
+			continue
+		}
+		if strings.HasPrefix(arg, "-") && strings.Contains(arg, "f") {
+			return true
+		}
+	}
+	return false
+}
+
 // deriveOperation applies FR-030's snapshot rules.
-func (st *state) deriveOperation(row xbps.Row, before, after *history.PackageState, cmd string, opts *options) string {
+func (st *state) deriveOperation(row xbps.Row, before, after *history.PackageState, cmd string, force bool) string {
 	if row.Action == xbps.ActionHold {
 		return history.OpHeld
 	}
@@ -258,15 +281,14 @@ func (st *state) deriveOperation(row xbps.Row, before, after *history.PackageSta
 		return history.OpInstall
 	}
 	if before != nil && after == nil {
-		purge := purgeRequested(cmd, opts)
 		switch cmd {
 		case "autoremove", "autopurge":
-			if purge {
+			if force {
 				return history.OpAutoPurge
 			}
 			return history.OpAutoRemove
 		}
-		if purge {
+		if force {
 			return history.OpPurge
 		}
 		return history.OpRemove
@@ -290,19 +312,22 @@ func (st *state) deriveOperation(row xbps.Row, before, after *history.PackageSta
 }
 
 // compareVersions asks xbps-uhelper cmpver which version is newer. Its exit
-// status is 1 for greater, 0 for equal and 255 for less; any failure falls
-// back to the upgrade direction rather than failing the record.
+// status is 1 for greater, 0 for equal and 255 for less. A failure warns
+// before falling back to the upgrade direction, so a direction is never
+// silently invented.
 func (st *state) compareVersions(before, after string) int {
 	res, err := st.r.run(st.r.cfg.Xbps.UhelperPath, "cmpver", before, after)
-	if err != nil {
-		return -1
+	if err == nil {
+		switch res.exitCode {
+		case 0:
+			return 0
+		case 1:
+			return 1
+		case 255:
+			return -1
+		}
 	}
-	switch res.exitCode {
-	case 0:
-		return 0
-	case 1:
-		return 1
-	}
+	fmt.Fprintf(st.stderr, "xbpretty: warning: xbps-uhelper cmpver %s %s failed; recording the change as an upgrade\n", before, after)
 	return -1
 }
 
@@ -350,8 +375,8 @@ func (st *state) lineLogNote() {
 	if err != nil {
 		return
 	}
-	data, err := os.ReadFile(path)
-	if err != nil || len(data) == 0 {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
 		return
 	}
 	fmt.Fprintln(st.stderr, "xbpretty: earlier transactions are only in the line log and cannot be replayed; run 'xbp log' to read them")

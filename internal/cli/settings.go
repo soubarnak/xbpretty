@@ -4,6 +4,7 @@ import (
 	"os"
 
 	"github.com/soubarnak/xbpretty/internal/config"
+	"github.com/soubarnak/xbpretty/internal/history"
 )
 
 // settings is the fully resolved precedence surface of FR-057: CLI value, then
@@ -25,8 +26,8 @@ type settings struct {
 }
 
 // defaultHistoryDir is FR-029's history store when neither the flag nor the
-// environment names one.
-const defaultHistoryDir = "/var/lib/xbpretty/history"
+// environment names one. The store package owns the value.
+const defaultHistoryDir = history.DefaultDir
 
 // resolveSettings applies FR-057's precedence to one resolved config.
 func resolveSettings(cfg config.Config, opts *options) settings {

@@ -8,10 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // SchemaVersion is the only schema the store reads and writes.
@@ -20,6 +23,16 @@ const SchemaVersion = 1
 // DefaultDir is the history store used when neither --history-dir nor
 // XBPRETTY_HISTORY_DIR names one.
 const DefaultDir = "/var/lib/xbpretty/history"
+
+const (
+	// maxEntryBytes caps a single entry file. A schema-1 entry is a few
+	// kilobytes; a larger file is corrupt, not a history record.
+	maxEntryBytes = 4 << 20
+	// staleTempAge is how old a .json.tmp must be before a write may sweep
+	// it. A live writer's temp is seconds old, so a concurrent sweep never
+	// steals it.
+	staleTempAge = time.Hour
+)
 
 // Status is the entry's run outcome. Applied is the only status written;
 // Unknown is accepted on read but never replayable.
@@ -181,21 +194,12 @@ func (s *Store) Write(entry Entry) (Entry, error) {
 	if entry.Packages == nil {
 		entry.Packages = []Transition{}
 	}
-	created := false
-	if _, err := os.Stat(s.dir); errors.Is(err, os.ErrNotExist) {
-		created = true
-	}
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
-		return Entry{}, fmt.Errorf("creating %s: %w", s.dir, err)
-	}
-	// The store directory is 0755 root:root. Only a directory this call
-	// created is chmodded: an operator-supplied --history-dir keeps its
-	// permissions, so a read-only store fails closed instead of being
-	// silently widened.
-	if created {
-		if err := os.Chmod(s.dir, 0o755); err != nil {
-			return Entry{}, fmt.Errorf("setting permissions on %s: %w", s.dir, err)
-		}
+	// The store directory and every ancestor this call creates are 0755
+	// root:root. A directory that already exists keeps its permissions, so
+	// an operator-supplied read-only --history-dir fails closed instead of
+	// being silently widened.
+	if err := ensureDir(s.dir); err != nil {
+		return Entry{}, err
 	}
 	if err := s.removeStaleTemps(); err != nil {
 		return Entry{}, err
@@ -204,7 +208,12 @@ func (s *Store) Write(entry Entry) (Entry, error) {
 	if err != nil {
 		return Entry{}, err
 	}
+	attempts := 0
 	for {
+		attempts++
+		if attempts > 1000 {
+			return Entry{}, fmt.Errorf("allocating a history id: too many collisions")
+		}
 		entry.ID = id
 		final := s.path(strconv.FormatUint(uint64(id), 10) + ".json")
 		tmp := final + ".tmp"
@@ -219,6 +228,11 @@ func (s *Store) Write(entry Entry) (Entry, error) {
 			_ = os.Remove(tmp)
 			if errors.Is(err, os.ErrExist) {
 				id++
+				continue
+			}
+			// A concurrent writer's stale-temp sweep can remove our temp
+			// between serialization and the link; serialise it again.
+			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
 			return Entry{}, fmt.Errorf("publishing %s: %w", final, err)
@@ -272,21 +286,80 @@ func (s *Store) Clear() (int, error) {
 	return len(names), nil
 }
 
-// readFile parses one entry file and validates the schema contract.
+// readFile parses one entry file and validates the schema contract. Only a
+// regular file is an entry: a FIFO or device at an entry name is corrupt, and
+// the read never blocks on it.
 func (s *Store) readFile(name string) (Entry, error) {
 	path := s.path(name)
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return Entry{}, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return Entry{}, fmt.Errorf("history entry %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return Entry{}, fmt.Errorf("history entry %s: not a regular file", path)
+	}
+	if info.Size() > maxEntryBytes {
+		return Entry{}, fmt.Errorf("history entry %s: file is larger than %d bytes", path, maxEntryBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxEntryBytes+1))
+	if err != nil {
+		return Entry{}, fmt.Errorf("history entry %s: %w", path, err)
+	}
+	if len(data) > maxEntryBytes {
+		return Entry{}, fmt.Errorf("history entry %s: file is larger than %d bytes", path, maxEntryBytes)
 	}
 	var entry Entry
 	if err := json.Unmarshal(data, &entry); err != nil {
 		return Entry{}, fmt.Errorf("history entry %s: %w", path, err)
 	}
-	if entry.SchemaVersion != SchemaVersion {
-		return Entry{}, fmt.Errorf("history entry %s: unsupported schema_version %d", path, entry.SchemaVersion)
+	if err := validateEntry(path, entry); err != nil {
+		return Entry{}, err
 	}
 	return entry, nil
+}
+
+// validOperations is the closed FR-030 operation set.
+var validOperations = func() map[string]bool {
+	set := make(map[string]bool, len(GroupOrder))
+	for _, operation := range GroupOrder {
+		set[operation] = true
+	}
+	return set
+}()
+
+// validateEntry enforces the required schema-1 fields the read surface uses.
+// Timestamps are deliberately not validated: FR-032 shows an unparseable one
+// verbatim.
+func validateEntry(path string, entry Entry) error {
+	if entry.SchemaVersion != SchemaVersion {
+		return fmt.Errorf("history entry %s: unsupported schema_version %d", path, entry.SchemaVersion)
+	}
+	if entry.Status != StatusApplied && entry.Status != StatusUnknown {
+		return fmt.Errorf("history entry %s: invalid status %q", path, entry.Status)
+	}
+	if entry.RequestedBy == "" {
+		return fmt.Errorf("history entry %s: missing requested_by", path)
+	}
+	if entry.Command == nil {
+		return fmt.Errorf("history entry %s: missing command", path)
+	}
+	if entry.Packages == nil {
+		return fmt.Errorf("history entry %s: missing packages", path)
+	}
+	for i, transition := range entry.Packages {
+		if transition.Name == "" {
+			return fmt.Errorf("history entry %s: packages[%d] has no name", path, i)
+		}
+		if !validOperations[transition.Operation] {
+			return fmt.Errorf("history entry %s: packages[%d] has invalid operation %q", path, i, transition.Operation)
+		}
+	}
+	return nil
 }
 
 // entryNames returns the store's entry filenames in ascending id order.
@@ -305,11 +378,11 @@ func (s *Store) entryNames() ([]string, error) {
 	}
 	var files []entryFile
 	for _, de := range dir {
-		if de.IsDir() {
+		if !de.Type().IsRegular() {
 			continue
 		}
 		name := de.Name()
-		if !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".json.tmp") {
+		if !strings.HasSuffix(name, ".json") {
 			continue
 		}
 		base := strings.TrimSuffix(name, ".json")
@@ -339,7 +412,7 @@ func (s *Store) nextID() (uint32, error) {
 	}
 	var max uint64
 	for _, de := range dir {
-		if de.IsDir() {
+		if !de.Type().IsRegular() {
 			continue
 		}
 		name := de.Name()
@@ -364,8 +437,9 @@ func (s *Store) nextID() (uint32, error) {
 	return uint32(max + 1), nil
 }
 
-// removeStaleTemps deletes leftover <id>.json.tmp files. It runs only from
-// mutating operations, never from a read.
+// removeStaleTemps deletes leftover <id>.json.tmp files older than
+// staleTempAge. It runs only from mutating operations, never from a read, and
+// the age gate keeps a concurrent writer's live temp safe from the sweep.
 func (s *Store) removeStaleTemps() error {
 	dir, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -374,12 +448,20 @@ func (s *Store) removeStaleTemps() error {
 		}
 		return fmt.Errorf("reading history directory %s: %w", s.dir, err)
 	}
+	cutoff := time.Now().Add(-staleTempAge)
 	for _, de := range dir {
-		if de.IsDir() {
+		if !de.Type().IsRegular() {
 			continue
 		}
 		name := de.Name()
 		if !strings.HasSuffix(name, ".json.tmp") {
+			continue
+		}
+		info, err := de.Info()
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", s.path(name), err)
+		}
+		if info.ModTime().After(cutoff) {
 			continue
 		}
 		if err := os.Remove(s.path(name)); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -422,6 +504,36 @@ func writeTemp(tmp string, entry Entry) error {
 		return fmt.Errorf("closing %s: %w", tmp, err)
 	}
 	remove = false
+	return nil
+}
+
+// ensureDir creates dir and every missing ancestor at 0755, defeating a
+// restrictive umask. Directories that already exist are untouched: a
+// read-only operator-supplied store must fail closed, not be widened.
+func ensureDir(dir string) error {
+	var missing []string
+	for p := dir; ; p = filepath.Dir(p) {
+		_, err := os.Stat(p)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("creating %s: %w", dir, err)
+		}
+		missing = append(missing, p)
+		parent := filepath.Dir(p)
+		if parent == p {
+			break
+		}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
+	}
+	for _, p := range missing {
+		if err := os.Chmod(p, 0o755); err != nil {
+			return fmt.Errorf("setting permissions on %s: %w", p, err)
+		}
+	}
 	return nil
 }
 

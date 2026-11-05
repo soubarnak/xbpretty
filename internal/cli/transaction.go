@@ -255,7 +255,8 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	// execute, before the line log, the reboot hint and any implicit
 	// autoremove.
 	st.beginHistory(cmd, opts, rows)
-	code = st.execute(cmd, st.binaryFor(cmd), realArgv(cmd, opts, args), rows...)
+	code = st.executePhases(cmd, realArgv(cmd, opts, args), rows,
+		xbpsPhase{bin: st.binaryFor(cmd), args: realArgv(cmd, opts, args), rows: rows})
 	if code == 0 {
 		st.implicitAutoremoveAfterSuccess(cmd, opts, rows)
 	}

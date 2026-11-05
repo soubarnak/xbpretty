@@ -2,6 +2,9 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -184,10 +187,17 @@ func TestHistoryListAndDetail(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("history = %q, want a header and two rows", out)
 	}
+	last := -1
 	for _, header := range []string{"ID", "Command", "Date", "Requested-By", "Altered"} {
-		if !strings.Contains(lines[0], header) {
+		index := strings.Index(lines[0], header)
+		if index < 0 {
 			t.Errorf("header %q missing from %q", header, lines[0])
+			continue
 		}
+		if index <= last {
+			t.Errorf("header %q is out of order in %q", header, lines[0])
+		}
+		last = index
 	}
 	if !strings.HasPrefix(lines[1], "1 ") || !strings.HasPrefix(lines[2], "2 ") {
 		t.Errorf("rows are not ascending by id:\n%s", out)
@@ -229,6 +239,14 @@ func TestHistoryListAndDetail(t *testing.T) {
 			if !strings.Contains(out, want) {
 				t.Errorf("%v output missing %q:\n%s", selector, want, out)
 			}
+		}
+		lastLabel := -1
+		for _, label := range []string{"ID:", "Status:", "Command:", "Requested-By:", "Started:", "Finished:", "Requested Targets:", "Altered:"} {
+			index := strings.Index(out, label)
+			if index <= lastLabel {
+				t.Errorf("%v label %q is out of order:\n%s", selector, label, out)
+			}
+			lastLabel = index
 		}
 	}
 }
@@ -434,10 +452,11 @@ func TestHistoryNoWriteMatrix(t *testing.T) {
 	bin := taggedBinary(t)
 	holdPlan := "figlet-2.2.5_6 hold x86_64 https://repo-default.voidlinux.org/current\n"
 	cases := []struct {
-		name string
-		env  func(t *testing.T, dir string) testEnv
-		args []string
-		code int
+		name  string
+		env   func(t *testing.T, dir string) testEnv
+		args  []string
+		code  int
+		noLog bool
 	}{
 		{name: "dry run", args: []string{"install", "figlet", "--dry-run", "-y"}, code: 0},
 		{name: "download only", args: []string{"install", "figlet", "-y", "--download-only"}, code: 1},
@@ -452,6 +471,9 @@ func TestHistoryNoWriteMatrix(t *testing.T) {
 		{name: "failed child", env: func(t *testing.T, dir string) testEnv {
 			return historyRunEnv(t, dir).with("XB_STUB_EXIT", "1")
 		}, args: []string{"install", "figlet", "-y"}, code: 1},
+		{name: "failed real execution", env: func(t *testing.T, dir string) testEnv {
+			return historyRunEnv(t, dir).with("XB_STUB_RUN_EXIT", "1")
+		}, args: []string{"install", "figlet", "-y"}, code: 1, noLog: true},
 		{name: "update", args: []string{"update"}, code: 0},
 		{name: "clean", args: []string{"clean"}, code: 1},
 		{name: "download", args: []string{"download", "figlet"}, code: 1},
@@ -471,6 +493,12 @@ func TestHistoryNoWriteMatrix(t *testing.T) {
 				t.Errorf("exit = %d, want %d\n%s", code, tt.code, errs)
 			}
 			assertNoHistoryEntry(t, dir)
+			if tt.noLog {
+				logPath := filepath.Join(dir, "state", "xbpretty", "transactions.log")
+				if raw, err := os.ReadFile(logPath); err == nil && len(raw) != 0 {
+					t.Errorf("failed real execution wrote the line log: %q", raw)
+				}
+			}
 		})
 	}
 }
@@ -492,6 +520,12 @@ func TestHistoryWriteFailureIsAWarning(t *testing.T) {
 	}
 	if !strings.Contains(errs, "xbpretty: history entry not saved:") {
 		t.Errorf("stderr = %q, want the history warning", errs)
+	}
+	// The line log is independent of the failed history write.
+	logPath := filepath.Join(dir, "state", "xbpretty", "transactions.log")
+	raw, err := os.ReadFile(logPath)
+	if err != nil || !strings.Contains(string(raw), " install figlet-2.2.5_6") {
+		t.Errorf("line log = %q, %v; want the transaction line despite the history failure", raw, err)
 	}
 }
 
@@ -575,6 +609,16 @@ func TestHistoryOperationsFromSnapshots(t *testing.T) {
 			beforeManual: "wget-1.25.0_1\n",
 			want:         "Remove", wantBefore: true},
 		{name: "purge", args: []string{"purge", "wget", "-y"},
+			plan:         "wget-1.25.0_1 remove x86_64 " + repo + " 3673038 824658\n",
+			beforeList:   "uu wget-1.25.0_1 wget\n",
+			beforeManual: "wget-1.25.0_1\n",
+			want:         "Purge", wantBefore: true},
+		{name: "remove passthrough -f", args: []string{"remove", "wget", "-y", "--", "-f"},
+			plan:         "wget-1.25.0_1 remove x86_64 " + repo + " 3673038 824658\n",
+			beforeList:   "uu wget-1.25.0_1 wget\n",
+			beforeManual: "wget-1.25.0_1\n",
+			want:         "Purge", wantBefore: true},
+		{name: "remove passthrough -fy cluster", args: []string{"remove", "wget", "-y", "--", "-fy"},
 			plan:         "wget-1.25.0_1 remove x86_64 " + repo + " 3673038 824658\n",
 			beforeList:   "uu wget-1.25.0_1 wget\n",
 			beforeManual: "wget-1.25.0_1\n",
@@ -735,4 +779,60 @@ func TestHistoryDirPrecedenceThroughBinary(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "install figlet -y") {
 		t.Errorf("history --history-dir = %d, %q, %q", code, out, errs)
 	}
+}
+
+// TestHistoryNoWriteOnFetch pins FR-031's fetch exclusion through the binary
+// with a local mirror fixture, so no network is touched.
+func TestHistoryNoWriteOnFetch(t *testing.T) {
+	bin := taggedBinary(t)
+	dir := t.TempDir()
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/mirrors.lst":
+			fmt.Fprintf(w, "EU\t%s/m/\t\t1\n", server.URL)
+		case strings.HasSuffix(r.URL.Path, "/current/x86_64-repodata"):
+			_, _ = w.Write([]byte{0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0, 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	xbpsd := filepath.Join(dir, "xbps.d")
+	if err := os.MkdirAll(xbpsd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(xbpsd, "00-repository-main.conf"),
+		[]byte("repository=https://repo-default.voidlinux.org/current\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := historyRunEnv(t, dir).
+		with("XBPRETTY_TEST_FETCH_XBPSD", xbpsd).
+		with("XBPRETTY_TEST_FETCH_MIRROR_LIST", server.URL+"/mirrors.lst").
+		with("XBPRETTY_TEST_FETCH_ARCH", "x86_64")
+	out, errs, code := runBinary(t, bin, env, "fetch", "--dry-run")
+	if code != 0 {
+		t.Fatalf("fetch --dry-run exit = %d\n%s\n%s", code, out, errs)
+	}
+	if !strings.Contains(out, "Dry run:") {
+		t.Errorf("fetch dry run did not complete:\n%s", out)
+	}
+	assertNoHistoryEntry(t, dir)
+}
+
+// TestUntaggedBinaryIgnoresTestEUID pins the test hook's build tag: the
+// release binary never treats XBPRETTY_TEST_EUID as root, so it takes the
+// non-root path and writes no history.
+func TestUntaggedBinaryIgnoresTestEUID(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	env := historyRunEnv(t, dir) // EUID/TRUST are ignored by the untagged build
+	_, errs, code := runBinary(t, bin, env, "install", "figlet", "-y")
+	if code != 1 {
+		t.Fatalf("exit = %d, want the non-root refusal\n%s", code, errs)
+	}
+	if !strings.Contains(errs, "sudo") && !strings.Contains(errs, "doas") {
+		t.Errorf("stderr = %q, want the elevation hint", errs)
+	}
+	assertNoHistoryEntry(t, dir)
 }
