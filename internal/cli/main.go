@@ -227,8 +227,7 @@ func printUsageError(err io.Writer, parseErr error) {
 	usage(err)
 }
 
-// dispatch routes a parsed command to its implementation. Commands whose
-// owning ticket has not landed yet go to the single runUnimplemented seam.
+// dispatch routes a parsed command to its implementation.
 func (st *state) dispatch(opts *options) int {
 	switch opts.command {
 	case "log":
@@ -254,16 +253,14 @@ func (st *state) dispatch(opts *options) int {
 		return st.runClean(opts)
 	case "history":
 		if opts.subcommand == "clear" {
-			// TODO(#70): history clear <id|last> and --all belong to #70.
-			return st.runUnimplemented("history", opts)
+			return st.runHistoryClear(opts)
 		}
 		return st.runHistory(opts)
 	case "undo", "redo":
-		// #70 owns replay. When undo/redo start running a real transaction
-		// (FR-033), they are real transactions under FR-036 too: their plan
-		// closure must go through st.predownload between the checks and the
-		// child, exactly like the six transaction commands above.
-		return st.runUnimplemented(opts.command, opts)
+		// FR-033..FR-035: replays derive pinned before/after targets, preflight
+		// every archive, and route their repository-served restores through
+		// the same predownload path as a real transaction.
+		return st.runReplay(opts.command, opts)
 	}
 	fmt.Fprintf(st.stderr, "xbpretty: unknown command %q\n", opts.command)
 	return exitUsage
@@ -322,6 +319,10 @@ func validateInvocation(opts *options, err io.Writer) (int, bool) {
 			return exitUsage, true
 		}
 	case "history":
+		if opts.clearAll && opts.subcommand != "clear" {
+			fmt.Fprintln(err, "xbpretty: --all is only for history clear")
+			return exitUsage, true
+		}
 		if opts.subcommand == "" || opts.subcommand == "info" || opts.subcommand == "show" {
 			if len(args) > 1 {
 				fmt.Fprintln(err, "xbpretty: history takes no package arguments")
@@ -332,11 +333,27 @@ func validateInvocation(opts *options, err io.Writer) (int, bool) {
 			fmt.Fprintln(err, "xbpretty: history info needs an entry id or 'last'")
 			return exitUsage, true
 		}
-		if opts.subcommand == "clear" && len(args) > 1 {
-			fmt.Fprintln(err, "xbpretty: history takes no package arguments")
-			return exitUsage, true
+		if opts.subcommand == "clear" {
+			if len(args) > 1 {
+				fmt.Fprintln(err, "xbpretty: history takes no package arguments")
+				return exitUsage, true
+			}
+			if opts.clearAll && len(args) > 0 {
+				fmt.Fprintln(err, "xbpretty: history clear takes no package arguments")
+				return exitUsage, true
+			}
+			if !opts.clearAll && len(args) == 0 {
+				fmt.Fprintln(err, "xbpretty: history clear needs an entry id, 'last' or --all")
+				return exitUsage, true
+			}
 		}
 	case "undo", "redo":
+		if opts.dashDash {
+			// Replays build their own pinned argv; a passthrough has no place
+			// in it (FR-033, FR-035).
+			fmt.Fprintf(err, "xbpretty: %s takes no arguments and no -- passthrough\n", opts.command)
+			return exitUsage, true
+		}
 		if len(args) > 1 {
 			fmt.Fprintf(err, "xbpretty: %s takes at most one entry id or 'last'\n", opts.command)
 			return exitUsage, true

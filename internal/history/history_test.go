@@ -433,3 +433,63 @@ func TestStoreConcurrentWriters(t *testing.T) {
 		t.Errorf("live temp survived: %v", err)
 	}
 }
+
+// TestStoreRejectsUnsafePackageMetadata pins the read-surface guard: an entry
+// whose name/arch/version could escape a cache path or be read as a flag is
+// corrupt, so list/detail fail closed instead of offering a replay.
+func TestStoreRejectsUnsafePackageMetadata(t *testing.T) {
+	cases := []struct {
+		name    string
+		nameV   string
+		arch    string
+		version string
+	}{
+		{"traversal", "../evil", "x86_64", "1.0_1"},
+		{"flag", "-f", "x86_64", "1.0_1"},
+		{"hidden", ".hidden", "x86_64", "1.0_1"},
+		{"arch separator", "figlet", "x86/64", "1.0_1"},
+		{"version traversal", "figlet", "x86_64", "../../1"},
+		{"NUL", "fig\x00let", "x86_64", "1.0_1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			version := tc.version
+			entry := map[string]any{
+				"schema_version":    1,
+				"id":                1,
+				"started_at":        "2026-11-06T00:00:00Z",
+				"finished_at":       "2026-11-06T00:00:05Z",
+				"status":            "Applied",
+				"requested_by":      "root (0)",
+				"command":           []string{"install", "figlet"},
+				"requested_targets": []string{"figlet"},
+				"implicit":          false,
+				"replay_of":         nil,
+				"replay_kind":       nil,
+				"packages": []any{map[string]any{
+					"name": tc.nameV, "arch": tc.arch,
+					"repository": "file:///repo", "size": 1, "installed_size": 1,
+					"operation": "Install", "before": nil,
+					"after": map[string]any{
+						"version": version, "auto_installed": false,
+						"hold": false, "repolock": false,
+					},
+				}},
+			}
+			raw, err := json.Marshal(entry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "1.json"), raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := New(dir).Load(1); err == nil {
+				t.Errorf("Load accepted unsafe metadata %+v", tc)
+			}
+		})
+	}
+}

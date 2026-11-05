@@ -28,10 +28,12 @@ printf '%s' "${XB_STUB_RUN_STDOUT-${XB_STUB_STDOUT:-}}"
 printf '%s' "${XB_STUB_RUN_STDERR-${XB_STUB_STDERR:-}}" >&2
 code="${XB_STUB_REMOVE_EXIT-${XB_STUB_EXIT:-0}}"
 # XB_STUB_RUN_EXIT applies only to the real (-y) invocation, so a test can
-# plan successfully and fail the transaction itself.
+# plan successfully and fail the transaction itself. XB_STUB_REMOVE_RUN_EXIT
+# is the remove-specific override a two-phase replay needs to fail only its
+# removal phase.
 case "${1:-}" in
   -*y*)
-    code="${XB_STUB_RUN_EXIT:-$code}"
+    code="${XB_STUB_REMOVE_RUN_EXIT-${XB_STUB_RUN_EXIT:-$code}}"
     # A successful real run flips the fixture to its after state so the
     # history snapshot sees the change; a failed run leaves it alone.
     [ "$code" = 0 ] && [ -n "${XB_STUB_AFTER_MARK:-}" ] && : > "$XB_STUB_AFTER_MARK" ;;

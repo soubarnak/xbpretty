@@ -103,6 +103,13 @@ type summaryScreenPolicy struct {
 // maybeRunSummaryScreen opens S1 when every gate and the entry floor pass. It
 // returns the outcome; the caller keeps the text path when it is unavailable.
 func (st *state) maybeRunSummaryScreen(opts *options, cmd string, rows []xbps.Row) (screenOutcome, int) {
+	return st.maybeRunSummaryScreenTitled(opts, cmd, cmd, rows)
+}
+
+// maybeRunSummaryScreenTitled is the replay form: labelCmd selects the
+// remove-family section label while titleCmd selects the operation-derived
+// title, so a forced undo still reads "xbpretty Undo" with a Purge section.
+func (st *state) maybeRunSummaryScreenTitled(opts *options, labelCmd, titleCmd string, rows []xbps.Row) (screenOutcome, int) {
 	if !summaryScreenAllowed(st.gateFor(opts, rows)) {
 		return screenUnavailable, -1
 	}
@@ -115,7 +122,7 @@ func (st *state) maybeRunSummaryScreen(opts *options, cmd string, rows []xbps.Ro
 	if w, h, err := term.Size(out); err != nil || w < 60 || h < 18 {
 		return screenUnavailable, -1
 	}
-	return st.runSummaryScreen(out, st.planToTui(cmd, rows))
+	return st.runSummaryScreen(out, st.planToTuiTitled(labelCmd, titleCmd, rows))
 }
 
 // runSummaryScreen owns the S1 loop: enter, draw, key/resize/signal handling,
@@ -383,17 +390,29 @@ func infoVersionIsAvailable(label string) bool {
 // planToTui converts the grouping and lookups the text summary already needs
 // into the S1 model. #77 reuses the renderer with History = true.
 func (st *state) planToTui(cmd string, rows []xbps.Row) *tui.SummaryModel {
-	return tuiModelFromSummary(st.planToSummary(cmd, rows), cmd, st.unit)
+	return st.planToTuiTitled(cmd, cmd, rows)
+}
+
+// planToTuiTitled lets the remove label and the title come from different
+// commands; the ordinary transactions use the same command for both.
+func (st *state) planToTuiTitled(labelCmd, titleCmd string, rows []xbps.Row) *tui.SummaryModel {
+	return tuiModelFromSummaryTitled(st.planToSummary(labelCmd, rows), labelCmd, titleCmd, st.unit)
 }
 
 // tuiModelFromSummary is the testable conversion; planToTui is the state-bound
 // wrapper that also performs the lookups.
 func tuiModelFromSummary(sum *summary.Summary, command string, unit summary.SizeUnit) *tui.SummaryModel {
+	return tuiModelFromSummaryTitled(sum, command, command, unit)
+}
+
+// tuiModelFromSummaryTitled builds the model with independent section-label
+// and title commands.
+func tuiModelFromSummaryTitled(sum *summary.Summary, labelCmd, titleCmd string, unit summary.SizeUnit) *tui.SummaryModel {
 	model := &tui.SummaryModel{
-		Title: "xbpretty " + screenTitle(command),
-		Help:  screenHelp(command),
+		Title: "xbpretty " + screenTitle(titleCmd),
+		Help:  screenHelp(titleCmd),
 	}
-	for _, sec := range screenSections(sum, command) {
+	for _, sec := range screenSections(sum, labelCmd) {
 		if len(sec.rows) == 0 {
 			continue
 		}

@@ -170,9 +170,9 @@ for __xbpretty_cmd in xbpretty xbp xbp-install xbp-remove xbp-upgrade xbp-autore
     complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) list search' -s V -l virtual -d 'list virtual packages'
     complete -c $__xbpretty_cmd -n 'test (__xbpretty_verb) = fetch' -s c -l country -x -d 'restrict mirrors to a country or region (repeatable)'
     complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade fetch' -l dry-run -d 'show the plan without changing anything'
-    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -s y -l yes -d 'answer yes and skip the prompt'
-    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l assume-yes
-    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -s n -l assume-no -d 'refuse at the prompt'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade undo redo' -s y -l yes -d 'answer yes and skip the prompt'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade undo redo' -l assume-yes
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade undo redo' -s n -l assume-no -d 'refuse at the prompt'
     complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -s d -l download-only -d 'download the plans archives and stop'
     complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l simple -d 'print the simple summary'
     complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l update -d 'refresh the repository index first'

@@ -234,6 +234,10 @@ func (c Config) ResolveFor(names ...string) error {
 			path = c.Xbps.RemovePath
 		case "query":
 			path = c.Xbps.QueryPath
+		case "rindex":
+			path = c.Xbps.RindexPath
+		case "pkgdb":
+			path = c.Xbps.PkgdbPath
 		default:
 			continue
 		}

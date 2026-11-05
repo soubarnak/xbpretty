@@ -273,17 +273,24 @@ func (s *Store) Clear() (int, error) {
 	if err := s.removeStaleTemps(); err != nil {
 		return 0, err
 	}
+	deleted := 0
+	var failures []error
 	for _, name := range names {
-		if err := os.Remove(s.path(name)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return 0, fmt.Errorf("removing history entry %s: %w", s.path(name), err)
+		if err := os.Remove(s.path(name)); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			failures = append(failures, fmt.Errorf("removing history entry %s: %w", s.path(name), err))
+			continue
 		}
+		deleted++
 	}
-	if len(names) > 0 {
+	if deleted > 0 {
 		if err := syncDir(s.dir); err != nil {
-			return 0, err
+			failures = append(failures, err)
 		}
 	}
-	return len(names), nil
+	return deleted, errors.Join(failures...)
 }
 
 // readFile parses one entry file and validates the schema contract. Only a
@@ -332,6 +339,21 @@ var validOperations = func() map[string]bool {
 	return set
 }()
 
+// ValidPackageField reports whether a recorded name, arch or version can
+// safely become part of a cache filename or an xbps argv without escaping the
+// directory or being read as a flag. It rejects path separators, NUL and `..`;
+// callers additionally require a non-empty name that does not start with `-`
+// or `.`.
+func ValidPackageField(value string) bool {
+	return !strings.ContainsAny(value, "/\\\x00") && !strings.Contains(value, "..")
+}
+
+// ValidPackageName is ValidPackageField plus the non-empty, non-flag,
+// non-hidden-name rule the replay argv and cache path require.
+func ValidPackageName(value string) bool {
+	return value != "" && value[0] != '-' && value[0] != '.' && ValidPackageField(value)
+}
+
 // validateEntry enforces the required schema-1 fields the read surface uses.
 // Timestamps are deliberately not validated: FR-032 shows an unparseable one
 // verbatim.
@@ -354,6 +376,20 @@ func validateEntry(path string, entry Entry) error {
 	for i, transition := range entry.Packages {
 		if transition.Name == "" {
 			return fmt.Errorf("history entry %s: packages[%d] has no name", path, i)
+		}
+		if !ValidPackageName(transition.Name) {
+			return fmt.Errorf("history entry %s: packages[%d] has invalid name %q", path, i, transition.Name)
+		}
+		if transition.Arch != "" && !ValidPackageField(transition.Arch) {
+			return fmt.Errorf("history entry %s: packages[%d] has invalid arch %q", path, i, transition.Arch)
+		}
+		for _, state := range []*PackageState{transition.Before, transition.After} {
+			if state == nil || state.Version == nil {
+				continue
+			}
+			if !ValidPackageField(*state.Version) {
+				return fmt.Errorf("history entry %s: packages[%d] has invalid version %q", path, i, *state.Version)
+			}
 		}
 		if !validOperations[transition.Operation] {
 			return fmt.Errorf("history entry %s: packages[%d] has invalid operation %q", path, i, transition.Operation)
