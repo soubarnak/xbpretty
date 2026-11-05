@@ -113,14 +113,6 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		}
 		return exitUsage
 	}
-	// FR-018 points --print-uris at §3.3.7, which #71 owns. Until it lands the
-	// flag must be refused before config resolution, any child and any
-	// prompt, so it can never fall through to a real transaction.
-	if opts.printURIs {
-		fmt.Fprintln(err, "xbpretty: --print-uris is not implemented in this build")
-		return exitRuntime
-	}
-
 	st := &state{stdout: newResilientWriter(out), stderr: err, stdin: in}
 
 	// moo is hidden and never touches config or xbps.
@@ -229,8 +221,7 @@ func (st *state) dispatch(opts *options) int {
 	case "fetch":
 		return st.runFetch(opts)
 	case "download":
-		// TODO(#72): the download command's archive fetch belongs to #72.
-		return st.runUnimplemented(opts.command, opts)
+		return st.runDownload(opts)
 	case "clean":
 		// TODO(#64): cache and repodata cleaning belongs to #64.
 		return st.runUnimplemented(opts.command, opts)

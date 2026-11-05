@@ -22,6 +22,9 @@ case "$*" in
   *"-X"*)
     printf '%s' "${XB_STUB_REVDEPS:-}"
     exit 0 ;;
+  *"-R -s  -p filename-sha256"*)
+    printf '%s' "${XB_STUB_HASHES:-}"
+    exit 0 ;;
   *"-R -s  -p architecture"*)
     printf '%s' "${XB_STUB_ARCH:-}"
     exit 0 ;;
@@ -49,6 +52,14 @@ case "$*" in
   *"--repository"*"-S "*)
     printf '%s' "${XB_STUB_SHOW_REPO:-}"
     exit "${XB_STUB_SHOW_REPO_EXIT:-0}" ;;
+  *"-R -S "*"-p pkgver,repository,architecture,filename-sha256"*)
+    # FR-037's per-name resolution: the name is $3; XB_STUB_MISSING lists the
+    # names no repository knows.
+    case " ${XB_STUB_MISSING:-} " in
+      *" $3 "*) exit 2 ;;
+    esac
+    printf '%s' "${XB_STUB_RESOLVE:-}"
+    exit "${XB_STUB_RESOLVE_EXIT:-0}" ;;
   *"-R -S "*)
     printf '%s' "${XB_STUB_SHOW_REPO:-}"
     exit "${XB_STUB_SHOW_REPO_EXIT:-0}" ;;

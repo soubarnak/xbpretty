@@ -155,6 +155,12 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		return exitRuntime
 	}
 
+	// FR-028: --print-uris stops before the sync step, any summary, prompt or
+	// download. It only needs the config and the plan, and never needs root.
+	if opts.printURIs {
+		return st.runPrintURIs(cmd, opts)
+	}
+
 	// FR-007: --reinstall is guarded before the dry run.
 	if cmd == "install" && opts.reinstall {
 		if code := st.reinstallGuard(opts); code >= 0 {
