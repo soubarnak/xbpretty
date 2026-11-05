@@ -232,7 +232,12 @@ func (st *state) runSummaryScreenPolicy(out *os.File, model *tui.SummaryModel, p
 				case term.KeyEsc, term.KeyCtrlC:
 					return quit()
 				case term.KeyRune:
-					if strings.ContainsRune("qQnN", ev.Key.Rune) {
+					if strings.ContainsRune("qQ", ev.Key.Rune) {
+						return quit()
+					}
+					// n/N refuse S1; the read-only history detail ignores
+					// them even below the floor (FR-069).
+					if policy.Confirm && strings.ContainsRune("nN", ev.Key.Rune) {
 						return quit()
 					}
 				}
@@ -255,7 +260,11 @@ func (st *state) runSummaryScreenPolicy(out *os.File, model *tui.SummaryModel, p
 						info = nil
 						changed = true
 					case 'n', 'N':
-						return quit()
+						// S1 refuses; the read-only detail ignores n/N
+						// (FR-069).
+						if policy.Confirm {
+							return quit()
+						}
 					}
 				}
 				if !changed {
