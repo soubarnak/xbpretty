@@ -113,7 +113,9 @@ in [`docs/config.toml.example`](docs/config.toml.example). Both install under
 
 ### From Source
 
-Requires Go 1.25 or newer:
+Requires Go 1.25. Release builds pin `GOTOOLCHAIN=go1.25.5`: that toolchain
+produces a binary under the 8,000,000-byte budget, while newer toolchains can
+cross it. Do not raise the budget to match a newer compiler.
 
 ```sh
 make build        # Compiles static binary ./xbpretty
@@ -130,7 +132,7 @@ To create convenient symlinks for your user (`xbp`, `xbp-install`, etc.):
 
 ## Usage
 
-One binary, six names. `xbp` is the primary shorthand; the `xbp-*` commands are symlinks that dispatch on `argv[0]`.
+One binary, seven names: the `xbpretty` binary plus six aliases. `xbp` is the primary shorthand; the `xbp-*` commands are symlinks that dispatch on `argv[0]`.
 
 | Command | Wraps | Alias | Description |
 |---|---|---|---|
@@ -246,11 +248,16 @@ source; rev 6 is `0.4.0` and the tag is `xbpretty-v0.4.0`.
 3. Commit and push to `main`.
 4. Push a Git tag matching the version: `git tag xbpretty-v0.4.0 && git push origin xbpretty-v0.4.0`.
 5. The GitHub Actions release workflow gates tests, vet, generated completions
-   and manpages, shell syntax and `mandoc`, then builds all nine architectures
-   with `tools/build-xbps.sh`, enforces the static-link, 8 MB binary and 3.6 MB
-   package budgets, checks the package contents and clean-root install, signs
-   each architecture, and creates the GitHub release from
-   `docs/release-notes-0.4.0.md` with the updated checksum.
+   and manpages, shell syntax, `mandoc`, `shellcheck` and actionlint, then builds
+   all nine architectures with `tools/build-xbps.sh`, enforces the static-link,
+   8 MB binary and 3.6 MB package budgets, checks the package contents and both
+   the unsigned and signed clean-root installs, signs each architecture, and
+   creates the GitHub release from `docs/release-notes-0.4.0.md`.
+6. The workflow's `template` job then commits the release tarball `checksum=`
+   (and the version/revision) back to `main`. Build acceptance with
+   `xbps-src pkg xbpretty` runs from `main` after that checksum bump; the tagged
+   tree itself still carries the previous release's checksum, as xbps-src
+   requires a published tarball hash.
 
 ---
 

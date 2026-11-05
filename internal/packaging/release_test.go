@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -32,6 +33,15 @@ var (
 
 func repoPath(parts ...string) string {
 	return filepath.Join(append([]string{"..", ".."}, parts...)...)
+}
+
+// Release gates build and inspect Linux ELF binaries with POSIX shell tools.
+// Skip elsewhere rather than pretending a macOS/Windows run checked them.
+func requireLinux(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("release gates are Linux-only")
+	}
 }
 
 func aliasTokens(text string) []string {
@@ -116,8 +126,10 @@ func TestVersionIsSingleSourcedFromTheTemplate(t *testing.T) {
 	script := read(t, "tools/build-xbps.sh")
 	for _, want := range []string{
 		`version=$(sed -n 's/^version=//p' "$here/srcpkgs/xbpretty/template")`,
-		`-X $import_path/internal/cli.Version=$version`,
+		`revision=$(sed -n 's/^revision=//p' "$here/srcpkgs/xbpretty/template")`,
+		"-X $import_path/internal/cli.Version=$version",
 		"GOOS=linux CGO_ENABLED=0",
+		"GOTOOLCHAIN=go1.25.5",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("build script is missing %q", want)
@@ -129,10 +141,15 @@ func TestVersionIsSingleSourcedFromTheTemplate(t *testing.T) {
 		`tags: ["xbpretty-v*"]`,
 		`srcpkgs/xbpretty/template`,
 		`[ "${GITHUB_REF_NAME}" = "xbpretty-v${version}" ]`,
+		"GOTOOLCHAIN: go1.25.5",
+		`echo "REVISION=${revision}" >> "$GITHUB_ENV"`,
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Errorf("release workflow is missing %q", want)
 		}
+	}
+	if !strings.Contains(template, "Go 1.25") {
+		t.Error("template does not document the Go 1.25 release-toolchain requirement")
 	}
 
 	spec := read(t, "xbpretty-spec.md")
@@ -175,6 +192,7 @@ func TestNoStaleVersionOnAnyShippedSurface(t *testing.T) {
 }
 
 func TestVersionStampedBinaryPrintsReleaseVersion(t *testing.T) {
+	requireLinux(t)
 	if testing.Short() {
 		t.Skip("builds the release binary")
 	}
@@ -208,12 +226,24 @@ func TestReleaseWorkflowBuildsAndGatesTheNineArchitectures(t *testing.T) {
 		"make release-check",
 		"tools/release-gates.sh binary",
 		"tools/release-gates.sh package",
-		"tools/release-gates.sh contents",
+		"tools/release-gates.sh installed",
 		"tools/release-gates.sh assets",
-		"tools/release-gates.sh snapshot",
+		"tools/snapshotage",
 		"xbps-install",
 		"--rootdir",
 		"XBPS_PRIVKEY: ${{ secrets.XBPS_PRIVKEY }}",
+		"var/db/xbps/keys",
+		"yes |",
+		"python3 -m http.server",
+		"RELEASE_STRICT=1",
+		"actionlint",
+		"shellcheck",
+		"binutils",
+		"python3",
+		"mandoc",
+		"zsh",
+		"fish",
+		"xbpretty-${VERSION}_${REVISION}.x86_64.xbps",
 		"checksum=",
 		"s/^checksum=.*/checksum=${sum}/",
 		"docs/release-notes-${VERSION}.md",
@@ -234,9 +264,26 @@ func TestReleaseWorkflowBuildsAndGatesTheNineArchitectures(t *testing.T) {
 	if scriptArches != "x86_64 x86_64-musl i686 aarch64 aarch64-musl armv7l armv7l-musl armv6l armv6l-musl" {
 		t.Errorf("build script default architecture list = %q, want all nine", scriptArches)
 	}
+	if !strings.Contains(script, `release-gates.sh" contents "$root"`) {
+		t.Error("build script does not gate the package's own staged tree for /etc entries")
+	}
+
+	// Signing must complete before any publish step: the release must never
+	// attach an unsigned package set.
+	signAt := strings.Index(workflow, "Sign each architecture")
+	publishAt := strings.Index(workflow, "Publish release")
+	if signAt < 0 || publishAt < 0 || signAt > publishAt {
+		t.Errorf("signing does not precede publishing (sign=%d publish=%d)", signAt, publishAt)
+	}
 }
 
 func TestReleaseGatesEnforceBudgetsAndStaticLink(t *testing.T) {
+	requireLinux(t)
+	for _, tool := range []string{"file", "readelf"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s is not installed", tool)
+		}
+	}
 	gate := repoPath("tools", "release-gates.sh")
 	big := filepath.Join(t.TempDir(), "xbpretty")
 	if err := os.WriteFile(big, nil, 0o755); err != nil {
@@ -264,8 +311,12 @@ func TestReleaseGatesEnforceBudgetsAndStaticLink(t *testing.T) {
 		t.Errorf("package gate failure does not name the 3,600,000-byte budget:\n%s", out)
 	}
 
-	dynamic := "/bin/sh"
-	if _, err := os.Stat(dynamic); err == nil {
+	// /bin/sh is dynamic on most systems, but not everywhere; only assert the
+	// rejection when `file` actually reports a dynamic ELF.
+	if dynamic := "/bin/sh"; func() bool {
+		out, err := exec.Command("file", "-b", dynamic).Output()
+		return err == nil && strings.Contains(string(out), "dynamically linked")
+	}() {
 		if out, err := runGate(gate, "binary", dynamic); err == nil {
 			t.Errorf("static-link gate accepted dynamically linked %s:\n%s", dynamic, out)
 		}
@@ -277,7 +328,64 @@ func TestReleaseGatesEnforceBudgetsAndStaticLink(t *testing.T) {
 	}
 }
 
+// TestReleaseBinaryMeetsBudgetWithPinnedToolchain builds the actual release
+// binary with the release flags and checks the real 8,000,000-byte/static gate.
+// It uses the same GOTOOLCHAIN pin as tools/build-xbps.sh, so a newer local Go
+// cannot silently pass: the pinned toolchain must be used.
+func TestReleaseBinaryMeetsBudgetWithPinnedToolchain(t *testing.T) {
+	requireLinux(t)
+	if testing.Short() {
+		t.Skip("builds the release binary")
+	}
+	script := read(t, "tools/build-xbps.sh")
+	toolchain := ""
+	for _, line := range strings.Split(script, "\n") {
+		if strings.HasPrefix(line, "GOTOOLCHAIN=") {
+			toolchain = strings.TrimSpace(strings.TrimPrefix(line, "GOTOOLCHAIN="))
+		}
+	}
+	if toolchain == "" {
+		t.Fatal("build script does not pin GOTOOLCHAIN")
+	}
+	bin := filepath.Join(t.TempDir(), "xbpretty")
+	cmd := exec.Command("go", "build", "-trimpath", "-buildvcs=false",
+		"-ldflags", "-s -w -X github.com/soubarnak/xbpretty/internal/cli.Version="+releaseVersion,
+		"-o", bin, "./cmd/xbpretty")
+	cmd.Dir = repoPath()
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOTOOLCHAIN="+toolchain, "GOFLAGS=")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build release binary with %s: %v\n%s", toolchain, err, out)
+	}
+	if out, err := runGate(repoPath("tools", "release-gates.sh"), "binary", bin); err != nil {
+		size, _ := os.Stat(bin)
+		t.Errorf("release binary failed the real gate (%d bytes): %v\n%s", size.Size(), err, out)
+	}
+}
+
+// TestReleasePackageGateOnRealPackage runs xbps-create when the release tooling
+// is available, so the package budget is measured on a real .xbps, not only a
+// truncated fixture.
+func TestReleasePackageGateOnRealPackage(t *testing.T) {
+	requireLinux(t)
+	if _, err := exec.LookPath("xbps-create"); err != nil {
+		t.Skip("xbps-create is not installed")
+	}
+	root := contentFixture(t)
+	dir := t.TempDir()
+	cmd := exec.Command("xbps-create", "-A", "x86_64", "-n", "xbpretty-"+releaseVersion+"_1",
+		"-s", "test package", root)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("xbps-create: %v\n%s", err, out)
+	}
+	pkg := filepath.Join(dir, "xbpretty-"+releaseVersion+"_1.x86_64.xbps")
+	if out, err := runGate(repoPath("tools", "release-gates.sh"), "package", pkg); err != nil {
+		t.Errorf("package gate rejected a real package: %v\n%s", err, out)
+	}
+}
+
 func TestReleaseContentsGateChecksTheInstalledSurface(t *testing.T) {
+	requireLinux(t)
 	gate := repoPath("tools", "release-gates.sh")
 	root := contentFixture(t)
 	if out, err := runGate(gate, "contents", root); err != nil {
@@ -292,27 +400,48 @@ func TestReleaseContentsGateChecksTheInstalledSurface(t *testing.T) {
 		t.Fatalf("contents gate accepted a missing migration guide:\n%s", out)
 	}
 
+	// The package's own tree must contain no /etc entry at all (FR-076), not
+	// just no /etc/xbpretty.
 	withEtc := contentFixture(t)
-	if err := os.MkdirAll(filepath.Join(withEtc, "etc/xbpretty"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(withEtc, "etc/xbps.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(withEtc, "etc/xbps.d/99-test.conf"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := runGate(gate, "contents", withEtc); err == nil {
-		t.Fatalf("contents gate accepted /etc/xbpretty:\n%s", out)
+		t.Fatalf("contents gate accepted a package /etc entry:\n%s", out)
+	}
+	// The merged clean-root tree inherits the base system's /etc, so only
+	// /etc/xbpretty is forbidden there.
+	if out, err := runGate(gate, "installed", withEtc); err != nil {
+		t.Errorf("installed gate rejected a clean-root tree with a dependency /etc: %v\n%s", err, out)
+	}
+	withSystemConfig := contentFixture(t)
+	if err := os.MkdirAll(filepath.Join(withSystemConfig, "etc/xbpretty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runGate(gate, "installed", withSystemConfig); err == nil {
+		t.Fatalf("installed gate accepted /etc/xbpretty:\n%s", out)
 	}
 }
 
-func TestReleaseSnapshotGateRejectsAStaleEmbeddedList(t *testing.T) {
-	gate := repoPath("tools", "release-gates.sh")
-	if out, err := runGate(gate, "snapshot", "2020-01-01", "90"); err == nil {
-		t.Fatalf("snapshot gate accepted a stale list:\n%s", out)
+func TestReleaseSnapshotAgeToolRejectsAStaleEmbeddedList(t *testing.T) {
+	cmd := exec.Command("go", "run", "./tools/snapshotage", "-date", "2020-01-01", "-max-days", "90")
+	cmd.Dir = repoPath()
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("snapshotage accepted a stale list:\n%s", out)
 	}
 	today := time.Now().UTC().Format("2006-01-02")
-	if out, err := runGate(gate, "snapshot", today, "90"); err != nil {
-		t.Errorf("snapshot gate rejected today's date: %v\n%s", err, out)
+	cmd = exec.Command("go", "run", "./tools/snapshotage", "-date", today, "-max-days", "90")
+	cmd.Dir = repoPath()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("snapshotage rejected today's date: %v\n%s", err, out)
 	}
 }
 
 func TestReleaseSigningFailsWithoutKey(t *testing.T) {
+	requireLinux(t)
 	sign := repoPath("tools", "release-sign.sh")
 	cmd := exec.Command("sh", sign, t.TempDir(), releaseVersion)
 	cmd.Env = envWithout("XBPS_PRIVKEY")
@@ -327,6 +456,7 @@ func TestReleaseSigningFailsWithoutKey(t *testing.T) {
 }
 
 func TestReleaseSignsEveryArchitecture(t *testing.T) {
+	requireLinux(t)
 	assets := t.TempDir()
 	archs := strings.Fields("x86_64 x86_64-musl i686 aarch64 aarch64-musl armv7l armv7l-musl armv6l armv6l-musl")
 	for _, arch := range archs {
@@ -389,6 +519,7 @@ func TestReleaseNotesCarryInstallFeaturesAndMigration(t *testing.T) {
 		"releases/latest/download",
 		"sudo xbps-install -S xbpretty",
 		"fa:d1:00:32:ce:b1:b9:fd:73:05:05:76:75:54:37:25",
+		"seven names",
 		"history",
 		"undo",
 		"redo",
@@ -399,6 +530,34 @@ func TestReleaseNotesCarryInstallFeaturesAndMigration(t *testing.T) {
 		if !strings.Contains(notes, want) {
 			t.Errorf("release notes are missing %q", want)
 		}
+	}
+}
+
+// TestSnapshotRefreshCannotDeadlockTheSuite guards the `make mirrors` path:
+// the tests that observe the embedded date must use fetch.SnapshotDate or the
+// date format, never a literal that a refresh would invalidate.
+func TestSnapshotRefreshCannotDeadlockTheSuite(t *testing.T) {
+	for _, path := range []string{
+		"internal/fetch/mirrors_test.go",
+		"internal/cli/fetch_test.go",
+	} {
+		if text := read(t, path); strings.Contains(text, "2026-11-05") {
+			t.Errorf("%s pins the embedded snapshot date; derive it from fetch.SnapshotDate", path)
+		}
+	}
+	spec := read(t, "xbpretty-spec.md")
+	fr043 := ""
+	for _, line := range strings.Split(spec, "\n") {
+		if strings.HasPrefix(line, "| FR-043 |") {
+			fr043 = line
+			break
+		}
+	}
+	if fr043 == "" {
+		t.Fatal("spec has no FR-043 row")
+	}
+	if strings.Contains(fr043, "2026-11-05") {
+		t.Error("FR-043 pins the snapshot date; use the embedded snapshot's date")
 	}
 }
 
@@ -414,7 +573,7 @@ func TestMirrorSnapshotIsDatedAndRefreshable(t *testing.T) {
 		}
 	}
 	workflow := read(t, ".github/workflows/release.yml")
-	if !strings.Contains(workflow, "tools/release-gates.sh snapshot") {
+	if !strings.Contains(workflow, "tools/snapshotage") {
 		t.Error("release workflow does not gate the mirror snapshot age")
 	}
 }

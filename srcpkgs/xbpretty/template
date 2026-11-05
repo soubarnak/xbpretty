@@ -19,6 +19,9 @@ pre_build() {
 	# this, os/user pulls in cgo on a native build.
 	export CGO_ENABLED=0
 	export GOFLAGS="-trimpath -buildvcs=false"
+	# The 8,000,000-byte budget is measured with Go 1.25.x. A newer Go
+	# toolchain can cross it (Go 1.27 builds xbpretty at about 8.4 MB), so
+	# do not raise the budget without a new spec revision.
 }
 
 post_install() {

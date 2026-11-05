@@ -611,7 +611,7 @@ func TestFetchMirrorListFailureFallsBackToSnapshot(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1\n%s", code, errs)
 	}
-	if !strings.Contains(errs, "xbpretty: mirror list unavailable; using the built-in snapshot from 2026-11-05") {
+	if !strings.Contains(errs, "xbpretty: mirror list unavailable; using the built-in snapshot from "+fetch.SnapshotDate) {
 		t.Errorf("missing snapshot warning:\n%s", errs)
 	}
 	if !strings.Contains(errs, "xbpretty: no mirrors match the requested country or region") {

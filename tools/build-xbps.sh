@@ -3,11 +3,21 @@
 # repository. xbpretty is a static Go binary, so there is one package per architecture.
 #   tools/build-xbps.sh [REPO_DIR [ARCH...]]    default: build/repo, every architecture below
 # Install with: sudo xbps-install --repository="$PWD/build/repo" xbpretty
-# Needs go, make, xbps-create and xbps-rindex. The version comes from srcpkgs/xbpretty/template.
+# Needs go, make, file, readelf, xbps-create and xbps-rindex. The version and
+# revision come from srcpkgs/xbpretty/template.
+#
+# The release toolchain is pinned: Go 1.25.5 produces a binary under the
+# 8,000,000-byte budget, while newer toolchains can cross it (Go 1.27 builds
+# xbpretty at about 8.4 MB). Do not raise the budget instead.
 set -eu
+GOTOOLCHAIN=go1.25.5
+export GOTOOLCHAIN
 here=$(cd "$(dirname "$0")/.." && pwd)
 version=$(sed -n 's/^version=//p' "$here/srcpkgs/xbpretty/template")
-revision=${REVISION:-1}
+revision=$(sed -n 's/^revision=//p' "$here/srcpkgs/xbpretty/template")
+revision=${REVISION:-$revision}
+[ -n "$version" ] || { echo "template has no version=" >&2; exit 1; }
+[ -n "$revision" ] || { echo "template has no revision=" >&2; exit 1; }
 repo=${1:-$here/build/repo}
 [ $# -gt 0 ] && shift
 archs=${*:-x86_64 x86_64-musl i686 aarch64 aarch64-musl armv7l armv7l-musl armv6l armv6l-musl}

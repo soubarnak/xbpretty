@@ -47,7 +47,7 @@ release-check: test
 	$(GO) test ./internal/completion -run 'TestShippedScriptsAreCurrent|TestCompletionScriptsPassShellSyntax' -count=1
 	$(GO) test ./internal/manpage -run 'TestGeneratedManpagesAreCurrent|TestAliasMan8LinksResolve|TestManpagesPassMandocLint' -count=1
 	@strict="$${RELEASE_STRICT:-}"; if [ -z "$$strict" ] && [ -n "$${CI:-}" ]; then strict=1; fi; \
-	for tool in bash zsh fish mandoc; do \
+	for tool in bash zsh fish mandoc shellcheck; do \
 		if ! command -v $$tool >/dev/null 2>&1; then \
 			if [ -n "$$strict" ]; then \
 				echo "release-check: required tool $$tool is not installed (RELEASE_STRICT/CI)" >&2; \
@@ -61,6 +61,7 @@ release-check: test
 			zsh) zsh -n completions/_xbpretty ;; \
 			fish) fish -n completions/xbpretty.fish ;; \
 			mandoc) mandoc -T lint man/xbpretty.8 man/xbpretty.conf.5 ;; \
+			shellcheck) shellcheck -s sh tools/*.sh ;; \
 		esac || exit 1; \
 	done
 	$(GO) run ./tools/parity -check

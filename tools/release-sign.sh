@@ -21,6 +21,12 @@ assets=$1
 version=$2
 shift 2
 archs=${*:-"x86_64 x86_64-musl i686 aarch64 aarch64-musl armv7l armv7l-musl armv6l armv6l-musl"}
+here=$(cd "$(dirname "$0")/.." && pwd)
+revision=$(sed -n 's/^revision=//p' "$here/srcpkgs/xbpretty/template")
+[ -n "$revision" ] || {
+	echo "release-sign: template has no revision=" >&2
+	exit 2
+}
 
 [ -d "$assets" ] || {
 	echo "release-sign: $assets is not a directory" >&2
@@ -36,7 +42,7 @@ umask 022
 
 cd "$assets"
 for arch in $archs; do
-	pkg="xbpretty-${version}_1.${arch}.xbps"
+	pkg="xbpretty-${version}_${revision}.${arch}.xbps"
 	[ -f "$pkg" ] || {
 		echo "release-sign: missing $pkg" >&2
 		exit 1

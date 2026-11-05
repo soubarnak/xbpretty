@@ -3,12 +3,14 @@
 #
 #   tools/release-gates.sh binary   PATH      static link + 8,000,000-byte budget
 #   tools/release-gates.sh package  PATH      x86_64 package budget (3,600,000 bytes)
-#   tools/release-gates.sh contents ROOT      installed surface, docs, no /etc/xbpretty
-#   tools/release-gates.sh assets   DIR VERSION  nine packages + signatures + repodata
-#   tools/release-gates.sh snapshot DATE [DAYS]  embedded mirror snapshot age
+#   tools/release-gates.sh contents ROOT      package's own staged tree; rejects any /etc entry
+#   tools/release-gates.sh installed ROOT     merged clean-root tree; rejects /etc/xbpretty
+#   tools/release-gates.sh assets   DIR VERSION [REVISION]
+#                                             nine packages + signatures + repodata
 #
 # The workflow calls each mode; the Go tests call the modes directly with
 # fixtures, so a violated budget or a missing installed file fails the release.
+# Needs `file` and `readelf`; the static-link check fails closed without them.
 set -eu
 
 MAX_BINARY_BYTES=${MAX_BINARY_BYTES:-8000000}
@@ -34,25 +36,19 @@ check_binary() {
 	if [ "$size" -gt "$MAX_BINARY_BYTES" ]; then
 		fail "binary $bin is $size bytes; the budget is $MAX_BINARY_BYTES bytes"
 	fi
-	kind=$(file -b "$bin" 2>/dev/null || true)
+	command -v file >/dev/null 2>&1 || fail "cannot verify static link: file is not installed"
+	command -v readelf >/dev/null 2>&1 || fail "cannot verify static link: readelf is not installed"
+	kind=$(file -b "$bin" 2>/dev/null) || fail "cannot inspect binary $bin with file"
 	case $kind in
 	*ELF*) ;;
 	*) fail "binary $bin is not an ELF executable: $kind" ;;
 	esac
 	case $kind in
-	*dynamically\ linked*)
-		fail "binary $bin is dynamically linked: $kind"
-		;;
-	*statically\ linked*)
-		;;
-	*)
-		# `file` does not always name the link mode. An ELF with an
-		# INTERP program header is dynamic; a static Go binary has none.
-		if command -v readelf >/dev/null 2>&1 && readelf -l "$bin" 2>/dev/null | grep -q 'INTERP'; then
-			fail "binary $bin has a dynamic interpreter"
-		fi
-		;;
+	*dynamically\ linked*) fail "binary $bin is dynamically linked: $kind" ;;
 	esac
+	if readelf -l "$bin" 2>/dev/null | grep -q 'INTERP'; then
+		fail "binary $bin has a dynamic interpreter"
+	fi
 }
 
 check_package() {
@@ -72,9 +68,9 @@ require_link() {
 	[ "$(readlink "$1")" = "$2" ] || fail "symlink $1 points to $(readlink "$1"), want $2"
 }
 
-check_contents() {
+check_surface() {
 	root=$1
-	[ -d "$root" ] || fail "$root is not an installed tree"
+	[ -d "$root" ] || fail "$root is not a tree"
 
 	require_file "$root/usr/bin/xbpretty"
 	for alias in $ALIASES; do
@@ -102,7 +98,22 @@ check_contents() {
 	require_file "$root/usr/share/doc/xbpretty/config.toml.example"
 	require_file "$root/usr/share/doc/xbpretty/migration-rev6.md"
 	require_file "$root/usr/share/licenses/xbpretty/LICENSE"
+}
 
+check_contents() {
+	root=$1
+	check_surface "$root"
+	# The package's own staged tree must contain no /etc entry at all. This is
+	# deliberately stricter than the merged clean-root check below, which sees
+	# the base system's /etc from installed dependencies.
+	if [ -e "$root/etc" ] || [ -L "$root/etc" ]; then
+		fail "the package staged an /etc entry"
+	fi
+}
+
+check_installed() {
+	root=$1
+	check_surface "$root"
 	if [ -e "$root/etc/xbpretty" ] || [ -L "$root/etc/xbpretty" ]; then
 		fail "the package installed /etc/xbpretty"
 	fi
@@ -111,38 +122,24 @@ check_contents() {
 check_assets() {
 	dir=$1
 	version=$2
+	revision=${3:-1}
 	[ -d "$dir" ] || fail "$dir is not a directory"
 	for arch in $ARCHES; do
-		pkg="$dir/xbpretty-${version}_1.${arch}.xbps"
+		pkg="$dir/xbpretty-${version}_${revision}.${arch}.xbps"
 		require_file "$pkg"
 		require_file "$pkg.sig2"
 		require_file "$dir/$arch-repodata"
 	done
 }
 
-check_snapshot() {
-	date=$1
-	max_days=${2:-90}
-	case $date in
-	[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
-	*) fail "invalid snapshot date $date" ;;
-	esac
-	epoch=$(date -u -d "$date" +%s 2>/dev/null) || fail "cannot parse snapshot date $date"
-	now=$(date -u +%s)
-	age_days=$(((now - epoch) / 86400))
-	if [ "$age_days" -gt "$max_days" ]; then
-		fail "mirror snapshot is $age_days days old (limit $max_days); run make mirrors"
-	fi
-}
-
-[ $# -gt 0 ] || fail "usage: release-gates.sh binary|package|contents|assets|snapshot ..."
+[ $# -gt 0 ] || fail "usage: release-gates.sh binary|package|contents|installed|assets ..."
 mode=$1
 shift
 case $mode in
 binary) [ $# -eq 1 ] || fail "binary needs one path"; check_binary "$1" ;;
 package) [ $# -eq 1 ] || fail "package needs one path"; check_package "$1" ;;
 contents) [ $# -eq 1 ] || fail "contents needs one root"; check_contents "$1" ;;
-assets) [ $# -eq 2 ] || fail "assets needs a directory and a version"; check_assets "$1" "$2" ;;
-snapshot) [ $# -ge 1 ] && [ $# -le 2 ] || fail "snapshot needs a date and optional days"; check_snapshot "$@" ;;
+installed) [ $# -eq 1 ] || fail "installed needs one root"; check_installed "$1" ;;
+assets) [ $# -ge 2 ] && [ $# -le 3 ] || fail "assets needs a directory, version and optional revision"; check_assets "$@" ;;
 *) fail "unknown mode $mode" ;;
 esac

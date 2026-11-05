@@ -39,8 +39,9 @@ Do not accept a different fingerprint. Later updates arrive through
 - **Two-layer configuration** — the optional administrator-created
   `/etc/xbpretty/config.toml` is read before the user layer; the package itself
   installs no `/etc` file.
-- **One binary, six names** — `xbpretty`, `xbp`, `xbp-install`, `xbp-remove`,
-  `xbp-upgrade`, `xbp-autoremove` and `xbp-update`.
+- **One binary, seven names** — `xbpretty` plus the six aliases `xbp`,
+  `xbp-install`, `xbp-remove`, `xbp-upgrade`, `xbp-autoremove` and
+  `xbp-update`.
 - **Signed packages for nine architectures** — `x86_64`, `x86_64-musl`, `i686`,
   `aarch64`, `aarch64-musl`, `armv7l`, `armv7l-musl`, `armv6l` and
   `armv6l-musl`.

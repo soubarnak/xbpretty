@@ -58,8 +58,10 @@ type errReader struct{}
 func (errReader) Read([]byte) (int, error) { return 0, context.Canceled }
 
 func TestSnapshotHas33RowsAndDate(t *testing.T) {
-	if fetch.SnapshotDate != "2026-11-05" {
-		t.Errorf("SnapshotDate = %q, want 2026-11-05", fetch.SnapshotDate)
+	// The date moves with `make mirrors`; assert the embedded format rather
+	// than a literal so a refresh cannot deadlock the suite after 90 days.
+	if _, err := time.Parse("2006-01-02", fetch.SnapshotDate); err != nil {
+		t.Errorf("SnapshotDate = %q, want a YYYY-MM-DD date: %v", fetch.SnapshotDate, err)
 	}
 	mirrors, err := fetch.Snapshot()
 	if err != nil {

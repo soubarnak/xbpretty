@@ -15,6 +15,7 @@ permissions:
 env:
   CGO_ENABLED: "0"
   GOFLAGS: "-trimpath -buildvcs=false"
+  GOTOOLCHAIN: go1.25.5
   ARCHES: x86_64 x86_64-musl i686 aarch64 aarch64-musl armv7l armv7l-musl armv6l armv6l-musl
   MAX_BINARY_BYTES: "8000000"
   MAX_PACKAGE_BYTES: "3600000"
@@ -27,7 +28,7 @@ jobs:
       - name: Install build tools
         run: |
           xbps-install -Syu xbps
-          xbps-install -Sy go bash make git shadow util-linux github-cli file mandoc zsh fish shellcheck
+          xbps-install -Sy go bash make git shadow util-linux github-cli file binutils mandoc zsh fish shellcheck python3
       - uses: actions/checkout@v4
       - name: Check tag against the template identity
         run: |
@@ -41,39 +42,45 @@ jobs:
           [ -f "docs/release-notes-${version}.md" ] || {
             echo "missing release notes docs/release-notes-${version}.md" >&2; exit 1; }
           echo "VERSION=${version}" >> "$GITHUB_ENV"
+          echo "REVISION=${revision}" >> "$GITHUB_ENV"
+      - name: Gate - actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/release.yml
       - name: Gate - mirror snapshot age
         run: |
           snapshot_date=$(sed -n 's/^const SnapshotDate = "\(.*\)"/\1/p' internal/fetch/snapshot.go)
-          tools/release-gates.sh snapshot "$snapshot_date" 90
+          go run ./tools/snapshotage -date "$snapshot_date" -max-days 90
       - name: Create unprivileged builder
         run: |
           useradd -m builder
-          mkdir -p "$RUNNER_TEMP/repo"
+          mkdir -p "$RUNNER_TEMP/repo" "$RUNNER_TEMP/assets"
           chown -R builder "$GITHUB_WORKSPACE" "$RUNNER_TEMP/repo"
       - name: Gate - go test and go vet
         run: |
           su builder -s /bin/sh -c "cd '$GITHUB_WORKSPACE' && CGO_ENABLED=0 go test ./... -count=1 && go vet ./..."
-      - name: Gate - completions, manpages, shell syntax and mandoc
+      - name: Gate - completions, manpages, shell syntax, mandoc and shellcheck
         run: |
           su builder -s /bin/sh -c "cd '$GITHUB_WORKSPACE' && RELEASE_STRICT=1 make release-check"
       - name: Build all nine architectures
         run: |
+          # shellcheck disable=SC2086 # the architecture list is intentionally word-split
           su builder -s /bin/sh -c "cd '$GITHUB_WORKSPACE' && tools/build-xbps.sh '$RUNNER_TEMP/repo' $ARCHES"
       - name: Collect release assets
         run: |
-          mkdir -p "$RUNNER_TEMP/assets"
-          cp "$RUNNER_TEMP"/repo/xbpretty-"${VERSION}"_1.*.xbps "$RUNNER_TEMP/assets/"
-          tools/release-gates.sh package "$RUNNER_TEMP/assets/xbpretty-${VERSION}_1.x86_64.xbps"
-      - name: Gate - clean-root install and package contents
+          cp "$RUNNER_TEMP"/repo/xbpretty-"${VERSION}"_"${REVISION}".*.xbps "$RUNNER_TEMP/assets/"
+          tools/release-gates.sh package "$RUNNER_TEMP/assets/xbpretty-${VERSION}_${REVISION}.x86_64.xbps"
+      - name: Gate - unsigned local-repo clean-root install and package contents
         run: |
           root="$RUNNER_TEMP/clean-root"
-          mkdir -p "$root"
-          XBPS_ARCH=x86_64 xbps-install --rootdir="$root" -S -y \
+          mkdir -p "$root/var/db/xbps/keys"
+          if ls /var/db/xbps/keys/*.plist >/dev/null 2>&1; then
+            cp /var/db/xbps/keys/*.plist "$root/var/db/xbps/keys/"
+          fi
+          yes | env XBPS_ARCH=x86_64 xbps-install --rootdir="$root" -S -y \
             --repository="$RUNNER_TEMP/repo" \
             --repository="https://repo-default.voidlinux.org/current" \
             xbpretty
           tools/release-gates.sh binary "$root/usr/bin/xbpretty"
-          tools/release-gates.sh contents "$root"
+          tools/release-gates.sh installed "$root"
           version_line=$("$root/usr/bin/xbpretty" --version | head -n 1)
           [ "$version_line" = "xbpretty ${VERSION}" ] || {
             echo "clean-root --version = $version_line, want xbpretty ${VERSION}" >&2; exit 1; }
@@ -81,8 +88,29 @@ jobs:
         env:
           XBPS_PRIVKEY: ${{ secrets.XBPS_PRIVKEY }}
         run: |
+          # shellcheck disable=SC2086 # the architecture list is intentionally word-split
           tools/release-sign.sh "$RUNNER_TEMP/assets" "$VERSION" $ARCHES
-          tools/release-gates.sh assets "$RUNNER_TEMP/assets" "$VERSION"
+          tools/release-gates.sh assets "$RUNNER_TEMP/assets" "$VERSION" "$REVISION"
+      - name: Gate - signed HTTP repository clean-root install
+        run: |
+          root="$RUNNER_TEMP/signed-root"
+          mkdir -p "$root/var/db/xbps/keys"
+          if ls /var/db/xbps/keys/*.plist >/dev/null 2>&1; then
+            cp /var/db/xbps/keys/*.plist "$root/var/db/xbps/keys/"
+          fi
+          python3 -m http.server 8765 --directory "$RUNNER_TEMP/assets" &
+          server_pid=$!
+          trap 'kill "$server_pid"' EXIT
+          sleep 1
+          yes | env XBPS_ARCH=x86_64 xbps-install --rootdir="$root" -S -y \
+            --repository="http://127.0.0.1:8765" \
+            --repository="https://repo-default.voidlinux.org/current" \
+            xbpretty
+          tools/release-gates.sh binary "$root/usr/bin/xbpretty"
+          tools/release-gates.sh installed "$root"
+          version_line=$("$root/usr/bin/xbpretty" --version | head -n 1)
+          [ "$version_line" = "xbpretty ${VERSION}" ] || {
+            echo "signed clean-root --version = $version_line, want xbpretty ${VERSION}" >&2; exit 1; }
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}

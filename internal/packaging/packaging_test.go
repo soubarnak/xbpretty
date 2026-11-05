@@ -222,6 +222,7 @@ func TestMakefileExposesGenerationAndReleaseChecks(t *testing.T) {
 		"fish -n completions/xbpretty.fish",
 		"RELEASE_STRICT",
 		"skipped",
+		"shellcheck -s sh tools/*.sh",
 	} {
 		if !strings.Contains(makefile, want) {
 			t.Errorf("Makefile is missing %q", want)
