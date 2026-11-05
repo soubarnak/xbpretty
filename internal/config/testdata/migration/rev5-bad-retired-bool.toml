@@ -1,0 +1,2 @@
+# verbose is a rev-5 boolean: a string that is not true/false is a config error.
+verbose = "maybe"

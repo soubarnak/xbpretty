@@ -11,22 +11,26 @@ import (
 
 const legacyRemovedNote = "(legacy keys are removed in rev 7)"
 
-// legacySpec is one rev-5 key's disposition.
+// legacySpec is one rev-5 key's disposition. table and key name the canonical
+// key a mapped alias writes, so a canonical key in the same file can win with
+// the "is ignored" warning variant.
 type legacySpec struct {
 	target         string
+	table          string
+	key            string
 	retiredMessage string
 }
 
 // legacyKeys is the closed set of rev-5 flat keys. The order of this map does
 // not matter: warnings follow the file's own order.
 var legacyKeys = map[string]legacySpec{
-	"assume_yes":        {target: "[Nala] assume_yes"},
-	"sync":              {target: "[Nala] auto_update"},
-	"log":               {target: "[Xbps] transaction_log"},
-	"xbps_install_path": {target: "[Xbps] install_path"},
-	"xbps_remove_path":  {target: "[Xbps] remove_path"},
-	"xbps_query_path":   {target: "[Xbps] query_path"},
-	"color":             {target: "[Color] mode"},
+	"assume_yes":        {target: "[Nala] assume_yes", table: "Nala", key: "assume_yes"},
+	"sync":              {target: "[Nala] auto_update", table: "Nala", key: "auto_update"},
+	"log":               {target: "[Xbps] transaction_log", table: "Xbps", key: "transaction_log"},
+	"xbps_install_path": {target: "[Xbps] install_path", table: "Xbps", key: "install_path"},
+	"xbps_remove_path":  {target: "[Xbps] remove_path", table: "Xbps", key: "remove_path"},
+	"xbps_query_path":   {target: "[Xbps] query_path", table: "Xbps", key: "query_path"},
+	"color":             {target: "[Color] mode", table: "Color", key: "mode"},
 	"verbose":           {retiredMessage: "key 'verbose' is retired; pass -v on the command line"},
 	"box_style":         {retiredMessage: "key 'box_style' is retired and has no effect"},
 	"progress_bar":      {retiredMessage: `key 'progress_bar' is retired; use [Ui] mode = "Plain"`},
@@ -62,20 +66,25 @@ func canonicalKeyInTable(table, key string) bool {
 }
 
 // LegacyHit records one rev-5 key for warnings and --debug reporting.
+// Ignored means a canonical key in the same file sets the same target, so the
+// "is ignored" warning variant applies instead of the deprecation line.
 type LegacyHit struct {
 	Path    string
 	Line    int
 	Key     string
 	Target  string
 	Retired bool
+	Ignored bool
 }
 
-// warning is the exact per-key deprecation line body (FR-056).
+// warning is the exact per-key line body (FR-056).
 func (h LegacyHit) warning() Warning {
-	spec := legacyKeys[h.Key]
-	message := spec.retiredMessage
-	if !h.Retired {
-		message = fmt.Sprintf("key '%s' is deprecated; use %s %s", h.Key, spec.target, legacyRemovedNote)
+	message := legacyKeys[h.Key].retiredMessage
+	switch {
+	case h.Ignored:
+		message = fmt.Sprintf("key '%s' is ignored; %s is set", h.Key, h.Target)
+	case !h.Retired:
+		message = fmt.Sprintf("key '%s' is deprecated; use %s %s", h.Key, h.Target, legacyRemovedNote)
 	}
 	return Warning{Path: h.Path, Line: h.Line, Message: message}
 }
@@ -83,23 +92,43 @@ func (h LegacyHit) warning() Warning {
 // debugLine is the extra --debug line for one legacy key (FR-058).
 func (h LegacyHit) debugLine() string {
 	where := fmt.Sprintf("legacy key '%s' at %s:%d -> ", h.Key, h.Path, h.Line)
-	if h.Retired {
+	switch {
+	case h.Retired:
 		return where + "retired"
+	case h.Ignored:
+		return where + h.Target + " (ignored)"
 	}
-	return where + legacyKeys[h.Key].target
+	return where + h.Target
 }
 
 // applyLegacy maps one top-level rev-5 key. Unknown top-level keys stay hard
 // errors, exactly as they are for rev-6 files.
-func applyLegacy(p *partialConfig, entry tomlEntry) (LegacyHit, error) {
+func applyLegacy(p *partialConfig, entry tomlEntry, ignored bool) (LegacyHit, error) {
 	spec, ok := legacyKeys[entry.key]
 	if !ok {
 		return LegacyHit{}, &Error{Line: entry.line, Message: fmt.Sprintf(
 			"unknown key %q; configuration keys belong in a table", entry.key)}
 	}
-	hit := LegacyHit{Line: entry.line, Key: entry.key, Target: spec.target, Retired: spec.retiredMessage != ""}
+	hit := LegacyHit{
+		Line:    entry.line,
+		Key:     entry.key,
+		Target:  spec.target,
+		Retired: spec.retiredMessage != "",
+		Ignored: ignored,
+	}
 	if hit.Retired {
-		// Retired keys have no effect; any TOML value they carried is ignored.
+		// Retired keys have no effect, but their rev-5 type is still checked:
+		// a bool for verbose/progress_bar and a string for box_style.
+		switch entry.key {
+		case "verbose", "progress_bar":
+			if _, err := legacyBool(entry); err != nil {
+				return hit, err
+			}
+		case "box_style":
+			if _, err := legacyString(entry); err != nil {
+				return hit, err
+			}
+		}
 		return hit, nil
 	}
 
@@ -127,7 +156,7 @@ func applyLegacy(p *partialConfig, entry tomlEntry) (LegacyHit, error) {
 		if err != nil {
 			return hit, err
 		}
-		switch strings.ToLower(value) {
+		switch value {
 		case "auto":
 			p.colorMode.assign(ColorAuto)
 		case "always":
@@ -175,7 +204,9 @@ func legacyBool(entry tomlEntry) (bool, error) {
 	case tomlBool:
 		return entry.value.boolean, nil
 	case tomlString, tomlBare:
-		switch strings.ToLower(strings.TrimSpace(entry.value.str)) {
+		// Rev 5 accepted these two spellings exactly; no case or whitespace
+		// leniency is part of the shim.
+		switch entry.value.str {
 		case "true":
 			return true, nil
 		case "false":

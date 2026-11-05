@@ -48,9 +48,38 @@ func TestResolveSettingsPrecedence(t *testing.T) {
 				historyDir: defaultHistoryDir},
 		},
 		{
-			name: "no-color beats an explicit color",
-			argv: []string{"--color=always", "--no-color", "install"},
-			want: settings{mode: config.ModeAuto, unit: config.UnitBinary, color: config.ColorNever,
+			name:  "-y overrides assume_yes = false",
+			argv:  []string{"-y", "install"},
+			alter: func(c *config.Config) { c.Nala.AssumeYes = false },
+			want: settings{mode: config.ModeAuto, unit: config.UnitBinary, color: config.ColorAuto,
+				assumeYes: true, autoRemove: true, sync: true, log: true, historyDir: defaultHistoryDir},
+		},
+		{
+			name:  "--update overrides auto_update = false",
+			argv:  []string{"--update", "install"},
+			alter: func(c *config.Config) { c.Nala.AutoUpdate = false },
+			want: settings{mode: config.ModeAuto, unit: config.UnitBinary, color: config.ColorAuto,
+				autoRemove: true, sync: true, log: true, historyDir: defaultHistoryDir},
+		},
+		{
+			name:  "--simple enables the file's false",
+			argv:  []string{"--simple", "install"},
+			alter: func(c *config.Config) { c.Nala.Simple = false },
+			want: settings{mode: config.ModeAuto, unit: config.UnitBinary, color: config.ColorAuto,
+				autoRemove: true, sync: true, simple: true, log: true, historyDir: defaultHistoryDir},
+		},
+		{
+			name:  "--auto-remove overrides auto_remove = false",
+			argv:  []string{"--auto-remove", "install"},
+			alter: func(c *config.Config) { c.Nala.AutoRemove = false },
+			want: settings{mode: config.ModeAuto, unit: config.UnitBinary, color: config.ColorAuto,
+				autoRemove: true, sync: true, log: true, historyDir: defaultHistoryDir},
+		},
+		{
+			name:  "--no-tui leaves Auto alone",
+			argv:  []string{"--no-tui", "install"},
+			alter: func(c *config.Config) { c.Ui.Mode = config.ModeAuto },
+			want: settings{mode: config.ModeAuto, unit: config.UnitBinary, color: config.ColorAuto,
 				autoRemove: true, sync: true, log: true, historyDir: defaultHistoryDir},
 		},
 		{
@@ -114,5 +143,13 @@ func TestHistoryDirPrecedence(t *testing.T) {
 	}
 	if got := resolveSettings(cfg, opts).historyDir; got != "/cli/history" {
 		t.Errorf("CLI history dir = %q", got)
+	}
+}
+
+// TestColorAndNoColorConflict pins FR-003: both explicit colour flags are a
+// usage error, not a precedence question.
+func TestColorAndNoColorConflict(t *testing.T) {
+	if _, err := parseArgs([]string{"--color=always", "--no-color", "install"}, ""); err == nil {
+		t.Fatal("--color and --no-color were accepted together")
 	}
 }

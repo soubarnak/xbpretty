@@ -11,7 +11,17 @@ import (
 	"time"
 )
 
+// isolateSystemConfig points the system layer at an absent temp file so a
+// developer's real /etc/xbpretty/config.toml cannot change a unit test.
+func isolateSystemConfig(t *testing.T) {
+	t.Helper()
+	orig := systemConfigPath
+	systemConfigPath = filepath.Join(t.TempDir(), "system-absent.toml")
+	t.Cleanup(func() { systemConfigPath = orig })
+}
+
 func TestLoadMissingFileIsSilent(t *testing.T) {
+	isolateSystemConfig(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	cfg, err := Load()
 	if err != nil {
@@ -23,6 +33,7 @@ func TestLoadMissingFileIsSilent(t *testing.T) {
 }
 
 func TestLoadReadsFile(t *testing.T) {
+	isolateSystemConfig(t)
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	if err := os.MkdirAll(filepath.Join(dir, "xbpretty"), 0o755); err != nil {
@@ -47,6 +58,7 @@ func TestLoadReadsFile(t *testing.T) {
 // An existing default file that does not validate is a hard error, unlike a
 // missing one (FR-053).
 func TestLoadInvalidExistingFileIsHardError(t *testing.T) {
+	isolateSystemConfig(t)
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	if err := os.MkdirAll(filepath.Join(dir, "xbpretty"), 0o755); err != nil {

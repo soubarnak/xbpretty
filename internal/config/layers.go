@@ -203,14 +203,17 @@ func (r Result) DebugLines() []string {
 		lines = append(lines, hit.debugLine())
 	}
 	if len(r.Legacy) > 0 {
-		retired := 0
+		retired, ignored := 0, 0
 		for _, hit := range r.Legacy {
 			if hit.Retired {
 				retired++
 			}
+			if hit.Ignored {
+				ignored++
+			}
 		}
-		lines = append(lines, fmt.Sprintf("legacy keys: %d seen (%d mapped, %d retired)",
-			len(r.Legacy), len(r.Legacy)-retired, retired))
+		lines = append(lines, fmt.Sprintf("legacy keys: %d seen (%d mapped, %d retired, %d ignored)",
+			len(r.Legacy), len(r.Legacy)-retired-ignored, retired, ignored))
 	}
 	lines = append(lines, r.Config.debugLines()...)
 	return lines

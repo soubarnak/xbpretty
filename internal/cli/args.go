@@ -39,6 +39,7 @@ type options struct {
 	assumeNo             bool     // --assume-no
 	historyDir           string   // --history-dir DIR
 	country              []string // fetch's -c/--country
+	countrySpelling      string   // "c" or "country", for the FR-059 diagnostic
 	countryBeforeCommand bool
 	explicit             map[string]bool
 }
@@ -188,6 +189,7 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 					value = argv[i]
 				}
 				o.country = append(o.country, value)
+				o.countrySpelling = "country"
 				if knownCommand == "" && len(rest) == 0 {
 					o.countryBeforeCommand = true
 				}
@@ -227,24 +229,6 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 				return nil, fmt.Errorf("unknown flag --%s", name)
 			}
 		case len(arg) > 1 && arg[0] == '-':
-			// -c is fetch's --country; it is never --config.
-			if arg == "-c" || strings.HasPrefix(arg, "-c=") {
-				value := ""
-				if strings.HasPrefix(arg, "-c=") {
-					value = strings.TrimPrefix(arg, "-c=")
-				} else {
-					if i+1 >= len(argv) {
-						return nil, fmt.Errorf("-c/--country needs a value")
-					}
-					i++
-					value = argv[i]
-				}
-				o.country = append(o.country, value)
-				if knownCommand == "" && len(rest) == 0 {
-					o.countryBeforeCommand = true
-				}
-				continue
-			}
 			// A cluster such as -yn, or a long flag written short (-color=never).
 			if name, value, _ := strings.Cut(strings.TrimPrefix(arg, "-"), "="); name == "color" {
 				if !validColor(value) {
@@ -254,8 +238,10 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 				o.explicit["color"] = true
 				continue
 			}
-			for _, c := range strings.TrimPrefix(arg, "-") {
-				switch c {
+			// -c is fetch's --country; it is never --config.
+			cluster := strings.TrimPrefix(arg, "-")
+			for j := 0; j < len(cluster); j++ {
+				switch cluster[j] {
 				case 'n':
 					o.dryRun = true
 				case 'y':
@@ -266,8 +252,23 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 					o.explicit["verbose"] = true
 				case 'h':
 					o.help = true
+				case 'c':
+					value := strings.TrimPrefix(cluster[j+1:], "=")
+					if value == "" {
+						if i+1 >= len(argv) {
+							return nil, fmt.Errorf("-c/--country needs a value")
+						}
+						i++
+						value = argv[i]
+					}
+					o.country = append(o.country, value)
+					o.countrySpelling = "c"
+					if knownCommand == "" && len(rest) == 0 {
+						o.countryBeforeCommand = true
+					}
+					j = len(cluster)
 				default:
-					return nil, fmt.Errorf("unknown flag -%c", c)
+					return nil, fmt.Errorf("unknown flag -%c", cluster[j])
 				}
 			}
 		default:
@@ -326,8 +327,9 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 
 // checkConflicts enforces the flag pairs FR-003 makes mutually exclusive.
 func (o *options) checkConflicts() error {
-	// FR-057 gives --no-color stronger precedence than --color, so both may
-	// be present; the resolver picks Never.
+	if o.noColor && o.explicit["color"] {
+		return fmt.Errorf("--color and --no-color are mutually exclusive")
+	}
 	if o.explicit["tui"] && o.explicit["no_tui"] {
 		return fmt.Errorf("--tui and --no-tui are mutually exclusive")
 	}
@@ -350,8 +352,12 @@ func (o *options) checkCountry() error {
 		return nil
 	}
 	if o.command != "fetch" || o.countryBeforeCommand {
+		msg := "unknown flag -c"
+		if o.countrySpelling == "country" {
+			msg = "unknown flag --country"
+		}
 		return &usageError{
-			msg:  "unknown flag -c",
+			msg:  msg,
 			hint: "xbpretty: -c is fetch's --country; config is --config",
 		}
 	}
@@ -407,7 +413,7 @@ Flags:
       --no-log      do not append to the transaction log
       --limit N     with log: keep only the last N matching lines
       --color=WHEN  colour the summary: auto, always or never
-      --config FILE read FILE instead of the user config file
+      --config FILE read FILE instead of the system and user config files
       --version     print version information
 
 Arguments after -- are passed to xbps unchanged, in both the dry run and the

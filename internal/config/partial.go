@@ -124,8 +124,11 @@ func (p *partialConfig) pathValues() []pathValue {
 func buildPartial(doc *tomlDoc) (partialConfig, []LegacyHit, error) {
 	p := newPartial()
 	var hits []LegacyHit
+	canonical := canonicalTargets(doc)
 	for _, entry := range doc.top {
-		hit, err := applyLegacy(&p, entry)
+		spec := legacyKeys[entry.key]
+		ignored := spec.table != "" && canonical[spec.table][spec.key]
+		hit, err := applyLegacy(&p, entry, ignored)
 		if err != nil {
 			return p, hits, err
 		}
@@ -138,6 +141,22 @@ func buildPartial(doc *tomlDoc) (partialConfig, []LegacyHit, error) {
 		}
 	}
 	return p, hits, nil
+}
+
+// canonicalTargets records which canonical table/key pairs a document sets, so
+// a legacy alias can warn with the "is ignored" variant when its target is
+// also present in the same file.
+func canonicalTargets(doc *tomlDoc) map[string]map[string]bool {
+	present := map[string]map[string]bool{}
+	for _, table := range doc.tables {
+		if present[table.name] == nil {
+			present[table.name] = map[string]bool{}
+		}
+		for _, entry := range table.entries {
+			present[table.name][entry.key] = true
+		}
+	}
+	return present
 }
 
 func applyTable(p *partialConfig, table tomlTable) error {

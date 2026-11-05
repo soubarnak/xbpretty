@@ -130,7 +130,7 @@ func dryRunArgs(extra ...string) []string {
 }
 
 func TestConfigRelativeXDGFallsBackToHome(t *testing.T) {
-	bin := buildBinary(t)
+	bin := taggedBinary(t)
 	dir := t.TempDir()
 	env := cleanEnv(t, dir).with("XDG_CONFIG_HOME", "relative/config")
 	homeCfg := writeLayer(t, filepath.Join(dir, "home", ".config"), "[Ui]\nunit = \"Decimal\"\n")
@@ -273,7 +273,7 @@ func TestConfigMalformedSystemLayerIsHardError(t *testing.T) {
 }
 
 func TestConfigDebugImpliesVerboseAndDumpsResolvedConfig(t *testing.T) {
-	bin := buildBinary(t)
+	bin := taggedBinary(t)
 	dir := t.TempDir()
 	env := cleanEnv(t, dir)
 	path := writeLayer(t, filepath.Join(dir, "config"), "[Nala]\nassume_yes = true\n\n[Ui]\nmode = \"Plain\"\nunit = \"Decimal\"\n")
@@ -305,6 +305,31 @@ func copyExecutable(t *testing.T, src, dst string) {
 	if err := os.WriteFile(dst, data, 0o755); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// writePoison creates an executable that records being run and exits 42. A
+// configured path pointing at it proves whether the trust gate honoured it.
+func writePoison(t *testing.T, dir string) (path, marker string) {
+	t.Helper()
+	marker = filepath.Join(dir, "poison.marker")
+	path = filepath.Join(dir, "poison-xbps-install")
+	script := "#!/bin/sh\n: > \"$XB_POISON_MARKER\"\nprintf 'poison\\n' >> \"${XB_STUB_LOG:-/dev/null}\"\nexit 42\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path, marker
+}
+
+// trustConfigWithInstall writes a selected config naming one install binary
+// and a non-privileged key the trust gate must still apply.
+func trustConfigWithInstall(t *testing.T, dir, install string) string {
+	t.Helper()
+	path := filepath.Join(dir, "poisoned.toml")
+	body := "[Xbps]\ninstall_path = \"" + install + "\"\n\n[Ui]\nunit = \"Decimal\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func trustFixture(t *testing.T, dir string) (cfgPath string, stubBin string) {
@@ -364,12 +389,20 @@ func TestConfigTrustGateUnderRoot(t *testing.T) {
 	})
 
 	t.Run("user-owned file is ignored", func(t *testing.T) {
-		// The built-in names are found on PATH, so ignoring the configured
-		// path leaves the run working.
-		e := env.without("XBPRETTY_TEST_TRUST_UID").with("PATH", stubDir+":/usr/bin:/bin")
-		out, errs, code := runBinary(t, bin, e, "--config", cfgPath, "install", "-n", "--no-sync", "figlet")
+		// The configured install path is a poison binary; the good stub is on
+		// PATH. If the untrusted key were honoured the marker would appear and
+		// the run would exit 42.
+		poison, marker := writePoison(t, dir)
+		poisonCfg := trustConfigWithInstall(t, dir, poison)
+		e := env.without("XBPRETTY_TEST_TRUST_UID").
+			with("PATH", stubDir+":/usr/bin:/bin").
+			with("XB_POISON_MARKER", marker)
+		out, errs, code := runBinary(t, bin, e, "--config", poisonCfg, "install", "-n", "--no-sync", "figlet")
 		if code != 0 {
 			t.Fatalf("exit = %d, the run did not continue:\n%s", code, errs)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Errorf("the untrusted configured binary was executed")
 		}
 		if !strings.Contains(errs, "ignoring [Xbps] install_path: file is not owned by root or is group/world-writable (uid ") ||
 			!strings.Contains(errs, "mode 0644)") {
@@ -377,6 +410,16 @@ func TestConfigTrustGateUnderRoot(t *testing.T) {
 		}
 		if !strings.Contains(out, "KB") {
 			t.Errorf("non-privileged keys must still apply:\n%s", out)
+		}
+		log, err := os.ReadFile(filepath.Join(dir, "commands.log"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(log), "-n") {
+			t.Errorf("the PATH stub never ran:\n%s", log)
+		}
+		if strings.Contains(string(log), "poison") {
+			t.Errorf("the poison binary ran:\n%s", log)
 		}
 	})
 
@@ -477,5 +520,49 @@ func TestConfigSymlinkIsJudgedOnItsTarget(t *testing.T) {
 	}
 	if strings.Contains(errs, "ignoring [Xbps]") {
 		t.Errorf("the symlink was judged instead of its target:\n%s", errs)
+	}
+}
+
+// TestConfigSudoUserBinaryPathIsIgnored is the real threat case: root reads the
+// invoking user's layer, and a user-owned install_path must never execute.
+func TestConfigSudoUserBinaryPathIsIgnored(t *testing.T) {
+	bin := taggedBinary(t)
+	dir := t.TempDir()
+	stubDir, err := filepath.Abs("../../testdata/stub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	poison, marker := writePoison(t, dir)
+	invokerHome := filepath.Join(dir, "invoker")
+	cfgPath := writeLayer(t, filepath.Join(invokerHome, ".config"),
+		"[Xbps]\ninstall_path = \""+poison+"\"\n\n[Ui]\nunit = \"Decimal\"\n")
+	env := cleanEnv(t, dir).
+		with("XBPRETTY_TEST_EUID", "0").
+		with("XBPRETTY_TEST_SUDO_HOME", invokerHome).
+		with("SUDO_USER", "someone").
+		with("PATH", stubDir+":/usr/bin:/bin").
+		with("XB_POISON_MARKER", marker)
+	out, errs, code := runBinary(t, bin, env, "install", "-n", "--no-sync", "figlet")
+	if code != 0 {
+		t.Fatalf("exit = %d, the run did not continue:\n%s", code, errs)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("a user-owned install_path was executed as the invoking user's layer")
+	}
+	if !strings.Contains(errs, "config "+cfgPath+": ignoring [Xbps] install_path:") {
+		t.Errorf("missing the trust warning for the invoking user's layer:\n%s", errs)
+	}
+	log, err := os.ReadFile(filepath.Join(dir, "commands.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), "poison") {
+		t.Errorf("the user-owned binary ran as root:\n%s", log)
+	}
+	if !strings.Contains(string(log), "-n") {
+		t.Errorf("the PATH stub never ran:\n%s", log)
+	}
+	if !strings.Contains(out, "KB") {
+		t.Errorf("the invoking user's non-privileged keys did not apply:\n%s", out)
 	}
 }

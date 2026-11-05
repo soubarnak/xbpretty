@@ -78,7 +78,7 @@ func TestLegacyAllTenKeysRunWarnAndAreNeverRewritten(t *testing.T) {
 	if got := strings.Count(errs, aggregateRev5Warning); got != 1 {
 		t.Errorf("aggregate warning printed %d times, want once:\n%s", got, errs)
 	}
-	if !strings.Contains(errs, "legacy keys: 10 seen (7 mapped, 3 retired)") {
+	if !strings.Contains(errs, "legacy keys: 10 seen (7 mapped, 3 retired, 0 ignored)") {
 		t.Errorf("missing the legacy summary:\n%s", errs)
 	}
 
@@ -138,11 +138,27 @@ func TestLegacyCanonicalKeyWinsWithinFile(t *testing.T) {
 	if !strings.Contains(errs, "mode=Never") {
 		t.Errorf("the legacy color beat [Color] mode:\n%s", errs)
 	}
-	// The legacy keys still warn even when the canonical key wins.
-	for _, want := range []string{"key 'assume_yes' is deprecated", "key 'color' is deprecated", "key 'box_style' is retired"} {
+	// A canonical key that sets the same target downgrades the legacy line to
+	// the "is ignored" variant; the retired key keeps its retired line.
+	for _, want := range []string{
+		"key 'assume_yes' is ignored; [Nala] assume_yes is set",
+		"key 'color' is ignored; [Color] mode is set",
+		"key 'box_style' is retired and has no effect",
+	} {
 		if !strings.Contains(errs, want) {
 			t.Errorf("mixed file missing %q:\n%s", want, errs)
 		}
+	}
+	for _, unwanted := range []string{"key 'assume_yes' is deprecated", "key 'color' is deprecated"} {
+		if strings.Contains(errs, unwanted) {
+			t.Errorf("mixed file printed the deprecated variant for %q:\n%s", unwanted, errs)
+		}
+	}
+	if !strings.Contains(errs, "legacy keys: 3 seen (0 mapped, 1 retired, 2 ignored)") {
+		t.Errorf("mixed summary does not count ignored keys:\n%s", errs)
+	}
+	if !strings.Contains(errs, "legacy key 'assume_yes' at "+cfgPath+":2 -> [Nala] assume_yes (ignored)") {
+		t.Errorf("debug does not mark the ignored legacy key:\n%s", errs)
 	}
 }
 
@@ -235,5 +251,54 @@ func TestLegacyAggregateWarningPrintsOncePerRun(t *testing.T) {
 	}
 	if strings.Contains(errs, "xbpretty: debug:") {
 		t.Errorf("debug output printed without --debug:\n%s", errs)
+	}
+}
+
+func TestRetiredKeyWrongTypesAreConfigErrors(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	env := cleanEnv(t, dir)
+	tests := []struct {
+		name, fixture, message string
+	}{
+		{"verbose bool", "rev5-bad-retired-bool.toml", "key 'verbose' must be true or false"},
+		{"progress_bar bool", "rev5-bad-retired-progress.toml", "key 'progress_bar' must be true or false"},
+		{"box_style string", "rev5-bad-retired-string.toml", "key 'box_style' must be a string"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, path := migrationFixture(t, tt.fixture)
+			_, errs, code := runBinary(t, bin, env, "--config", path, "log")
+			if code != 2 {
+				t.Fatalf("exit = %d, want 2\n%s", code, errs)
+			}
+			if !strings.Contains(errs, path+":2:") || !strings.Contains(errs, tt.message) {
+				t.Errorf("wrong error for %s:\n%s", tt.name, errs)
+			}
+		})
+	}
+}
+
+func TestLegacyValueShimIsNotBroaderThanRev5(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	env := cleanEnv(t, dir)
+	tests := []struct {
+		name, fixture, message string
+	}{
+		{"capitalised color", "rev5-bad-shim-color.toml", "key 'color' must be auto, always or never"},
+		{"padded boolean", "rev5-bad-shim-bool.toml", "key 'assume_yes' must be true or false"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, path := migrationFixture(t, tt.fixture)
+			_, errs, code := runBinary(t, bin, env, "--config", path, "log")
+			if code != 2 {
+				t.Fatalf("exit = %d, want 2\n%s", code, errs)
+			}
+			if !strings.Contains(errs, tt.message) {
+				t.Errorf("shim accepted a rev-5-impossible value for %s:\n%s", tt.name, errs)
+			}
+		})
 	}
 }
