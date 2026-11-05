@@ -1,0 +1,12 @@
+Remove: 1
+  oldpkg
+Install: 1
+  hello
+Upgrade: 3
+  libssl3t64, nala, vim-runtime
+Held: 1
+  linux-image-6.1.0-40-amd64 (Kept back)
+
+ Total download size: 12 MiB
+ Disk space required: 18 MiB
+

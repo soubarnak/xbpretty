@@ -1,0 +1,1 @@
+[=======================                 ]  57% Last completed: glibc-2.41_1.x86_64.xbps 19.0 MiB/33.0 MiB 5.4 MiB/s | Packages: 43/80
