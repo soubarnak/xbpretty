@@ -8,22 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
-
-// buildTestrootBinary builds the real binary with the xbpretty_testroot hook,
-// so a built-binary test can act as root without running the suite as root
-// (see internal/config/testroot_testhook.go).
-func buildTestrootBinary(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "xbpretty")
-	cmd := exec.Command("go", "build", "-tags", "xbpretty_testroot", "-o", bin, "../../cmd/xbpretty")
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building tagged test binary: %v\n%s", err, out)
-	}
-	return bin
-}
 
 // implicitPlan is an orphan plan in the shape `xbps-remove -n -o` prints.
 const implicitPlan = "cups-2.4.19_1 remove x86_64 https://repo-default.voidlinux.org/current 13764009 5564250\n" +
@@ -33,7 +19,7 @@ const implicitPlan = "cups-2.4.19_1 remove x86_64 https://repo-default.voidlinux
 // stubs, a fake root, and separate fixtures for the install and remove plans.
 func implicitEnv(t *testing.T, extra ...string) (bin string, env map[string]string) {
 	t.Helper()
-	bin = buildTestrootBinary(t)
+	bin = taggedBinary(t)
 	cfgDir, _ := integrationConfig(t, "Never", extra...)
 	logPath := filepath.Join(filepath.Dir(cfgDir), "commands.log")
 	return bin, map[string]string{
@@ -87,7 +73,15 @@ func runPTYBinary(t *testing.T, bin string, env map[string]string, answers strin
 		_, _ = io.WriteString(master, answers)
 	}()
 
-	err = cmd.Wait()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err = <-done:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		<-done
+		t.Fatalf("running %s %v: timed out waiting for the prompt", bin, args)
+	}
 	if err == nil {
 		return 0, stdout.String(), stderr.String()
 	}
@@ -146,8 +140,14 @@ func TestAC013ImplicitAutoremove(t *testing.T) {
 		}
 		wantArgv(t, transactionArgv(t, implicitLog(env)),
 			[]string{"-n figlet", "-y figlet", "-n -o", "-y -o"})
-		if !strings.Contains(out, "cups") || !strings.Contains(out, "Remove") {
+		if !strings.Contains(out, "cups") {
 			t.Errorf("the orphan summary is missing:\n%s", out)
+		}
+		if !strings.Contains(out, "\nAutoRemove\n") {
+			t.Errorf("the implicit orphan summary is not labelled AutoRemove:\n%s", out)
+		}
+		if strings.Contains(out, "\nRemove\n") {
+			t.Errorf("the implicit orphan summary reused the primary command's Remove label:\n%s", out)
 		}
 		if got := promptCount(errs); got != 2 {
 			t.Errorf("prompts = %d, want 2 (primary then orphan)\n%s", got, errs)
@@ -257,12 +257,56 @@ func TestAC013ImplicitAutoremove(t *testing.T) {
 		bin, env := implicitEnv(t)
 		env["XB_STUB_STDOUT"] = removePlanFixture
 		clearLog(t, implicitLog(env))
-		code, _, errs := runPTYBinary(t, bin, env, "y\ny\n", "purge", "wget")
+		code, out, errs := runPTYBinary(t, bin, env, "y\ny\n", "purge", "wget")
 		if code != 0 {
 			t.Fatalf("exit = %d, want 0\n%s", code, errs)
 		}
 		wantArgv(t, transactionArgv(t, implicitLog(env)),
 			[]string{"-n -f wget", "-y -f wget", "-n -o -f", "-y -o -f"})
+		if !strings.Contains(out, "\nAutoPurge\n") {
+			t.Errorf("the implicit orphan summary is not labelled AutoPurge:\n%s", out)
+		}
+	})
+
+	t.Run("remove runs the orphan transaction after success", func(t *testing.T) {
+		bin, env := implicitEnv(t)
+		env["XB_STUB_STDOUT"] = removePlanFixture
+		clearLog(t, implicitLog(env))
+		code, out, errs := runPTYBinary(t, bin, env, "y\ny\n", "remove", "wget")
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0\n%s", code, errs)
+		}
+		wantArgv(t, transactionArgv(t, implicitLog(env)),
+			[]string{"-n wget", "-y wget", "-n -o", "-y -o"})
+		if !strings.Contains(out, "\nAutoRemove\n") {
+			t.Errorf("the implicit orphan summary is not labelled AutoRemove:\n%s", out)
+		}
+	})
+
+	t.Run("remove --purge propagates -f to the orphan transaction", func(t *testing.T) {
+		bin, env := implicitEnv(t)
+		env["XB_STUB_STDOUT"] = removePlanFixture
+		clearLog(t, implicitLog(env))
+		code, out, errs := runPTYBinary(t, bin, env, "y\ny\n", "remove", "--purge", "wget")
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0\n%s", code, errs)
+		}
+		wantArgv(t, transactionArgv(t, implicitLog(env)),
+			[]string{"-n -f wget", "-y -f wget", "-n -o -f", "-y -o -f"})
+		if !strings.Contains(out, "\nAutoPurge\n") {
+			t.Errorf("the implicit orphan summary is not labelled AutoPurge:\n%s", out)
+		}
+	})
+
+	t.Run("install --purge is a no-op and keeps the orphan transaction -o only", func(t *testing.T) {
+		bin, env := implicitEnv(t)
+		clearLog(t, implicitLog(env))
+		code, _, errs := runPTYBinary(t, bin, env, "y\ny\n", "install", "figlet", "--purge")
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0\n%s", code, errs)
+		}
+		wantArgv(t, transactionArgv(t, implicitLog(env)),
+			[]string{"-n figlet", "-y figlet", "-n -o", "-y -o"})
 	})
 
 	t.Run("the upgrade family runs the orphan transaction after success", func(t *testing.T) {
@@ -358,10 +402,12 @@ func TestAC013ImplicitAutoremove(t *testing.T) {
 		wantArgv(t, transactionArgv(t, implicitLog(env)), []string{"-n figlet"})
 	})
 
-	t.Run("download-only never executes the orphan transaction", func(t *testing.T) {
+	t.Run("download-only never plans or executes the orphan transaction", func(t *testing.T) {
 		bin, env := implicitEnv(t)
 		clearLog(t, implicitLog(env))
-		code, _, errs := surfaceRun(t, bin, env, "install", "figlet", "--download-only", "-y")
+		// --auto-remove makes the implicit run eligible even under -y, so
+		// this pins download-only's suppression rather than the -y rule.
+		code, _, errs := surfaceRun(t, bin, env, "install", "figlet", "--download-only", "-y", "--auto-remove")
 		if code != 1 {
 			t.Fatalf("exit = %d, want 1 (the #72 seam)\n%s", code, errs)
 		}
@@ -369,6 +415,9 @@ func TestAC013ImplicitAutoremove(t *testing.T) {
 		for _, c := range calls {
 			if strings.HasPrefix(c, "-y") {
 				t.Errorf("download-only ran a real transaction: %q", c)
+			}
+			if c == "-n -o" {
+				t.Errorf("download-only planned the orphan transaction: %q", calls)
 			}
 		}
 	})
@@ -380,6 +429,56 @@ func TestAC013ImplicitAutoremove(t *testing.T) {
 		code, _, errs := surfaceRun(t, bin, env, "install", "figlet", "-y", "--auto-remove")
 		if code != 9 {
 			t.Errorf("exit = %d, want 9 (the orphan transaction's code)\n%s", code, errs)
+		}
+	})
+
+	// FR-016 limits the implicit transaction to install/remove/purge/upgrade.
+	// These commands must never plan or run it even with --auto-remove.
+	t.Run("update never runs the orphan transaction", func(t *testing.T) {
+		bin, env := implicitEnv(t)
+		clearLog(t, implicitLog(env))
+		code, _, errs := surfaceRun(t, bin, env, "update")
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0\n%s", code, errs)
+		}
+		wantArgv(t, transactionArgv(t, implicitLog(env)), []string{"-S", "-n -u"})
+	})
+
+	t.Run("download never runs the orphan transaction", func(t *testing.T) {
+		bin, env := implicitEnv(t)
+		clearLog(t, implicitLog(env))
+		code, _, errs := surfaceRun(t, bin, env, "download", "figlet")
+		if code != 1 {
+			t.Errorf("exit = %d, want 1 (the #72 seam)\n%s", code, errs)
+		}
+		if calls := stubCalls(t, implicitLog(env)); len(calls) != 0 {
+			t.Errorf("download ran a child: %q", calls)
+		}
+	})
+
+	t.Run("replay verbs never run the orphan transaction", func(t *testing.T) {
+		bin, env := implicitEnv(t)
+		clearLog(t, implicitLog(env))
+		code, _, errs := surfaceRun(t, bin, env, "undo")
+		if code != 1 {
+			t.Errorf("exit = %d, want 1 (#69's unimplemented seam)\n%s", code, errs)
+		}
+		if calls := stubCalls(t, implicitLog(env)); len(calls) != 0 {
+			t.Errorf("undo ran a child: %q", calls)
+		}
+	})
+
+	t.Run("fetch never runs the orphan transaction", func(t *testing.T) {
+		bin, env := implicitEnv(t)
+		clearLog(t, implicitLog(env))
+		// fetch's only deterministic form here is its N/A refusal; either
+		// way it never enters the transaction path.
+		code, _, errs := surfaceRun(t, bin, env, "fetch", "--sources")
+		if code != 2 {
+			t.Errorf("exit = %d, want 2\n%s", code, errs)
+		}
+		if calls := stubCalls(t, implicitLog(env)); len(calls) != 0 {
+			t.Errorf("fetch ran a child: %q", calls)
 		}
 	})
 }

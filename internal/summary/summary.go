@@ -46,6 +46,13 @@ type Summary struct {
 	Remove  []Row
 	Hold    []Row
 
+	// Command is the xbpretty operation that produced the plan (install,
+	// remove, purge, upgrade, autoremove, autopurge). FR-062's Remove family
+	// section label derives from it: an orphan plan from `autoremove` is
+	// AutoRemove, one from `autopurge` is AutoPurge, and a primary `purge`
+	// is Purge.
+	Command string
+
 	// Old maps upgraded package names to their installed version and size.
 	Old map[string]Old
 	// Download is the total bytes the transaction fetches.
@@ -133,6 +140,21 @@ type Counts struct {
 	Install, Upgrade, Remove, Hold int
 }
 
+// removeLabel is FR-062's section label for the Remove family. The plan row
+// action alone cannot tell these apart: xbps reports every removal as
+// `remove`, so the command that asked for it decides the label.
+func (s *Summary) removeLabel() string {
+	switch s.Command {
+	case "autoremove":
+		return "AutoRemove"
+	case "autopurge":
+		return "AutoPurge"
+	case "purge":
+		return "Purge"
+	}
+	return "Remove"
+}
+
 // Counts returns how many packages landed in each group.
 func (s *Summary) Counts() Counts {
 	return Counts{
@@ -195,7 +217,7 @@ func (r Renderer) renderPlain(w io.Writer, s *Summary) error {
 		}
 	}
 	if hasListable(s.Remove) {
-		if err := r.groupPlain(w, "Remove", s.Remove, s); err != nil {
+		if err := r.groupPlain(w, s.removeLabel(), s.Remove, s); err != nil {
 			return err
 		}
 	}
@@ -303,7 +325,7 @@ func (r Renderer) renderBoxes(w io.Writer, s *Summary) error {
 			})
 		}
 		groups = append(groups, groupData{
-			title:     sprintf("Packages To Remove (%d)", len(shown)),
+			title:     sprintf("Packages To %s (%d)", s.removeLabel(), len(shown)),
 			colorCode: redSeq,
 			headers:   []string{"Package", "Version", "Size"},
 			rows:      rows,

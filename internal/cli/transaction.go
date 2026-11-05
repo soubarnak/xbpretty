@@ -173,6 +173,11 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	// FR-008: not-installed remove targets are reported and filtered before
 	// the dry run. Purge and the orphan commands use the same binary but do
 	// not filter their named targets.
+	//
+	// The all-filtered case keeps FR-008's early Nothing to do. and does not
+	// check orphans: the command has no target rather than an empty plan, and
+	// FR-008 places its Nothing to do. before the dry run (and so before
+	// FR-016's implicit-autoremove check).
 	args := opts.args
 	if cmd == "remove" {
 		var code int
@@ -213,7 +218,7 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		return exitNothingToDo
 	}
 
-	if code := st.renderSummary(rows); code >= 0 {
+	if code := st.renderSummary(cmd, rows); code >= 0 {
 		return code
 	}
 
@@ -281,9 +286,12 @@ func commandBinaries(cmd string) []string {
 	return append([]string(nil), c.Binaries...)
 }
 
-// renderSummary draws the read-only summary for a non-empty plan.
-func (st *state) renderSummary(rows []xbps.Row) int {
-	sum := st.planToSummary(rows)
+// renderSummary draws the read-only summary for a non-empty plan. The
+// command, not the rows, supplies FR-062's operation label: an implicit
+// orphan transaction must render as AutoRemove/AutoPurge even though it
+// follows an install or purge.
+func (st *state) renderSummary(cmd string, rows []xbps.Row) int {
+	sum := st.planToSummary(cmd, rows)
 	isPlain := !isTTY(st.stdout)
 	termWidth := terminalWidth(st.stdout)
 	if err := (summary.Renderer{
@@ -553,7 +561,7 @@ func (st *state) planImplicitAutoremove(cmd string, opts *options) ([]xbps.Row, 
 // the orphan plan is the whole run, so its refusal is the normal exit-1
 // refusal and Nothing to do was never printed.
 func (st *state) runOrphanOnly(cmd string, opts *options, rows []xbps.Row) int {
-	if code := st.renderSummary(rows); code >= 0 {
+	if code := st.renderSummary(orphanCommand(cmd, opts), rows); code >= 0 {
 		return code
 	}
 	if allHeld(rows) {
@@ -599,7 +607,7 @@ func (st *state) runImplicitAutoremoveAfterSuccess(cmd string, opts *options) in
 	if len(rows) == 0 {
 		return -1
 	}
-	if code := st.renderSummary(rows); code >= 0 {
+	if code := st.renderSummary(orphanCommand(cmd, opts), rows); code >= 0 {
 		return code
 	}
 	// A hold-only orphan plan changes nothing: the summary is read-only.
@@ -621,23 +629,22 @@ func (st *state) runImplicitAutoremoveAfterSuccess(cmd string, opts *options) in
 	return st.executeOrphan(cmd, opts, rows)
 }
 
-// executeOrphan runs the confirmed orphan transaction and leaves #69's
-// history hook behind a successful commit.
+// executeOrphan runs the confirmed orphan transaction. #69's history entry is
+// begun before the child starts: the transaction is a real one, and #69's
+// finishHistory inside execute publishes the pending entry.
 func (st *state) executeOrphan(cmd string, opts *options, rows []xbps.Row) int {
 	orphan := orphanCommand(cmd, opts)
-	code := st.execute(orphan, st.r.cfg.Xbps.RemovePath, orphanRealArgv(cmd, opts), rows...)
-	if code == 0 {
-		// TODO(#69): append the orphan transaction's history entry here.
-		st.recordImplicitAutoremoveHistory(orphan, rows)
-	}
-	return code
+	st.beginImplicitAutoremoveHistory(orphan, opts, rows)
+	return st.execute(orphan, st.r.cfg.Xbps.RemovePath, orphanRealArgv(cmd, opts), rows...)
 }
 
-// recordImplicitAutoremoveHistory is the #69 seam. The orphan transaction is
-// a real transaction and owes a history entry; #69 owns the store and replay
-// details, so this hook stays empty until then.
-func (st *state) recordImplicitAutoremoveHistory(_ string, _ []xbps.Row) {
-	// TODO(#69): append the orphan transaction's history entry.
+// beginImplicitAutoremoveHistory is the #69 seam, called BEFORE the orphan
+// child runs. #69 fills it with
+// beginHistoryEntry(..., implicit: true, ...) and lets its finishHistory inside
+// execute publish the entry after a successful commit.
+func (st *state) beginImplicitAutoremoveHistory(_ string, _ *options, _ []xbps.Row) {
+	// TODO(#69): beginHistoryEntry(..., implicit: true, ...) for the orphan
+	// transaction before the child starts.
 }
 
 // lookupOld fills in the pre-upgrade version and installed size the summary
@@ -864,8 +871,9 @@ func rebootHint(rows []xbps.Row) string {
 }
 
 // planToSummary converts parsed rows into a summary, looking up the old
-// versions and hold state the summary needs.
-func (st *state) planToSummary(rows []xbps.Row) *summary.Summary {
+// versions and hold state the summary needs, and carrying the command that
+// labels the Remove family section.
+func (st *state) planToSummary(cmd string, rows []xbps.Row) *summary.Summary {
 	srows := make([]summary.Row, 0, len(rows))
 	var upgradeNames []string
 	for _, row := range rows {
@@ -881,7 +889,9 @@ func (st *state) planToSummary(rows []xbps.Row) *summary.Summary {
 	}
 	old := st.lookupOld(upgradeNames)
 	held := st.heldPackages()
-	return summary.Build(srows, held, old)
+	sum := summary.Build(srows, held, old)
+	sum.Command = cmd
+	return sum
 }
 
 // isTTY reports whether v is attached to a terminal. A resilient writer wraps

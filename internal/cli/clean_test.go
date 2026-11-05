@@ -19,8 +19,12 @@ func TestAC016Clean(t *testing.T) {
 			t.Fatalf("exit = %d, want 0\n%s", code, errs)
 		}
 		wantArgv(t, transactionArgv(t, implicitLog(env)), []string{"-O"})
-		if !strings.Contains(out, "Cleaning up package cache...") {
-			t.Errorf("xbps output was not streamed:\n%s", out)
+		// FR-066: forwarded child output is stderr, never durable stdout.
+		if !strings.Contains(errs, "Cleaning up package cache...") {
+			t.Errorf("xbps output was not forwarded to stderr:\n%s", errs)
+		}
+		if out != "" {
+			t.Errorf("clean wrote durable stdout: %q", out)
 		}
 		if strings.Contains(errs, "[Y/n]") {
 			t.Errorf("clean prompted:\n%s", errs)
@@ -119,18 +123,27 @@ func TestAC016Clean(t *testing.T) {
 	})
 
 	t.Run("clean is root-only", func(t *testing.T) {
-		bin, env := implicitEnv(t)
-		env["XBPRETTY_TEST_EUID"] = "1000"
-		clearLog(t, implicitLog(env))
-		code, _, errs := surfaceRun(t, bin, env, "clean")
-		if code != 1 {
-			t.Errorf("exit = %d, want 1", code)
-		}
-		if !strings.Contains(errs, "hint: rerun as root: ") {
-			t.Errorf("missing the elevation hint:\n%s", errs)
-		}
-		if calls := stubCalls(t, implicitLog(env)); len(calls) != 0 {
-			t.Errorf("a non-root clean ran a child: %q", calls)
+		for _, args := range [][]string{
+			{"clean"},
+			{"clean", "--fetch"}, // the #74 seam is root-gated too
+			{"clean", "--lists"},
+		} {
+			bin, env := implicitEnv(t)
+			env["XBPRETTY_TEST_EUID"] = "1000"
+			clearLog(t, implicitLog(env))
+			code, _, errs := surfaceRun(t, bin, env, args...)
+			if code != 1 {
+				t.Errorf("%v exit = %d, want 1", args, code)
+			}
+			if !strings.Contains(errs, "hint: rerun as root: ") {
+				t.Errorf("%v missing the elevation hint:\n%s", args, errs)
+			}
+			if strings.Contains(errs, "not implemented") {
+				t.Errorf("%v reached the #74 seam before the root check:\n%s", args, errs)
+			}
+			if calls := stubCalls(t, implicitLog(env)); len(calls) != 0 {
+				t.Errorf("%v ran a child as non-root: %q", args, calls)
+			}
 		}
 	})
 }

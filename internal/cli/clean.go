@@ -22,26 +22,28 @@ func (st *state) runClean(opts *options) int {
 	if opts.lists {
 		return st.cleanLists(opts)
 	}
-	if opts.cleanFetch {
-		// TODO(#74): restore the repository configuration written by fetch.
-		return st.cleanFetchRestore(opts)
-	}
-
-	if err := st.r.cfg.ResolveFor("remove"); err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
-		return exitRuntime
-	}
+	// FR-020: every clean form is root-only, including the #74 seam.
 	if euidFn() != 0 {
 		st.privHint("clean", opts)
 		return exitRuntime
 	}
-	code, err := st.r.stream(st.r.cfg.Xbps.RemovePath, "-O")
+	if opts.cleanFetch {
+		// TODO(#74): restore the repository configuration written by fetch.
+		return st.cleanFetchRestore(opts)
+	}
+	if err := st.r.cfg.ResolveFor("remove"); err != nil {
+		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		return exitRuntime
+	}
+	// FR-066: xbps-remove -O's output is forwarded child output, so both
+	// streams go to stderr; streamStderr also keeps them for the hint table.
+	code, output, err := st.r.streamStderr(st.r.cfg.Xbps.RemovePath, "-O")
 	if err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
 		return exitRuntime
 	}
 	if code != 0 {
-		if h := hints.Lookup(code, hints.Output{Stderr: st.r.lastStderr}); h != nil {
+		if h := hints.Lookup(code, output); h != nil {
 			fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
 		}
 	}
