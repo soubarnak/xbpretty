@@ -54,7 +54,7 @@ func validateSuffix(ctx context.Context, client *http.Client, base, suffix, arch
 	if err != nil {
 		return err
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
+	_, _ = io.CopyN(io.Discard, resp.Body, 1)
 	resp.Body.Close()
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode <= 299:
@@ -81,7 +81,7 @@ func validateSuffixWithGET(ctx context.Context, client *http.Client, target, use
 	if err != nil {
 		return err
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
+	_, _ = io.CopyN(io.Discard, resp.Body, 1)
 	resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return fmt.Errorf("unexpected status %s", resp.Status)

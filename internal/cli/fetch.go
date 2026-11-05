@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/soubarnak/xbpretty/internal/config"
@@ -22,6 +23,7 @@ var (
 	fetchXBPSDDirs     = []string{"/etc/xbps.d", "/usr/share/xbps.d"}
 	fetchHTTPClient    = fetch.NewHTTPClient
 	fetchArch          = runtimeXBPSArch()
+	fetchPreviousHosts = func() []string { return fetch.ManifestMirrorHosts(fetch.DefaultManifestPath) }
 	// pickMirror is #78's picker seam. Nil means the non-TTY top-3 shortlist,
 	// which is also the documented fallback while the picker is unbuilt.
 	pickMirror func(ranked []fetch.Result) (int, bool)
@@ -40,13 +42,14 @@ type fetchWritePlan struct {
 	Mirrors      []fetch.Mirror // the live list (or snapshot) after filtering
 	Repositories fetch.RepositorySet
 	Suffixes     []string
+	Arch         string
 	NonFree      bool
 	WrittenAt    time.Time
 }
 
 // runFetch is FR-042's read-only pipeline plus the #74 write seam.
 func (st *state) runFetch(opts *options) int {
-	repos, err := fetch.DiscoverRepositories(fetchXBPSDDirs)
+	cfg, err := fetch.DiscoverRepositories(fetchXBPSDDirs)
 	if err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
 		return exitRuntime
@@ -55,7 +58,7 @@ func (st *state) runFetch(opts *options) int {
 	client := fetchHTTPClient()
 	userAgent := "xbpretty/" + Version
 	ctx, cancel := context.WithTimeout(context.Background(), fetchMirrorListTimeout)
-	mirrors, err := fetch.FetchMirrors(ctx, client, fetchMirrorListURL, userAgent)
+	mirrors, warnings, err := fetch.FetchMirrorsDetailed(ctx, client, fetchMirrorListURL, userAgent)
 	cancel()
 	if err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: mirror list unavailable; using the built-in snapshot from %s\n", fetch.SnapshotDate)
@@ -64,6 +67,22 @@ func (st *state) runFetch(opts *options) int {
 			fmt.Fprintln(st.stderr, "xbpretty: no mirror list available")
 			return exitRuntime
 		}
+		warnings = nil
+	}
+	if st.r != nil && st.r.verbose {
+		for _, warning := range warnings {
+			fmt.Fprintf(st.stderr, "verbose: mirror list: %s\n", warning)
+		}
+	}
+
+	repos, err := fetch.ClassifyRepositories(cfg, fetch.MirrorHosts(mirrors), fetchPreviousHosts())
+	if err != nil {
+		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		return exitRuntime
+	}
+	arch := repos.Arch
+	if arch == "" {
+		arch = fetchArch
 	}
 
 	mirrors = fetch.FilterMirrors(mirrors, opts.country)
@@ -81,7 +100,7 @@ func (st *state) runFetch(opts *options) int {
 		Client:      client,
 		Mirrors:     mirrors,
 		PrimaryPath: repos.Primary,
-		Arch:        fetchArch,
+		Arch:        arch,
 		UserAgent:   userAgent,
 		Progress:    mirrorScoreEvents,
 	})
@@ -102,13 +121,13 @@ func (st *state) runFetch(opts *options) int {
 
 	suffixes := append([]string(nil), repos.Suffixes...)
 	if opts.nonFree {
-		suffixes = appendUnique(suffixes, fetch.NonFreeSuffixes(repos.Primary)...)
+		suffixes = appendUnique(suffixes, fetch.NonFreeSuffixes(repos.Suffixes)...)
 	}
 
 	allowPicker := !opts.dryRun && !opts.explicit["auto"] && euidFn() == 0 &&
 		isTTY(st.stdin) && isTTY(st.stdout) && st.mode != config.ModePlain &&
-		os.Getenv("TERM") != "dumb"
-	chosen, ok := st.chooseMirror(client, ranked, suffixes, userAgent, opts, allowPicker)
+		!strings.EqualFold(os.Getenv("TERM"), "dumb") && utf8Locale()
+	chosen, ok := st.chooseMirror(client, ranked, suffixes, arch, userAgent, opts, allowPicker)
 	if !ok {
 		return exitRuntime
 	}
@@ -135,6 +154,7 @@ func (st *state) runFetch(opts *options) int {
 		Mirrors:      mirrors,
 		Repositories: repos,
 		Suffixes:     suffixes,
+		Arch:         arch,
 		NonFree:      opts.nonFree,
 		WrittenAt:    time.Now(),
 	})
@@ -151,13 +171,13 @@ func (st *state) runFetch(opts *options) int {
 // chooseMirror implements FR-045's shortlist rule. --auto N validates the N
 // fastest in rank order; without it the top 3 are tried. The picker seam, when
 // #78 installs one, returns a single index whose choice is validated once.
-func (st *state) chooseMirror(client *http.Client, ranked []fetch.Result, suffixes []string, userAgent string, opts *options, allowPicker bool) (fetch.Result, bool) {
+func (st *state) chooseMirror(client *http.Client, ranked []fetch.Result, suffixes []string, arch, userAgent string, opts *options, allowPicker bool) (fetch.Result, bool) {
 	validate := func(candidate fetch.Result) error {
 		return fetch.Validate(context.Background(), fetch.ValidationOptions{
 			Client:    client,
 			BaseURL:   candidate.URL,
 			Suffixes:  suffixes,
-			Arch:      fetchArch,
+			Arch:      arch,
 			UserAgent: userAgent,
 		})
 	}
@@ -221,6 +241,20 @@ func appendUnique(dst []string, values ...string) []string {
 		}
 	}
 	return dst
+}
+
+// utf8Locale reports whether the effective locale is UTF-8. LC_ALL wins over
+// LC_CTYPE, which wins over LANG; an unset environment is the C locale.
+func utf8Locale() bool {
+	for _, key := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
+		value := os.Getenv(key)
+		if value == "" {
+			continue
+		}
+		lower := strings.ToLower(value)
+		return strings.Contains(lower, "utf-8") || strings.Contains(lower, "utf8")
+	}
+	return false
 }
 
 // runtimeXBPSArch maps Go's architecture name to xbps's.

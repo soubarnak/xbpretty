@@ -68,7 +68,7 @@ func RenderTable(w io.Writer, results []Result, chosenURL string) error {
 			}
 		}
 	}
-	leftAligned := []bool{true, true, true, false, false, false, false, true}
+	leftAligned := []bool{true, true, true, false, false, false, false, false}
 
 	var b strings.Builder
 	writeLine := func(cells []string) error {

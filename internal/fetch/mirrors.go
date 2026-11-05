@@ -27,14 +27,32 @@ type Mirror struct {
 	Tier     int
 }
 
+// ParseWarning names one malformed mirror-list row skipped by the parser.
+// FR-043 reports these only under -v.
+type ParseWarning struct {
+	Line   int
+	Reason string
+}
+
+func (w ParseWarning) String() string { return fmt.Sprintf("line %d: %s", w.Line, w.Reason) }
+
 // ParseMirrors parses the TSV mirror list. Invalid rows are skipped; an error
 // is returned only when the source cannot be read (FR-043).
 func ParseMirrors(r io.Reader) ([]Mirror, error) {
+	mirrors, _, err := ParseMirrorsDetailed(r)
+	return mirrors, err
+}
+
+// ParseMirrorsDetailed is ParseMirrors plus the skipped-row warnings.
+func ParseMirrorsDetailed(r io.Reader) ([]Mirror, []ParseWarning, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var mirrors []Mirror
+	var warnings []ParseWarning
 	seen := map[string]bool{}
+	lineNo := 0
 	for scanner.Scan() {
+		lineNo++
 		line := strings.TrimSuffix(scanner.Text(), "\r")
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
@@ -42,17 +60,29 @@ func ParseMirrors(r io.Reader) ([]Mirror, error) {
 		}
 		fields := strings.Split(line, "\t")
 		if len(fields) < 4 {
+			warnings = append(warnings, ParseWarning{Line: lineNo, Reason: "fewer than four tab-separated fields"})
 			continue
 		}
 		region := strings.TrimSpace(fields[0])
 		rawURL := strings.TrimSpace(fields[1])
 		location := strings.TrimSpace(fields[2])
-		tier, err := strconv.Atoi(strings.TrimSpace(fields[3]))
-		if region == "" || tier < 1 {
+		tierText := strings.TrimSpace(fields[3])
+		if region == "" {
+			warnings = append(warnings, ParseWarning{Line: lineNo, Reason: "empty region"})
+			continue
+		}
+		tier, err := strconv.Atoi(tierText)
+		if err != nil {
+			warnings = append(warnings, ParseWarning{Line: lineNo, Reason: "tier is not an integer"})
+			continue
+		}
+		if tier < 1 {
+			warnings = append(warnings, ParseWarning{Line: lineNo, Reason: "tier is not positive"})
 			continue
 		}
 		normalised, err := NormalizeMirrorURL(rawURL)
 		if err != nil {
+			warnings = append(warnings, ParseWarning{Line: lineNo, Reason: err.Error()})
 			continue
 		}
 		if seen[normalised] {
@@ -67,9 +97,9 @@ func ParseMirrors(r io.Reader) ([]Mirror, error) {
 		})
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, warnings, err
 	}
-	return mirrors, nil
+	return mirrors, warnings, nil
 }
 
 // NormalizeMirrorURL validates an http(s) URL and trims every trailing slash.
@@ -110,8 +140,9 @@ func FilterMirrors(mirrors []Mirror, names []string) []Mirror {
 	}
 	wanted := map[string]bool{}
 	for _, name := range names {
-		for _, word := range splitLocationWords(name) {
-			wanted[strings.ToLower(word)] = true
+		name = strings.TrimSpace(name)
+		if name != "" {
+			wanted[strings.ToLower(name)] = true
 		}
 	}
 	var out []Mirror
@@ -141,30 +172,36 @@ func splitLocationWords(s string) []string {
 // FetchMirrors downloads and parses the live mirror list. The caller owns the
 // timeout; the CLI applies FR-043's 10 seconds. There is no disk cache.
 func FetchMirrors(ctx context.Context, client *http.Client, listURL, userAgent string) ([]Mirror, error) {
+	mirrors, _, err := FetchMirrorsDetailed(ctx, client, listURL, userAgent)
+	return mirrors, err
+}
+
+// FetchMirrorsDetailed is FetchMirrors plus the skipped-row warnings.
+func FetchMirrorsDetailed(ctx context.Context, client *http.Client, listURL, userAgent string) ([]Mirror, []ParseWarning, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, listURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if userAgent != "" {
 		req.Header.Set("User-Agent", userAgent)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("mirror list: %s", resp.Status)
+		return nil, nil, fmt.Errorf("mirror list: %s", resp.Status)
 	}
-	mirrors, err := ParseMirrors(io.LimitReader(resp.Body, 1<<20))
+	mirrors, warnings, err := ParseMirrorsDetailed(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, err
+		return nil, warnings, err
 	}
 	if len(mirrors) == 0 {
-		return nil, errors.New("mirror list is empty")
+		return nil, warnings, errors.New("mirror list is empty")
 	}
-	return mirrors, nil
+	return mirrors, warnings, nil
 }

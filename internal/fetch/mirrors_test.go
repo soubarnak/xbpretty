@@ -89,6 +89,7 @@ func TestFilterMirrorsRegionAndLocationWords(t *testing.T) {
 		{[]string{"USA"}, []string{"https://b"}},
 		{[]string{"eu"}, []string{"https://a", "https://d"}},
 		{[]string{"singapore", "Finland"}, []string{"https://a", "https://c"}},
+		{[]string{"helsinki, finland"}, nil}, // the user's value is not split into words
 		{[]string{"no-such-place"}, nil},
 	} {
 		got := fetch.FilterMirrors(mirrors, tt.names)
@@ -178,5 +179,30 @@ func TestRewriteToHTTPS(t *testing.T) {
 	already := fetch.Mirror{URL: "https://mirror.example/void"}
 	if fetch.RewriteToHTTPS(already) != already {
 		t.Errorf("RewriteToHTTPS changed an https mirror: %+v", fetch.RewriteToHTTPS(already))
+	}
+}
+
+func TestParseMirrorsReportsSkippedRows(t *testing.T) {
+	raw := strings.Join([]string{
+		"EU\thttps://good.example/void\tHelsinki, Finland\t1",
+		"only three fields",
+		"\thttps://blank.example/void\tNowhere\t1",
+		"EU\thttps://tier.example/void\tNowhere\tnot-a-number",
+		"EU\tftp://ftp.example/void\tNowhere\t1",
+	}, "\n")
+	mirrors, warnings, err := fetch.ParseMirrorsDetailed(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mirrors) != 1 {
+		t.Fatalf("mirrors = %+v, want the one valid row", mirrors)
+	}
+	if len(warnings) != 4 {
+		t.Fatalf("warnings = %+v, want four skipped rows", warnings)
+	}
+	for _, warning := range warnings {
+		if !strings.Contains(warning.String(), "line ") {
+			t.Errorf("warning = %q, want a line number", warning)
+		}
 	}
 }

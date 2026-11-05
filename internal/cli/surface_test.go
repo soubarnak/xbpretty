@@ -223,7 +223,7 @@ func TestSurfaceGlobalFlagsBeforeAndAfterCommandAndConflicts(t *testing.T) {
 	if code == 2 || strings.Contains(errs, "unknown flag") {
 		t.Errorf("fetch -c IN was rejected: %d\n%s", code, errs)
 	}
-	if !strings.Contains(errs, "no repositories are configured") {
+	if !strings.Contains(errs, "no xbps repository configuration found under /usr/share/xbps.d") {
 		t.Errorf("fetch -c IN did not reach discovery: %d\n%s", code, errs)
 	}
 	// A flag on the wrong command is a usage error.
@@ -520,7 +520,7 @@ func TestSurfaceFetchCountryAndConfigInEveryOrder(t *testing.T) {
 		if code == 2 || strings.Contains(errs, "unknown flag") || strings.Contains(errs, "usage:") {
 			t.Errorf("%v did not parse: exit %d\n%s", argv, code, errs)
 		}
-		if !strings.Contains(errs, "xbpretty: no repositories are configured; add one in /etc/xbps.d") {
+		if !strings.Contains(errs, "xbpretty: no xbps repository configuration found under /usr/share/xbps.d") {
 			t.Errorf("%v did not reach the fetch handler: exit %d\n%s", argv, code, errs)
 		}
 	}

@@ -3,86 +3,121 @@ package fetch
 import (
 	"bufio"
 	"errors"
+	"net"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 )
 
-// ErrNoRepositories is returned when no configured repository can be probed.
-var ErrNoRepositories = errors.New("no repositories are configured; add one in /etc/xbps.d")
+// DefaultRepositoryHost is the packaged Void repository host (dec:#48 §3.2).
+const DefaultRepositoryHost = "repo-default.voidlinux.org"
 
-// RepositorySet is the repository configuration discovery result. Primary is
-// the path suffix of the first remote repository, and Suffixes is every
-// distinct remote path suffix in discovery order (primary first).
+var (
+	// ErrNoRepoConfig is dec:#48 §3.1's message when no repository= line
+	// exists at all.
+	ErrNoRepoConfig = errors.New("no xbps repository configuration found under /usr/share/xbps.d")
+	// ErrNoManagedRepo is dec:#48 §3.1's message when lines exist but none is
+	// a Void mirror/default repository.
+	ErrNoManagedRepo = errors.New("no Void mirror repository found to rewrite")
+)
+
+// RepositoryLine is one raw repository= line discovered in xbps.d.
+type RepositoryLine struct {
+	File     string // full path
+	Basename string // file name, for /etc/xbps.d masking and #74
+	Value    string // repository= value exactly as read
+	Host     string // lower-case hostname for a remote URL, else empty
+	Suffix   string // URL path without a trailing slash, else empty
+	Managed  bool   // rewriteable by fetch (dec:#48 §3.2)
+}
+
+// RepositoryConfig is the raw xbps.d scan before the mirror list is known.
+// Managed classification needs the live-list hosts, so it is a second step.
+type RepositoryConfig struct {
+	Lines []RepositoryLine
+	Arch  string
+	Files []string // masked *.conf files in xbps's load order
+}
+
+// RepositorySet is the managed subset of a RepositoryConfig.
 type RepositorySet struct {
 	Primary  string
 	Suffixes []string
 	URLs     []string
+	Lines    []RepositoryLine
+	Arch     string
 }
 
-// DiscoverRepositories reads repository= lines from the given directories in
-// order. The first directory that yields a remote repository wins, so
-// /etc/xbps.d masks /usr/share/xbps.d. Files are read in lexical order, which
-// is the order xbps uses. Missing directories and local repositories are
-// skipped.
-func DiscoverRepositories(dirs []string) (RepositorySet, error) {
-	var set RepositorySet
-	seenSuffix := map[string]bool{}
-	seenURL := map[string]bool{}
+// DiscoverRepositories scans the xbps.d directories in load order, honouring
+// xbps's masking rule by basename. Only *-repository-*.conf files contribute
+// repository= lines, but architecture= is read from every masked *.conf file
+// (dec:#48 §3.1). It does not classify a line as managed: that needs the
+// mirror list first.
+func DiscoverRepositories(dirs []string) (RepositoryConfig, error) {
+	type configFile struct {
+		path     string
+		basename string
+	}
+	var files []configFile
+	seen := map[string]bool{}
 	for _, dir := range dirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-		var foundRemote bool
 		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".conf") {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".conf") || seen[name] {
 				continue
 			}
-			repos := repositoriesInFile(filepath.Join(dir, entry.Name()))
-			for _, raw := range repos {
-				u, err := url.Parse(raw)
-				if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-					continue
-				}
-				foundRemote = true
-				normalised := strings.TrimRight(u.String(), "/")
-				if !seenURL[normalised] {
-					seenURL[normalised] = true
-					set.URLs = append(set.URLs, normalised)
-				}
-				suffix := strings.TrimRight(u.Path, "/")
-				if suffix == "/" {
-					suffix = ""
-				}
-				if !seenSuffix[suffix] {
-					seenSuffix[suffix] = true
-					set.Suffixes = append(set.Suffixes, suffix)
-				}
-			}
-		}
-		if foundRemote {
-			break
+			seen[name] = true
+			files = append(files, configFile{path: filepath.Join(dir, name), basename: name})
 		}
 	}
-	if len(set.URLs) == 0 {
-		return RepositorySet{}, ErrNoRepositories
+
+	var cfg RepositoryConfig
+	for _, file := range files {
+		cfg.Files = append(cfg.Files, file.path)
+		arch, repos := parseXbpsDConfig(file.path)
+		if arch != "" {
+			cfg.Arch = arch
+		}
+		if !isRepositoryConf(file.basename) {
+			continue
+		}
+		for _, value := range repos {
+			cfg.Lines = append(cfg.Lines, RepositoryLine{
+				File:     file.path,
+				Basename: file.basename,
+				Value:    value,
+			})
+		}
 	}
-	set.Primary = set.Suffixes[0]
-	return set, nil
+	if len(cfg.Lines) == 0 {
+		return cfg, ErrNoRepoConfig
+	}
+	return cfg, nil
 }
 
-// repositoriesInFile returns the repository= values in one xbps config file.
-func repositoriesInFile(path string) []string {
+// isRepositoryConf reports whether name matches dec:#48 §3.1's glob
+// *-repository-*.conf.
+func isRepositoryConf(name string) bool {
+	ok, _ := path.Match("*-repository-*.conf", name)
+	return ok
+}
+
+// parseXbpsDConfig reads architecture= and repository= values. Inline
+// comments and blank lines are ignored; repository= values are returned raw.
+func parseXbpsDConfig(path string) (arch string, repositories []string) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil
+		return "", nil
 	}
 	defer f.Close()
-	var out []string
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -91,25 +126,128 @@ func repositoriesInFile(path string) []string {
 			continue
 		}
 		key, value, ok := strings.Cut(line, "=")
-		if !ok || strings.TrimSpace(key) != "repository" {
+		if !ok {
 			continue
 		}
 		value = strings.TrimSpace(value)
 		if value == "" {
 			continue
 		}
-		out = append(out, value)
+		switch strings.TrimSpace(key) {
+		case "architecture":
+			arch = value
+		case "repository":
+			repositories = append(repositories, value)
+		}
 	}
-	return out
+	return arch, repositories
 }
 
-// NonFreeSuffixes returns the validation suffixes --non-free adds (FR-045).
-// They are relative to the primary repository path, so /current becomes
-// /current/nonfree and /current/multilib/nonfree.
-func NonFreeSuffixes(primary string) []string {
-	primary = strings.TrimRight(primary, "/")
-	return []string{
-		primary + "/nonfree",
-		primary + "/multilib/nonfree",
+// ClassifyRepositories marks the rewriteable repository lines and derives the
+// primary path and required suffix set. A line is managed when its host is
+// repo-default.voidlinux.org, a host from the mirror list, or the previous
+// chosen host recorded in the manifest (dec:#48 §3.2). Custom/local/file://
+// lines are preserved verbatim and never probed or validated.
+func ClassifyRepositories(cfg RepositoryConfig, mirrorHosts, previousHosts []string) (RepositorySet, error) {
+	allowed := map[string]bool{DefaultRepositoryHost: true}
+	for _, host := range mirrorHosts {
+		if host = normaliseHost(host); host != "" {
+			allowed[host] = true
+		}
 	}
+	for _, host := range previousHosts {
+		if host = normaliseHost(host); host != "" {
+			allowed[host] = true
+		}
+	}
+
+	set := RepositorySet{Arch: cfg.Arch, Lines: append([]RepositoryLine(nil), cfg.Lines...)}
+	seenSuffix := map[string]bool{}
+	seenURL := map[string]bool{}
+	for i := range set.Lines {
+		line := &set.Lines[i]
+		u, err := url.Parse(line.Value)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			continue // local path or file://: preserved, never managed
+		}
+		line.Host = strings.ToLower(u.Hostname())
+		line.Suffix = strings.TrimRight(u.Path, "/")
+		if line.Suffix == "/" {
+			line.Suffix = ""
+		}
+		line.Managed = allowed[line.Host]
+		if !line.Managed {
+			continue
+		}
+		normalised := strings.TrimRight(u.String(), "/")
+		if !seenURL[normalised] {
+			seenURL[normalised] = true
+			set.URLs = append(set.URLs, normalised)
+		}
+		if !seenSuffix[line.Suffix] {
+			seenSuffix[line.Suffix] = true
+			set.Suffixes = append(set.Suffixes, line.Suffix)
+		}
+	}
+	if len(set.Suffixes) == 0 {
+		return RepositorySet{}, ErrNoManagedRepo
+	}
+	set.Primary = set.Suffixes[0]
+	return set, nil
+}
+
+// MirrorHosts returns the hostnames of every mirror in the loaded list.
+func MirrorHosts(mirrors []Mirror) []string {
+	hosts := make([]string, 0, len(mirrors))
+	for _, mirror := range mirrors {
+		u, err := url.Parse(mirror.URL)
+		if err != nil {
+			continue
+		}
+		if host := u.Hostname(); host != "" {
+			hosts = append(hosts, strings.ToLower(host))
+		}
+	}
+	return hosts
+}
+
+// normaliseHost accepts either a bare hostname or a URL and returns the
+// lower-case hostname.
+func normaliseHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "://") {
+		if u, err := url.Parse(raw); err == nil {
+			return strings.ToLower(u.Hostname())
+		}
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		return strings.ToLower(host)
+	}
+	return strings.ToLower(strings.Trim(raw, "[]"))
+}
+
+// NonFreeSuffixes derives --non-free's validation set (dec:#48 §6.1):
+// <primary>/nonfree plus <suffix>/nonfree for every managed suffix ending in
+// /multilib. It never synthesises a multilib path that was not configured.
+func NonFreeSuffixes(suffixes []string) []string {
+	if len(suffixes) == 0 {
+		return nil
+	}
+	out := []string{strings.TrimRight(suffixes[0], "/") + "/nonfree"}
+	seen := map[string]bool{out[0]: true}
+	for _, suffix := range suffixes {
+		if !strings.HasSuffix(suffix, "/multilib") {
+			continue
+		}
+		derived := strings.TrimRight(suffix, "/") + "/nonfree"
+		if !seen[derived] {
+			seen[derived] = true
+			out = append(out, derived)
+		}
+	}
+	return out
 }

@@ -185,8 +185,8 @@ func TestProbeAllCapsConcurrencyAtTen(t *testing.T) {
 	if len(report.Results) != len(mirrors) {
 		t.Fatalf("results = %d, want %d", len(report.Results), len(mirrors))
 	}
-	if got := peak.Load(); got > 10 {
-		t.Errorf("peak concurrency = %d, want at most 10", got)
+	if got := peak.Load(); got != 10 {
+		t.Errorf("peak concurrency = %d, want exactly 10", got)
 	}
 }
 

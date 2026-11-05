@@ -29,6 +29,7 @@ type fetchFixture struct {
 	t       *testing.T
 	srv     *httptest.Server
 	mirrors []fetchMirror
+	rawList string // when set, served verbatim instead of the mirrors above
 
 	mu           sync.Mutex
 	listRequests int
@@ -51,6 +52,10 @@ func (f *fetchFixture) handle(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.listRequests++
 		f.mu.Unlock()
+		if f.rawList != "" {
+			_, _ = w.Write([]byte(f.rawList))
+			return
+		}
 		var b strings.Builder
 		b.WriteString("# fixture mirror list\n")
 		for _, m := range f.mirrors {
@@ -81,7 +86,7 @@ func (f *fetchFixture) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The probe is the ranged GET of <primary>/<arch>-repodata.
-	if !strings.HasSuffix(suffix, "/current/x86_64-repodata") {
+	if !strings.HasSuffix(suffix, "-repodata") || r.Header.Get("Range") == "bytes=0-0" {
 		http.NotFound(w, r)
 		return
 	}
@@ -122,6 +127,12 @@ func (f *fetchFixture) find(name string) (fetchMirror, bool) {
 	return fetchMirror{}, false
 }
 
+func (f *fetchFixture) probePaths() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.probeURLs...)
+}
+
 func (f *fetchFixture) counts() (list, probes, heads int, ranges, headPaths []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -137,22 +148,23 @@ func newFetchEnv(t *testing.T, fixture *fetchFixture) (*env, string) {
 	if err := os.MkdirAll(xbpsd, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(xbpsd, "00-main.conf"),
-		[]byte("repository=https://mirror.example/current\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(xbpsd, "00-repository-main.conf"),
+		[]byte("repository=https://repo-default.voidlinux.org/current\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	origURL, origDirs, origArch, origClient, origPick, origEvents :=
-		fetchMirrorListURL, fetchXBPSDDirs, fetchArch, fetchHTTPClient, pickMirror, mirrorScoreEvents
+	origURL, origDirs, origArch, origClient, origPick, origEvents, origPrevious :=
+		fetchMirrorListURL, fetchXBPSDDirs, fetchArch, fetchHTTPClient, pickMirror, mirrorScoreEvents, fetchPreviousHosts
 	fetchMirrorListURL = fixture.srv.URL + "/mirrors.lst"
 	fetchXBPSDDirs = []string{xbpsd}
 	fetchArch = "x86_64"
 	fetchHTTPClient = fixture.srv.Client
 	pickMirror = nil
 	mirrorScoreEvents = func(fetch.ProgressEvent) {}
+	fetchPreviousHosts = func() []string { return nil }
 	t.Cleanup(func() {
-		fetchMirrorListURL, fetchXBPSDDirs, fetchArch, fetchHTTPClient, pickMirror, mirrorScoreEvents =
-			origURL, origDirs, origArch, origClient, origPick, origEvents
+		fetchMirrorListURL, fetchXBPSDDirs, fetchArch, fetchHTTPClient, pickMirror, mirrorScoreEvents, fetchPreviousHosts =
+			origURL, origDirs, origArch, origClient, origPick, origEvents, origPrevious
 	})
 	return e, xbpsd
 }
@@ -169,7 +181,7 @@ func assertNoFiles(t *testing.T, dir string) {
 	for _, entry := range entries {
 		names = append(names, entry.Name())
 	}
-	if strings.Join(names, ",") != "00-main.conf" {
+	if strings.Join(names, ",") != "00-repository-main.conf" {
 		t.Errorf("xbps.d directory changed: %v", names)
 	}
 }
@@ -361,6 +373,16 @@ func TestFetchCountryFiltersBeforeProbe(t *testing.T) {
 		t.Errorf("probes = %d, want 1 after filtering", probes)
 	}
 
+	// The user's value is one name, not a word list: a full location is not a
+	// match for any single location word.
+	code, out, errs = e.run("xbpretty", "fetch", "--dry-run", "-c", "Chicago, USA")
+	if code != 1 {
+		t.Fatalf("full-location exit = %d, want 1\n%s\n%s", code, out, errs)
+	}
+	if !strings.Contains(errs, "xbpretty: no mirrors match the requested country or region") {
+		t.Errorf("full-location stderr = %q", errs)
+	}
+
 	code, out, errs = e.run("xbpretty", "fetch", "--dry-run", "-c", "atlantis")
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1\n%s\n%s", code, out, errs)
@@ -389,7 +411,7 @@ func TestFetchMirrorListFailureFallsBackToSnapshot(t *testing.T) {
 
 func TestFetchNonFreeAddsValidationSuffixes(t *testing.T) {
 	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
-	e, _ := newFetchEnv(t, fixture)
+	e, xbpsd := newFetchEnv(t, fixture)
 
 	code, _, errs := e.run("xbpretty", "fetch", "--dry-run", "--non-free")
 	if code != 0 {
@@ -400,11 +422,29 @@ func TestFetchNonFreeAddsValidationSuffixes(t *testing.T) {
 	for _, want := range []string{
 		"/one/current/x86_64-repodata",
 		"/one/current/nonfree/x86_64-repodata",
-		"/one/current/multilib/nonfree/x86_64-repodata",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("HEADs %v do not include %s", headPaths, want)
 		}
+	}
+	if strings.Contains(joined, "/multilib/nonfree/") {
+		t.Errorf("--non-free synthesised a multilib path that was not configured: %v", headPaths)
+	}
+
+	// When /current/multilib is a managed suffix, its non-free sibling joins
+	// the validation set.
+	if err := os.WriteFile(filepath.Join(xbpsd, "10-repository-multilib.conf"),
+		[]byte("repository=https://repo-default.voidlinux.org/current/multilib\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errs = e.run("xbpretty", "fetch", "--dry-run", "--non-free")
+	if code != 0 {
+		t.Fatalf("multilib exit = %d, want 0\n%s", code, errs)
+	}
+	_, _, _, _, headPaths = fixture.counts()
+	joined = strings.Join(headPaths, "\n")
+	if !strings.Contains(joined, "/one/current/multilib/nonfree/x86_64-repodata") {
+		t.Errorf("HEADs %v do not include the configured multilib non-free suffix", headPaths)
 	}
 }
 
@@ -607,6 +647,7 @@ func TestFetchPickerSeamGatesAndValidatesOnce(t *testing.T) {
 	e.tty = true
 	e.root = true
 	t.Setenv("TERM", "xterm")
+	t.Setenv("LC_ALL", "C.UTF-8")
 
 	calls := 0
 	pickMirror = func(ranked []fetch.Result) (int, bool) {
@@ -654,25 +695,200 @@ func TestFetchPickerNotOpenedWhenRootlessDryRunOrNonTTY(t *testing.T) {
 	}
 
 	cases := []struct {
-		name string
-		root bool
-		tty  bool
-		argv []string
+		name   string
+		root   bool
+		tty    bool
+		term   string
+		locale string
+		argv   []string
 	}{
-		{"non-TTY", true, false, []string{"fetch"}},
-		{"dry-run", true, true, []string{"fetch", "--dry-run"}},
-		{"auto", true, true, []string{"fetch", "--auto", "2"}},
-		{"rootless", false, true, []string{"fetch"}},
+		{name: "non-TTY", root: true, tty: false, term: "xterm", locale: "C.UTF-8", argv: []string{"fetch"}},
+		{name: "dry-run", root: true, tty: true, term: "xterm", locale: "C.UTF-8", argv: []string{"fetch", "--dry-run"}},
+		{name: "auto", root: true, tty: true, term: "xterm", locale: "C.UTF-8", argv: []string{"fetch", "--auto", "2"}},
+		{name: "rootless", root: false, tty: true, term: "xterm", locale: "C.UTF-8", argv: []string{"fetch"}},
+		{name: "non-UTF-8 locale", root: true, tty: true, term: "xterm", locale: "C", argv: []string{"fetch"}},
+		{name: "TERM=dumb case-insensitive", root: true, tty: true, term: "DuMb", locale: "C.UTF-8", argv: []string{"fetch"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			called = 0
 			e.root = tc.root
 			e.tty = tc.tty
+			t.Setenv("TERM", tc.term)
+			t.Setenv("LC_ALL", tc.locale)
 			e.run(append([]string{"xbpretty"}, tc.argv...)...)
 			if called != 0 {
 				t.Errorf("picker opened for %s", tc.name)
 			}
 		})
+	}
+}
+
+func TestFetchUsesXbpsArchitectureForMusl(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	if err := os.WriteFile(filepath.Join(xbpsd, "00-repository-main.conf"), []byte(
+		"architecture=x86_64-musl\nrepository=https://repo-default.voidlinux.org/current/musl\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errs := e.run("xbpretty", "fetch", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s\n%s", code, out, errs)
+	}
+	probes := fixture.probePaths()
+	if len(probes) != 1 || probes[0] != "/one/current/musl/x86_64-musl-repodata" {
+		t.Errorf("probe paths = %v, want /one/current/musl/x86_64-musl-repodata", probes)
+	}
+	_, _, _, _, headPaths := fixture.counts()
+	if len(headPaths) != 1 || headPaths[0] != "/one/current/musl/x86_64-musl-repodata" {
+		t.Errorf("HEAD paths = %v, want the musl arch path", headPaths)
+	}
+}
+
+func TestFetchAarch64PathsAndNonFreeDerivation(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	if err := os.WriteFile(filepath.Join(xbpsd, "00-repository-main.conf"), []byte(strings.Join([]string{
+		"architecture=aarch64",
+		"repository=https://repo-default.voidlinux.org/current",
+		"repository=https://repo-default.voidlinux.org/current/multilib",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errs := e.run("xbpretty", "fetch", "--dry-run", "--non-free")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s\n%s", code, out, errs)
+	}
+	probes := fixture.probePaths()
+	if len(probes) != 1 || probes[0] != "/one/current/aarch64-repodata" {
+		t.Errorf("probe paths = %v, want /one/current/aarch64-repodata", probes)
+	}
+	_, _, _, _, headPaths := fixture.counts()
+	joined := strings.Join(headPaths, "\n")
+	for _, want := range []string{
+		"/one/current/aarch64-repodata",
+		"/one/current/multilib/aarch64-repodata",
+		"/one/current/nonfree/aarch64-repodata",
+		"/one/current/multilib/nonfree/aarch64-repodata",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("HEADs %v do not include %s", headPaths, want)
+		}
+	}
+	if strings.Contains(joined, "/current/aarch64/nonfree") {
+		t.Errorf("non-free path was derived from the architecture instead of the configured suffix: %v", headPaths)
+	}
+}
+
+func TestFetchCustomRepositoryIsNeverProbedOrValidated(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	if err := os.WriteFile(filepath.Join(xbpsd, "20-repository-custom.conf"),
+		[]byte("repository=https://custom.invalid/void\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errs := e.run("xbpretty", "fetch", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s\n%s", code, out, errs)
+	}
+	for _, path := range append(fixture.probePaths(), fixture.headPathsForTest()...) {
+		if strings.Contains(path, "custom") {
+			t.Errorf("custom repository was probed or validated: %q", path)
+		}
+	}
+}
+
+func (f *fetchFixture) headPathsForTest() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.headPaths...)
+}
+
+func TestFetchCustomOnlyRepositorySet(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	if err := os.WriteFile(filepath.Join(xbpsd, "00-repository-main.conf"),
+		[]byte("repository=https://custom.invalid/void\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, errs := e.run("xbpretty", "fetch", "--dry-run")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, errs)
+	}
+	if !strings.Contains(errs, "xbpretty: no Void mirror repository found to rewrite") {
+		t.Errorf("stderr = %q, want the exact no-managed-repository line", errs)
+	}
+	if probes := len(fixture.probePaths()); probes != 0 {
+		t.Errorf("custom-only run probed %d mirrors", probes)
+	}
+	if list, _, _, _, _ := fixture.counts(); list != 1 {
+		t.Errorf("mirror list requests = %d, want 1", list)
+	}
+}
+
+func TestFetchMasksByBasenameAcrossXBPSDDirectories(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, _ := newFetchEnv(t, fixture)
+
+	etc := filepath.Join(e.dir, "etc-xbps.d")
+	usr := filepath.Join(e.dir, "usr-xbps.d")
+	writeCLIRepoFile(t, etc, "xbps-arch.conf", "architecture=x86_64\n")
+	writeCLIRepoFile(t, etc, "00-repository-main.conf", "repository=https://repo-default.voidlinux.org/current\n")
+	writeCLIRepoFile(t, usr, "00-repository-main.conf", "repository=https://repo-default.voidlinux.org/current/musl\n")
+	writeCLIRepoFile(t, usr, "10-repository-multilib.conf", "repository=https://repo-default.voidlinux.org/current/multilib\n")
+	fetchXBPSDDirs = []string{etc, usr}
+
+	code, _, errs := e.run("xbpretty", "fetch", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	probes := fixture.probePaths()
+	if len(probes) != 1 || probes[0] != "/one/current/x86_64-repodata" {
+		t.Errorf("probe paths = %v, want the /etc main primary path", probes)
+	}
+	_, _, _, _, headPaths := fixture.counts()
+	joined := strings.Join(headPaths, "\n")
+	if !strings.Contains(joined, "/one/current/multilib/x86_64-repodata") {
+		t.Errorf("unmasked /usr/share multilib was not validated: %v", headPaths)
+	}
+	if strings.Contains(joined, "/current/musl") {
+		t.Errorf("masked /usr/share main contributed a suffix: %v", headPaths)
+	}
+}
+
+func writeCLIRepoFile(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFetchMalformedMirrorRowsOnlyUnderVerbose(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, _ := newFetchEnv(t, fixture)
+	fixture.rawList = "EU\t" + fixture.srv.URL + "/one/\tHelsinki, Finland\t1\nthis row is malformed\n"
+
+	code, _, errs := e.run("xbpretty", "fetch", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if strings.Contains(errs, "verbose: mirror list") {
+		t.Errorf("malformed rows were reported without -v:\n%s", errs)
+	}
+
+	code, _, errs = e.run("xbpretty", "fetch", "--dry-run", "-v")
+	if code != 0 {
+		t.Fatalf("verbose exit = %d, want 0\n%s", code, errs)
+	}
+	if !strings.Contains(errs, "verbose: mirror list: line 2") {
+		t.Errorf("malformed row was not reported under -v:\n%s", errs)
 	}
 }

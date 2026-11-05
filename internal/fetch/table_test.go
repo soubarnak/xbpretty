@@ -46,7 +46,7 @@ func TestRenderTable(t *testing.T) {
 	}
 	want := strings.Join([]string{
 		"Mirror                              Region  Location           Tier  Latency        Speed   Score  Chosen",
-		"https://repo-fi.voidlinux.org       EU      Helsinki, Finland     1    12 ms    1.0 MiB/s   13 ms  *",
+		"https://repo-fi.voidlinux.org       EU      Helsinki, Finland     1    12 ms    1.0 MiB/s   13 ms       *",
 		"http://ftp.dk.xemacs.org/voidlinux  EU      —                     2   120 ms  512.0 KiB/s  130 ms",
 		"",
 	}, "\n")

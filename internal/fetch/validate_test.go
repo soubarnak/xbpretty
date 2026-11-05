@@ -118,14 +118,3 @@ func TestValidateTimeout(t *testing.T) {
 		t.Fatal("Validate ignored its timeout")
 	}
 }
-
-func TestExtraNonFreeSuffixes(t *testing.T) {
-	got := fetch.NonFreeSuffixes("/current")
-	want := []string{"/current/nonfree", "/current/multilib/nonfree"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("NonFreeSuffixes(/current) = %v, want %v", got, want)
-	}
-	if got := fetch.NonFreeSuffixes("/current/musl"); strings.Join(got, ",") != "/current/musl/nonfree,/current/musl/multilib/nonfree" {
-		t.Errorf("NonFreeSuffixes(/current/musl) = %v", got)
-	}
-}
