@@ -218,10 +218,12 @@ func (st *state) dispatch(opts *options) int {
 		return st.runSearch(opts)
 	case "show":
 		return st.runShow(opts)
+	case "policy":
+		return st.runPolicy(opts)
 	case "fetch":
 		return st.runFetch(opts)
 	case "purge", "autopurge", "download", "clean",
-		"policy", "history", "undo", "redo":
+		"history", "undo", "redo":
 		return st.runUnimplemented(opts.command, opts)
 	}
 	fmt.Fprintf(st.stderr, "xbpretty: unknown command %q\n", opts.command)
