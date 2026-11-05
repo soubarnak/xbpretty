@@ -427,6 +427,11 @@ func WidgetSize(n uint64) string { return formatUnit(n, SizeBinary, 1) }
 // nala's strict '>' unit switch (FR-062).
 func HumanUnit(n uint64, unit SizeUnit) string { return formatUnit(n, unit, 0) }
 
+// WidgetUnit is the full-screen footer's size format: the requested [Ui] unit
+// with the progress widget's precision 1 (ADR-0017's 12.4 MiB golden). It is
+// the unit-aware counterpart of WidgetSize, which is always Binary.
+func WidgetUnit(n uint64, unit SizeUnit) string { return formatUnit(n, unit, 1) }
+
 // formatUnit reproduces nala's UnitStr::str: precision digits, a strict '>'
 // unit switch, and no unit below the base.
 func formatUnit(n uint64, unit SizeUnit, precision int) string {

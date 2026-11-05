@@ -246,8 +246,23 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		return exitNothingToDo
 	}
 
-	if code := st.renderSummary(summaryCommand(cmd, opts), rows); code >= 0 {
+	summaryCmd := summaryCommand(cmd, opts)
+	// FR-067: Tui mode may replace this transaction's stdout with the S1
+	// full-screen summary. A refusal or a signal ends the run here; an
+	// unavailable screen leaves the normal text path untouched.
+	confirmedByScreen := false
+	switch outcome, code := st.maybeRunSummaryScreen(opts, summaryCmd, rows); outcome {
+	case screenConfirmed:
+		confirmedByScreen = true
+	case screenRefused:
+		return st.refuse()
+	case screenExited:
 		return code
+	}
+	if !confirmedByScreen {
+		if code := st.renderSummary(summaryCmd, rows); code >= 0 {
+			return code
+		}
 	}
 
 	// FR-017: a hold-only plan is read-only. Its summary prints, but there is
@@ -266,7 +281,7 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	if opts.assumeNo {
 		return st.refuse()
 	}
-	autoAccept := st.assumeYes
+	autoAccept := st.assumeYes || confirmedByScreen
 	// FR-073: the non-root check is unconditional and comes before the
 	// non-TTY check, so a non-root run always gets the summary and the
 	// elevation hint.
@@ -661,8 +676,20 @@ func (st *state) planImplicitAutoremove(cmd string, opts *options) ([]xbps.Row, 
 // the orphan plan is the whole run, so its refusal is the normal exit-1
 // refusal and Nothing to do was never printed.
 func (st *state) runOrphanOnly(cmd string, opts *options, rows []xbps.Row) int {
-	if code := st.renderSummary(orphanCommand(cmd, opts), rows); code >= 0 {
+	summaryCmd := orphanCommand(cmd, opts)
+	confirmedByScreen := false
+	switch outcome, code := st.maybeRunSummaryScreen(opts, summaryCmd, rows); outcome {
+	case screenConfirmed:
+		confirmedByScreen = true
+	case screenRefused:
+		return st.refuse()
+	case screenExited:
 		return code
+	}
+	if !confirmedByScreen {
+		if code := st.renderSummary(summaryCmd, rows); code >= 0 {
+			return code
+		}
 	}
 	if allHeld(rows) {
 		return exitOK
@@ -673,7 +700,7 @@ func (st *state) runOrphanOnly(cmd string, opts *options, rows []xbps.Row) int {
 	if opts.assumeNo {
 		return st.refuse()
 	}
-	autoAccept := st.assumeYes
+	autoAccept := st.assumeYes || confirmedByScreen
 	if euidFn() != 0 {
 		st.privHint(cmd, opts)
 		return exitRuntime
@@ -709,14 +736,28 @@ func (st *state) runImplicitAutoremoveAfterSuccess(cmd string, opts *options) in
 	if len(rows) == 0 {
 		return -1
 	}
-	if code := st.renderSummary(orphanCommand(cmd, opts), rows); code >= 0 {
+	summaryCmd := orphanCommand(cmd, opts)
+	confirmedByScreen := false
+	switch outcome, code := st.maybeRunSummaryScreen(opts, summaryCmd, rows); outcome {
+	case screenConfirmed:
+		confirmedByScreen = true
+	case screenRefused:
+		// FR-016: declining the implicit transaction leaves the primary
+		// result untouched, including its success exit code.
+		return -1
+	case screenExited:
 		return code
+	}
+	if !confirmedByScreen {
+		if code := st.renderSummary(summaryCmd, rows); code >= 0 {
+			return code
+		}
 	}
 	// A hold-only orphan plan changes nothing: the summary is read-only.
 	if allHeld(rows) {
 		return -1
 	}
-	if !st.assumeYes {
+	if !st.assumeYes && !confirmedByScreen {
 		result := st.prompt()
 		if !result.proceed {
 			if result.invalid {

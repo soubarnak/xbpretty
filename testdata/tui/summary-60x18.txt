@@ -1,0 +1,18 @@
+┏━━━━━━━━━━━━━━━━━━━  xbpretty Upgrade  ━━━━━━━━━━━━━━━━━━━┓
+┃ Upgrade                                                  ┃
+┃ ━━━━━━━                                                  ┃
+┃ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┏━┓ ┃
+┃ ┃  Package:            Old Version:New Version:Size:┃┃█┃ ┃
+┃ ┃❯ python3-requests      2.32.3_1    2.32.4_1  412 K┃┃ ┃ ┃
+┃ ┃  libglib-2.0-devel     2.82.1_1    2.82.2_1  1.4 M┃┃ ┃ ┃
+┃ ┃  python3-cryptography  43.0.1_1    43.0.3_1  1.1 M┃┃ ┃ ┃
+┃ ┃                                                   ┃┃ ┃ ┃
+┃ ┃                                                   ┃┃ ┃ ┃
+┃ ┃                                                   ┃┃ ┃ ┃
+┃ ┃                                                   ┃┃ ┃ ┃
+┃ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━┛ ┃
+┃ Upgrade:              3 Pkgs (↑) move up | (↓) move down ┃
+┃                              (→) next tab | (←) previous ┃
+┃ Total download size: 2.9 MiB             tab             ┃
+┃ Disk space required:11.0 MiB (s) package info | (q) quit ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
