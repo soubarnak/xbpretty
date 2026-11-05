@@ -203,6 +203,18 @@ func TestS1NavigationClampsAndScrolls(t *testing.T) {
 		t.Fatalf("after wheel-up selection = %q, want pkg19", got)
 	}
 
+	// The arrow keys share the row bindings.
+	r.send(t, "\x1b[B")
+	frames = waitFrameCount(t, r, dump, 12)
+	if got := selectedPackage(t, frames[11]); got != "pkg20" {
+		t.Fatalf("after down arrow selection = %q, want pkg20", got)
+	}
+	r.send(t, "\x1b[A")
+	frames = waitFrameCount(t, r, dump, 13)
+	if got := selectedPackage(t, frames[12]); got != "pkg19" {
+		t.Fatalf("after up arrow selection = %q, want pkg19", got)
+	}
+
 	r.send(t, "q")
 	if code := r.exitCode(t); code != 1 {
 		t.Errorf("cancel exit = %d, want 1", code)
@@ -245,7 +257,8 @@ func TestS1TabsSwitchInFixedOrder(t *testing.T) {
 	dump := t.TempDir()
 	env := tuiFrameEnv(t, dir, query, dump)
 	env["XB_STUB_STDOUT"] = "newpkg-1.0_1 install x86_64 https://repo-default.voidlinux.org/current 1048576 1048576\n" +
-		"libfoo-1.3_1 update x86_64 https://repo-default.voidlinux.org/current 15728640 4334114\n"
+		"libfoo-1.3_1 update x86_64 https://repo-default.voidlinux.org/current 15728640 4334114\n" +
+		"libbar-0.9_3 update x86_64 https://repo-default.voidlinux.org/current 15728640 4334114\n"
 
 	r := startPty(t, bin, env, []string{"upgrade"}, 80, 24)
 	frames := waitFrameCount(t, r, dump, 1)
@@ -268,34 +281,53 @@ func TestS1TabsSwitchInFixedOrder(t *testing.T) {
 		t.Fatalf("after l selection = %q, want libfoo (row reset)", got)
 	}
 
-	// l at the last tab clamps: no new frame is drawn.
+	// Select a non-zero row, then clamp l at the last tab: the selection
+	// must survive and no frame may be drawn.
+	r.send(t, "j")
+	frames = waitFrameCount(t, r, dump, 3)
+	if got := selectedPackage(t, frames[2]); got != "libbar" {
+		t.Fatalf("after j selection = %q, want libbar", got)
+	}
 	r.send(t, "l")
 	time.Sleep(120 * time.Millisecond)
-	if got := len(dumpedFrames(t, dump)); got != 2 {
-		t.Fatalf("clamped l drew a frame: %d frames, want 2", got)
+	if got := len(dumpedFrames(t, dump)); got != 3 {
+		t.Fatalf("clamped l drew a frame: %d frames, want 3", got)
+	}
+	r.send(t, "s")
+	frames = waitFrameCount(t, r, dump, 4)
+	if !strings.Contains(frames[3], "libbar") || !strings.Contains(frames[3], "Available:") {
+		t.Fatalf("clamped l lost the non-zero selection:\n%s", frames[3])
+	}
+	r.send(t, "q")
+	frames = waitFrameCount(t, r, dump, 5)
+	if got := selectedPackage(t, frames[4]); got != "libbar" {
+		t.Fatalf("selection after returning = %q, want libbar", got)
 	}
 
 	r.send(t, "h")
-	frames = waitFrameCount(t, r, dump, 3)
-	if got := activeTab(t, frames[2]); got != "Install" {
+	frames = waitFrameCount(t, r, dump, 6)
+	if got := activeTab(t, frames[5]); got != "Install" {
 		t.Fatalf("after h active tab = %q, want Install", got)
+	}
+	if got := selectedPackage(t, frames[5]); got != "newpkg" {
+		t.Fatalf("after h selection = %q, want newpkg", got)
 	}
 
 	// h at the first tab clamps.
 	r.send(t, "h")
 	time.Sleep(120 * time.Millisecond)
-	if got := len(dumpedFrames(t, dump)); got != 3 {
-		t.Fatalf("clamped h drew a frame: %d frames, want 3", got)
+	if got := len(dumpedFrames(t, dump)); got != 6 {
+		t.Fatalf("clamped h drew a frame: %d frames, want 6", got)
 	}
 
 	r.send(t, "\x1b[C")
-	frames = waitFrameCount(t, r, dump, 4)
-	if got := activeTab(t, frames[3]); got != "Upgrade" {
+	frames = waitFrameCount(t, r, dump, 7)
+	if got := activeTab(t, frames[6]); got != "Upgrade" {
 		t.Fatalf("after right arrow active tab = %q, want Upgrade", got)
 	}
 	r.send(t, "\x1b[D")
-	frames = waitFrameCount(t, r, dump, 5)
-	if got := activeTab(t, frames[4]); got != "Install" {
+	frames = waitFrameCount(t, r, dump, 8)
+	if got := activeTab(t, frames[7]); got != "Install" {
 		t.Fatalf("after left arrow active tab = %q, want Install", got)
 	}
 
@@ -349,11 +381,12 @@ func TestS1PackageInfoRoundTrip(t *testing.T) {
 		}
 	}
 
-	// n and Enter are inert in the info view: no frame is drawn.
-	r.send(t, "n")
+	// Enter and unbound runes are inert in the info view: no frame is
+	// drawn. (n/N and Ctrl-C are refusal keys; they are covered separately.)
+	r.send(t, "x")
 	time.Sleep(120 * time.Millisecond)
 	if got := len(dumpedFrames(t, dump)); got != 3 {
-		t.Fatalf("inert n in package info drew a frame: %d frames, want 3", got)
+		t.Fatalf("inert x in package info drew a frame: %d frames, want 3", got)
 	}
 	r.send(t, "\r")
 	time.Sleep(120 * time.Millisecond)
@@ -448,6 +481,85 @@ func TestS1ResizeBelowFloorCancelKeepsWorking(t *testing.T) {
 	}
 }
 
+// startPtyCombined puts stdin, stdout and stderr on the same pty, so a test
+// can assert the order of a screen-restore sequence and a warning line that
+// would otherwise travel on separate streams.
+func startPtyCombined(t *testing.T, bin string, env map[string]string, args []string, cols, rows int) *ptyRun {
+	t.Helper()
+	master, slave, err := openPty()
+	if err != nil {
+		t.Skipf("no pseudo-terminal: %v", err)
+	}
+	if err := setPtySize(slave, cols, rows); err != nil {
+		t.Skipf("cannot size the pty: %v", err)
+	}
+	cmd := exec.Command(bin, args...)
+	cmd.Env = envWith(env)
+	cmd.Stdin = slave
+	cmd.Stdout = slave
+	cmd.Stderr = slave
+	before, err := term.GetState(slave)
+	if err != nil {
+		t.Fatalf("GetState before start: %v", err)
+	}
+	r := &ptyRun{master: master, slave: slave, cmd: cmd, cap: &capture{}, stderr: &syncBuffer{}, wait: make(chan error, 1), before: before}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		master.Close()
+		slave.Close()
+	})
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := master.Read(buf)
+			if n > 0 {
+				r.cap.add(buf[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting the binary: %v", err)
+	}
+	go func() { r.wait <- cmd.Wait() }()
+	return r
+}
+
+// drainPtyMaster non-blockingly reads whatever the detached child has
+// written, retrying briefly so a frame larger than the pty buffer cannot
+// leave the child blocked in Draw when the master closes.
+func drainPtyMaster(t *testing.T, master *os.File) {
+	t.Helper()
+	fd := int(master.Fd())
+	flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_GETFL, 0)
+	if errno != 0 {
+		time.Sleep(80 * time.Millisecond)
+		return
+	}
+	if _, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_SETFL, flags|syscall.O_NONBLOCK); errno != 0 {
+		time.Sleep(80 * time.Millisecond)
+		return
+	}
+	buf := make([]byte, 4096)
+	idle := 0
+	for idle < 5 {
+		n, err := syscall.Read(fd, buf)
+		if n > 0 {
+			idle = 0
+			continue
+		}
+		if err != syscall.EAGAIN && err != syscall.EWOULDBLOCK {
+			return
+		}
+		idle++
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // startPtyDetached starts the binary on a pty with no master reader. Closing
 // the master then delivers a real hangup to the child's stdin, which is how
 // the EOF binding is exercised; a reader would keep the master description
@@ -485,20 +597,6 @@ func startPtyDetached(t *testing.T, bin string, env map[string]string, args []st
 	return r
 }
 
-// waitStderr waits for the binary's stderr to contain want.
-func waitStderr(t *testing.T, r *ptyRun, want string) string {
-	t.Helper()
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
-		if s := r.stderr.String(); strings.Contains(s, want) {
-			return s
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for stderr %q; got:\n%s", want, r.stderr.String())
-	return ""
-}
-
 // TestS1FailedInitWarnsOnceAndFallsBack is FR-067's fallback half: a failed
 // screen open warns exactly once, prints no screen sequence, and the text
 // summary finishes the transaction with the text path's exit code.
@@ -509,19 +607,20 @@ func TestS1FailedInitWarnsOnceAndFallsBack(t *testing.T) {
 	env := tuiScreenEnv(t, dir, query)
 	env["XBPRETTY_TEST_TUI_FAIL"] = "init"
 
-	r := startPty(t, bin, env, []string{"upgrade"}, 80, 24)
-	waitStderr(t, r, "full-screen interface unavailable")
+	r := startPtyCombined(t, bin, env, []string{"upgrade"}, 80, 24)
+	out := waitCapture(t, r, "the init-failure warning", func(s string) bool {
+		return strings.Contains(s, "full-screen interface unavailable")
+	})
+	if strings.Contains(out, term.AltEnter) {
+		t.Errorf("failed init still entered the alternate screen: %q", out)
+	}
 	r.send(t, "n\n")
 	if code := r.exitCode(t); code != 1 {
 		t.Errorf("exit = %d, want 1\nstderr:\n%s", code, r.stderr.String())
 	}
-	errs := r.stderr.String()
-	if got := strings.Count(errs, "full-screen interface unavailable"); got != 1 {
-		t.Errorf("init-failure warnings = %d, want 1:\n%s", got, errs)
-	}
-	out := r.cap.String()
-	if strings.Contains(out, term.AltEnter) {
-		t.Errorf("failed init still entered the alternate screen: %q", out)
+	out = r.cap.String()
+	if got := strings.Count(out, "full-screen interface unavailable"); got != 1 {
+		t.Errorf("init-failure warnings = %d, want 1:\n%s", got, out)
 	}
 	if !strings.Contains(out, "Total download size:") {
 		t.Errorf("failed init did not fall back to the text summary:\n%q", out)
@@ -536,8 +635,8 @@ func TestS1FailedInitWarnsOnceAndFallsBack(t *testing.T) {
 }
 
 // TestS1FailedRenderWarnsOnceRestoresAndFallsBack is FR-067's failed-render
-// path: the terminal is restored before the one warning, and the text path
-// takes over.
+// path. stdout and stderr share one pty, so the assertion can require the
+// restore sequences to be written before the warning bytes.
 func TestS1FailedRenderWarnsOnceRestoresAndFallsBack(t *testing.T) {
 	bin := buildTuiBinary(t)
 	dir := t.TempDir()
@@ -545,26 +644,35 @@ func TestS1FailedRenderWarnsOnceRestoresAndFallsBack(t *testing.T) {
 	env := tuiScreenEnv(t, dir, query)
 	env["XBPRETTY_TEST_TUI_FAIL"] = "render"
 
-	r := startPty(t, bin, env, []string{"upgrade"}, 80, 24)
-	waitStderr(t, r, "full-screen interface failed")
-	// The restore must precede the warning; the alternate screen is left
-	// before the text summary is asked to continue.
-	waitCapture(t, r, "the restore after the failed render", func(s string) bool {
-		return strings.Contains(s, term.AltLeave) && strings.Contains(s, term.CursorShow)
+	r := startPtyCombined(t, bin, env, []string{"upgrade"}, 80, 24)
+	out := waitCapture(t, r, "the render-failure warning", func(s string) bool {
+		return strings.Contains(s, "full-screen interface failed")
 	})
+	warn := strings.Index(out, "full-screen interface failed")
+	for _, seq := range []string{term.MouseOff, term.PasteOff, term.AltLeave, term.CursorShow} {
+		i := strings.Index(out, seq)
+		if i < 0 {
+			t.Errorf("the failed render did not write %q before falling back", seq)
+			continue
+		}
+		if i > warn {
+			t.Errorf("%q was written after the warning (restore %d, warning %d):\n%q", seq, i, warn, out)
+		}
+	}
+
 	r.send(t, "n\n")
 	if code := r.exitCode(t); code != 1 {
 		t.Errorf("exit = %d, want 1\nstderr:\n%s", code, r.stderr.String())
 	}
-	counting := r.stderr.String()
-	if got := strings.Count(counting, "full-screen interface failed"); got != 1 {
-		t.Errorf("render-failure warnings = %d, want 1:\n%s", got, counting)
+	out = r.cap.String()
+	if got := strings.Count(out, "full-screen interface failed"); got != 1 {
+		t.Errorf("render-failure warnings = %d, want 1:\n%s", got, out)
 	}
-	if strings.Contains(counting, "full-screen interface unavailable") {
-		t.Errorf("the render failure also warned as an init failure:\n%s", counting)
+	if strings.Contains(out, "full-screen interface unavailable") {
+		t.Errorf("the render failure also warned as an init failure:\n%s", out)
 	}
-	if !strings.Contains(r.cap.String(), "Total download size:") {
-		t.Errorf("failed render did not fall back to the text summary:\n%q", r.cap.String())
+	if !strings.Contains(out, "Total download size:") {
+		t.Errorf("failed render did not fall back to the text summary:\n%q", out)
 	}
 	after, err := term.GetState(r.slave)
 	if err != nil {
@@ -606,6 +714,12 @@ func TestS1KeyBindings(t *testing.T) {
 				env["XBPRETTY_TEST_TUI_DUMP"] = detachedDump
 				r := startPtyDetached(t, bin, env, []string{"upgrade"}, 80, 24)
 				waitFrameCount(t, r, detachedDump, 1)
+				// The hook dumps before Draw. Drain the frame from the
+				// master so a frame larger than the pty buffer cannot leave
+				// the child blocked in write when the master closes; the
+				// drain ends on the read deadline, then the close delivers
+				// the hangup that produces EOF.
+				drainPtyMaster(t, r.master)
 				_ = r.master.Close()
 				if code := r.exitCode(t); code != tc.want {
 					t.Fatalf("exit = %d, want %d\nstderr:\n%s", code, tc.want, r.stderr.String())
@@ -659,4 +773,101 @@ func TestS1KeyBindings(t *testing.T) {
 			t.Errorf("exit after inert Enter = %d, want 1", code)
 		}
 	})
+}
+
+// TestS1PackageInfoRefusalKeys is FR-074 through the info view: Ctrl-C and
+// n/N refuse the transaction even while package info is open.
+func TestS1PackageInfoRefusalKeys(t *testing.T) {
+	bin := buildTuiBinary(t)
+	for _, tc := range []struct {
+		name string
+		send string
+	}{
+		{"ctrl-c", "\x03"},
+		{"n", "n"},
+		{"N", "N"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			query := tuiOldQuery(t, dir)
+			dump := t.TempDir()
+			env := tuiFrameEnv(t, dir, query, dump)
+			r := startPty(t, bin, env, []string{"upgrade"}, 80, 24)
+			waitFrameCount(t, r, dump, 1)
+			r.send(t, "s")
+			frames := waitFrameCount(t, r, dump, 2)
+			if !strings.Contains(frames[1], "Operation:") {
+				t.Fatalf("package info did not open:\n%s", frames[1])
+			}
+			r.send(t, tc.send)
+			if code := r.exitCode(t); code != 1 {
+				t.Fatalf("exit = %d, want 1\nstderr:\n%s", code, r.stderr.String())
+			}
+			if !strings.Contains(r.stderr.String(), "xbpretty: user refused confirmation") {
+				t.Errorf("refusal line missing:\n%s", r.stderr.String())
+			}
+			waitCapture(t, r, "the restore", func(s string) bool {
+				return strings.Contains(s, term.AltLeave)
+			})
+		})
+	}
+}
+
+// TestS1BelowFloorIgnoresInteractionAndCancels is AC-054/FR-071's floor gap:
+// below 60x18 mouse reporting is off, navigation/s/wheel do nothing, and the
+// cancel keys refuse even after `s` was pressed.
+func TestS1BelowFloorIgnoresInteractionAndCancels(t *testing.T) {
+	bin := buildTuiBinary(t)
+	for _, tc := range []struct {
+		name string
+		send string
+	}{
+		{"q", "q"},
+		{"n", "n"},
+		{"esc", "\x1b"},
+		{"ctrl-c", "\x03"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			query := tuiOldQuery(t, dir)
+			dump := t.TempDir()
+			env := tuiFrameEnv(t, dir, query, dump)
+			r := startPty(t, bin, env, []string{"upgrade"}, 80, 24)
+			waitFrameCount(t, r, dump, 1)
+			if err := setPtySize(r.slave, 50, 15); err != nil {
+				t.Fatalf("resize: %v", err)
+			}
+			if err := r.cmd.Process.Signal(syscall.SIGWINCH); err != nil {
+				t.Fatalf("SIGWINCH: %v", err)
+			}
+			frames := waitFrameCount(t, r, dump, 2)
+			if !strings.Contains(frames[1], "Terminal too small (60x18 minimum; now 50x15)") {
+				t.Fatalf("too-small frame missing the notice:\n%s", frames[1])
+			}
+			out := r.cap.String()
+			mouseOff := strings.LastIndex(out, term.MouseOff)
+			notice := strings.LastIndex(out, "Terminal too small")
+			if mouseOff < 0 || mouseOff > notice {
+				t.Fatalf("mouse reporting was not disabled below the floor (mouseOff=%d notice=%d)", mouseOff, notice)
+			}
+
+			// s, navigation and wheel must all be inert below the floor.
+			r.send(t, "s")
+			r.send(t, "j")
+			r.send(t, "\x1b[<65;10;20M")
+			r.send(t, "\x1b[B")
+			time.Sleep(150 * time.Millisecond)
+			if got := len(dumpedFrames(t, dump)); got != 2 {
+				t.Fatalf("below-floor interaction drew a frame: %d frames, want 2", got)
+			}
+
+			r.send(t, tc.send)
+			if code := r.exitCode(t); code != 1 {
+				t.Fatalf("exit = %d, want 1\nstderr:\n%s", code, r.stderr.String())
+			}
+			if !strings.Contains(r.stderr.String(), "xbpretty: user refused confirmation") {
+				t.Errorf("refusal line missing:\n%s", r.stderr.String())
+			}
+		})
+	}
 }

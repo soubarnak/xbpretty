@@ -143,6 +143,15 @@ func (s *Screen) Close() {
 // Active reports whether the screen still owns the terminal.
 func (s *Screen) Active() bool { return s.guard.Active() }
 
+// SetMouse turns SGR mouse reporting on or off for the rest of the session.
+// A surface that drops below the usable floor disables it; the restore guard
+// still turns it off on exit.
+func (s *Screen) SetMouse(on bool) {
+	if s.guard != nil {
+		s.guard.SetMouse(on)
+	}
+}
+
 func (s *Screen) send(ev Event) bool {
 	select {
 	case s.event <- ev:

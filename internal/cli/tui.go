@@ -172,6 +172,11 @@ func (st *state) runSummaryScreenPolicy(out *os.File, model *tui.SummaryModel, p
 		return screenUnavailable, -1
 	}
 	w, h := scr.Size()
+	small := w < 60 || h < 18
+	// FR-071: below the floor there is no cursor or mouse reporting. The
+	// summary can only enter at or above the floor, but a direct caller and
+	// the resize path still need the latch.
+	scr.SetMouse(!small)
 	if err := draw(w, h); err != nil {
 		return fail(err)
 	}
@@ -196,7 +201,10 @@ func (st *state) runSummaryScreenPolicy(out *os.File, model *tui.SummaryModel, p
 		ev := <-scr.Events()
 		switch ev.Kind {
 		case tui.EventResize:
-			if err := draw(ev.Width, ev.Height); err != nil {
+			w, h = ev.Width, ev.Height
+			small = w < 60 || h < 18
+			scr.SetMouse(!small)
+			if err := draw(w, h); err != nil {
 				return fail(err)
 			}
 		case tui.EventSignal:
@@ -208,19 +216,39 @@ func (st *state) runSummaryScreenPolicy(out *os.File, model *tui.SummaryModel, p
 		case tui.EventEOF:
 			return quit()
 		case tui.EventKey:
+			if small {
+				// FR-071: below the 60x18 floor only cancellation works.
+				// Navigation, the wheel, `s` and confirmation are ignored,
+				// and an open package-info view must not swallow the
+				// refusal keys.
+				switch ev.Key.Type {
+				case term.KeyEsc, term.KeyCtrlC:
+					return quit()
+				case term.KeyRune:
+					if strings.ContainsRune("qQnN", ev.Key.Rune) {
+						return quit()
+					}
+				}
+				continue
+			}
 			if info != nil {
-				// The package-info view returns to the summary; it never
-				// confirms or refuses the transaction, and every other key
-				// is ignored.
+				// The package-info view returns to the summary on q/Esc and
+				// refuses on n/N/Ctrl-C, exactly as FR-074 requires for a
+				// full-screen surface. Everything else is ignored.
 				changed := false
 				switch ev.Key.Type {
 				case term.KeyEsc:
 					info = nil
 					changed = true
+				case term.KeyCtrlC:
+					return quit()
 				case term.KeyRune:
-					if ev.Key.Rune == 'q' || ev.Key.Rune == 'Q' {
+					switch ev.Key.Rune {
+					case 'q', 'Q':
 						info = nil
 						changed = true
+					case 'n', 'N':
+						return quit()
 					}
 				}
 				if !changed {
@@ -325,8 +353,12 @@ func summaryPackageInfo(model *tui.SummaryModel) *tui.PackageInfoModel {
 	if row.Old != "" && row.Old != row.New {
 		add("Installed", row.Old)
 	}
-	if row.New != "" {
+	// A removal, Held or Configure row has no newer version to offer, so its
+	// version is not "Available"; only the install-family tabs are.
+	if infoVersionIsAvailable(tab.Label) && row.New != "" {
 		add("Available", row.New)
+	} else if row.New != "" {
+		add("Version", row.New)
 	} else {
 		add("Version", row.Old)
 	}
@@ -335,6 +367,17 @@ func summaryPackageInfo(model *tui.SummaryModel) *tui.PackageInfoModel {
 	}
 	add("Size", row.Size)
 	return info
+}
+
+// infoVersionIsAvailable reports whether the tab's version is the version the
+// transaction would install (Available) rather than the version a package
+// currently has (Version).
+func infoVersionIsAvailable(label string) bool {
+	switch label {
+	case "Install", "Upgrade", "ReInstall":
+		return true
+	}
+	return false
 }
 
 // planToTui converts the grouping and lookups the text summary already needs

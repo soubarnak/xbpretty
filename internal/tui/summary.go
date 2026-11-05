@@ -95,19 +95,25 @@ func (m *SummaryModel) ActiveTab() (Tab, bool) {
 	return *t, true
 }
 
-// MoveTab moves the active tab by d, clamped, and resets the selection.
+// MoveTab moves the active tab by d, clamped. The selection resets only when
+// the active tab actually changes, so a clamped move is a no-op (and paints
+// nothing).
 func (m *SummaryModel) MoveTab(d int) {
 	n := len(m.Tabs)
 	if n == 0 {
 		return
 	}
-	m.Active += d
-	if m.Active < 0 {
-		m.Active = 0
+	next := m.Active + d
+	if next < 0 {
+		next = 0
 	}
-	if m.Active > n-1 {
-		m.Active = n - 1
+	if next > n-1 {
+		next = n - 1
 	}
+	if next == m.Active {
+		return
+	}
+	m.Active = next
 	m.Sel = 0
 }
 

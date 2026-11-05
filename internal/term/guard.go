@@ -109,6 +109,23 @@ func (g *Guard) EnterInline() error {
 	return nil
 }
 
+// SetMouse turns SGR mouse reporting on or off and tracks the change so
+// Restore unwinds it in order. The full-screen summary uses it to drop mouse
+// reporting while the terminal is below the 60x18 floor (FR-071).
+func (g *Guard) SetMouse(on bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if on == g.mouse {
+		return
+	}
+	if on {
+		g.write(MouseOn)
+	} else {
+		g.write(MouseOff)
+	}
+	g.mouse = on
+}
+
 // RestoreTermios restores the saved mode without touching the screen.
 func (g *Guard) RestoreTermios() {
 	g.mu.Lock()

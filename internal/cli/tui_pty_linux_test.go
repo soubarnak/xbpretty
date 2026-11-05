@@ -489,6 +489,12 @@ func TestS1ResizeNoticeAndReturn(t *testing.T) {
 	waitCapture(t, r, "the restored 80x24 frame", func(s string) bool {
 		return strings.Contains(frameTail(s), "Total download size:12.4 MiB")
 	})
+	// FR-071: mouse reporting is re-enabled when the frame grows back above
+	// the floor, after the notice that disabled it.
+	out := r.cap.String()
+	if mouseOn := strings.LastIndex(out, term.MouseOn); mouseOn < strings.LastIndex(out, "Terminal too small") {
+		t.Errorf("mouse reporting was not re-enabled after growing back (mouseOn=%d)", mouseOn)
+	}
 
 	r.send(t, "q")
 	if code := r.exitCode(t); code != 1 {

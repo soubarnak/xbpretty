@@ -218,3 +218,115 @@ func TestSummaryTooSmallGolden(t *testing.T) {
 		}
 	}
 }
+
+// TestSummaryModelNavigationClamps pins the interaction model #76's key loop
+// drives: row clamps, tab resets and the accessors the package-info view uses.
+func TestSummaryModelNavigationClamps(t *testing.T) {
+	m := goldenMultiTab()
+	if got := m.RowCount(); got != 2 {
+		t.Fatalf("initial RowCount = %d, want 2", got)
+	}
+	m.MoveRow(1)
+	if m.Sel != 1 {
+		t.Fatalf("MoveRow(1) Sel = %d, want 1", m.Sel)
+	}
+	m.MoveRow(10)
+	if m.Sel != 1 {
+		t.Errorf("MoveRow(10) did not clamp: Sel = %d, want 1", m.Sel)
+	}
+	m.MoveRow(-10)
+	if m.Sel != 0 {
+		t.Errorf("MoveRow(-10) did not clamp: Sel = %d, want 0", m.Sel)
+	}
+	m.SetSelection(-3)
+	if m.Sel != 0 {
+		t.Errorf("SetSelection(-3) Sel = %d, want 0", m.Sel)
+	}
+	m.SetSelection(99)
+	if m.Sel != 1 {
+		t.Errorf("SetSelection(99) Sel = %d, want 1", m.Sel)
+	}
+
+	m.MoveTab(1)
+	if m.Active != 1 || m.Sel != 0 {
+		t.Fatalf("MoveTab(1) = active %d sel %d, want 1/0", m.Active, m.Sel)
+	}
+	if got := m.RowCount(); got != 1 {
+		t.Errorf("Install RowCount = %d, want 1", got)
+	}
+	row, ok := m.SelectedRow()
+	if !ok || row.Name != "figlet" {
+		t.Errorf("Install SelectedRow = %+v/%v, want figlet", row, ok)
+	}
+	tab, ok := m.ActiveTab()
+	if !ok || tab.Label != "Install" {
+		t.Errorf("ActiveTab = %+v/%v, want Install", tab, ok)
+	}
+	m.SetSelection(9)
+	if m.Sel != 0 {
+		t.Errorf("single-row SetSelection(9) Sel = %d, want 0", m.Sel)
+	}
+
+	// The last tab has two rows: a clamped move must keep both the tab and
+	// the non-zero selection.
+	m.Active = len(m.Tabs) - 1
+	m.Sel = 1
+	m.MoveTab(1)
+	if m.Active != len(m.Tabs)-1 || m.Sel != 1 {
+		t.Errorf("clamped MoveTab changed state: active %d sel %d, want %d/1", m.Active, m.Sel, len(m.Tabs)-1)
+	}
+	m.MoveTab(-100)
+	if m.Active != 0 || m.Sel != 0 {
+		t.Errorf("MoveTab(-100) = active %d sel %d, want 0/0", m.Active, m.Sel)
+	}
+
+	empty := &SummaryModel{}
+	empty.MoveRow(1)
+	empty.MoveTab(1)
+	empty.SetSelection(1)
+	if empty.RowCount() != 0 {
+		t.Errorf("empty RowCount = %d, want 0", empty.RowCount())
+	}
+	if _, ok := empty.SelectedRow(); ok {
+		t.Error("empty SelectedRow reported a row")
+	}
+	if _, ok := empty.ActiveTab(); ok {
+		t.Error("empty ActiveTab reported a tab")
+	}
+}
+
+// TestRenderPackageInfo pins the package-info frame: the S1 border/title, the
+// label/value body, the return help and the too-small branch.
+func TestRenderPackageInfo(t *testing.T) {
+	m := &PackageInfoModel{
+		Title: "xbpretty Upgrade",
+		Fields: []InfoField{
+			{Label: "Package", Value: "libfoo"},
+			{Label: "Installed", Value: "1.2_1"},
+			{Label: "Available", Value: "1.3_1"},
+		},
+		Help: []string{"(q) back to summary"},
+	}
+	text := RenderPackageInfo(m, 80, 24, DefaultTheme()).Text()
+	for _, want := range []string{"xbpretty Upgrade", "Package:", "libfoo", "Installed:", "1.2_1", "Available:", "1.3_1", "(q) back to summary", "┏", "┗"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("package-info frame missing %q:\n%s", want, text)
+		}
+	}
+	for _, unwanted := range []string{"Old Version:", "Total download size:", "❯", "Disk space required:"} {
+		if strings.Contains(text, unwanted) {
+			t.Errorf("package-info frame drew %q:\n%s", unwanted, text)
+		}
+	}
+
+	small := RenderPackageInfo(m, 50, 15, DefaultTheme()).Text()
+	if !strings.Contains(small, TooSmall(50, 15)) {
+		t.Errorf("too-small package info missing the notice:\n%s", small)
+	}
+	if !strings.Contains(small, "xbpretty Upgrade") {
+		t.Errorf("too-small package info dropped the title:\n%s", small)
+	}
+	if strings.Contains(small, "Package:") {
+		t.Errorf("too-small package info still draws the body:\n%s", small)
+	}
+}

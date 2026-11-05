@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"bytes"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/soubarnak/xbpretty/internal/config"
 	"github.com/soubarnak/xbpretty/internal/summary"
+	"github.com/soubarnak/xbpretty/internal/tui"
 )
 
 // TestSummaryScreenGateMatrix is AC-049's engine half: exactly one cell of the
@@ -102,5 +105,110 @@ func TestPlanToTuiBuildsTheGoldenShape(t *testing.T) {
 	}
 	if model.DiskLabel != "Disk space required:" {
 		t.Errorf("disk label = %q", model.DiskLabel)
+	}
+}
+
+// infoField returns one package-info field by label.
+func infoField(t *testing.T, info *tui.PackageInfoModel, label string) (string, bool) {
+	t.Helper()
+	if info == nil {
+		t.Fatal("summaryPackageInfo returned nil")
+	}
+	for _, f := range info.Fields {
+		if f.Label == label {
+			return f.Value, true
+		}
+	}
+	return "", false
+}
+
+// TestSummaryPackageInfoLabels pins the operation-aware version label: only
+// the install family reports an "Available" version.
+func TestSummaryPackageInfoLabels(t *testing.T) {
+	cases := []struct {
+		name      string
+		tab       tui.Tab
+		wantLabel string
+		wantValue string
+		absent    string
+	}{
+		{
+			name:      "remove reports the installed version",
+			tab:       tui.Tab{Label: "Remove", Rows: []tui.PkgRow{{Name: "nano", Old: "9.2_1", Size: "3 MiB"}}},
+			wantLabel: "Version", wantValue: "9.2_1", absent: "Available",
+		},
+		{
+			name:      "autoremove reports the installed version",
+			tab:       tui.Tab{Label: "AutoRemove", Rows: []tui.PkgRow{{Name: "nano", Old: "9.2_1", Size: "3 MiB"}}},
+			wantLabel: "Version", wantValue: "9.2_1", absent: "Available",
+		},
+		{
+			name:      "held reports the held version",
+			tab:       tui.Tab{Label: "Held", Rows: []tui.PkgRow{{Name: "bash", Old: "5.2_1", New: "5.2_1", Reason: "Manual hold", Size: "1 MiB"}}},
+			wantLabel: "Version", wantValue: "5.2_1", absent: "Available",
+		},
+		{
+			name:      "configure reports the configured version",
+			tab:       tui.Tab{Label: "Configure", Rows: []tui.PkgRow{{Name: "zsh", New: "5.9_3", Size: "2 MiB"}}},
+			wantLabel: "Version", wantValue: "5.9_3", absent: "Available",
+		},
+		{
+			name:      "upgrade reports the available version",
+			tab:       tui.Tab{Label: "Upgrade", Rows: []tui.PkgRow{{Name: "glibc", Old: "2.41_1", New: "2.41_2", Size: "12 MiB"}}},
+			wantLabel: "Available", wantValue: "2.41_2", absent: "",
+		},
+		{
+			name:      "install reports the available version",
+			tab:       tui.Tab{Label: "Install", Rows: []tui.PkgRow{{Name: "figlet", New: "2.2.5_6", Size: "92 KiB"}}},
+			wantLabel: "Available", wantValue: "2.2.5_6", absent: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			model := &tui.SummaryModel{Title: "xbpretty Undo", Tabs: []tui.Tab{tc.tab}}
+			info := summaryPackageInfo(model)
+			got, ok := infoField(t, info, tc.wantLabel)
+			if !ok || got != tc.wantValue {
+				t.Errorf("%s = %q/%v, want %q", tc.wantLabel, got, ok, tc.wantValue)
+			}
+			if tc.absent != "" {
+				if _, ok := infoField(t, info, tc.absent); ok {
+					t.Errorf("package info unexpectedly has %s", tc.absent)
+				}
+			}
+			if tc.tab.Label == "Upgrade" {
+				if installed, ok := infoField(t, info, "Installed"); !ok || installed != "2.41_1" {
+					t.Errorf("Upgrade Installed = %q/%v, want 2.41_1", installed, ok)
+				}
+			}
+		})
+	}
+}
+
+// TestSummaryPackageInfoEmptySelection proves `s` with no row is a no-op.
+func TestSummaryPackageInfoEmptySelection(t *testing.T) {
+	if info := summaryPackageInfo(&tui.SummaryModel{}); info != nil {
+		t.Errorf("summaryPackageInfo on an empty model = %+v, want nil", info)
+	}
+}
+
+// TestTUITestHooksAreAbsentFromOrdinaryBuilds keeps the frame-dump and forced
+// failure variables out of the release binary.
+func TestTUITestHooksAreAbsentFromOrdinaryBuilds(t *testing.T) {
+	ordinary, err := os.ReadFile(buildBinary(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tagged, err := os.ReadFile(taggedBinary(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"XBPRETTY_TEST_TUI_DUMP", "XBPRETTY_TEST_TUI_FAIL"} {
+		if bytes.Contains(ordinary, []byte(name)) {
+			t.Errorf("the ordinary build contains %s; the TUI hook leaked out of xbpretty_testroot", name)
+		}
+		if !bytes.Contains(tagged, []byte(name)) {
+			t.Errorf("the xbpretty_testroot build is missing %s", name)
+		}
 	}
 }
