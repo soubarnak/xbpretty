@@ -3,6 +3,7 @@ package tui
 import (
 	"io"
 	"strings"
+	"sync"
 
 	"github.com/soubarnak/xbpretty/internal/term"
 )
@@ -17,11 +18,14 @@ const clearDown = "\x1b[J"
 // ordinary scrollback, and re-anchoring after each insertion. It never reads
 // input and never enters an alternate screen.
 type Viewport struct {
+	mu sync.Mutex
+
 	out    io.Writer
 	width  int
 	height int
 	// started is set by Start, drawn tracks whether the box is currently on
-	// screen, hidden is the `?1049h/l` latch's state.
+	// screen, hidden is the `?1049h/l` latch's state. The mutex keeps a
+	// deferred Teardown safe against a concurrent render or latch redraw.
 	started bool
 	drawn   bool
 	hidden  bool
@@ -49,24 +53,40 @@ func clampViewportWidth(width int) int {
 }
 
 // Width is the current box width.
-func (v *Viewport) Width() int { return v.width }
+func (v *Viewport) Width() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.width
+}
 
 // Height is the fixed number of rows in the current frame, zero before the
 // first draw.
-func (v *Viewport) Height() int { return v.height }
+func (v *Viewport) Height() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.height
+}
 
 // Hidden reports whether the `?1049h` latch has the box hidden.
-func (v *Viewport) Hidden() bool { return v.hidden }
+func (v *Viewport) Hidden() bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.hidden
+}
 
 // SetWidth follows a terminal resize. The width reflows; the height does not
 // (FR-072, AC-055).
 func (v *Viewport) SetWidth(width int) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.width = clampViewportWidth(width)
 }
 
 // Start anchors the viewport. An answered DSR needs no output; a silent one
 // writes the no-anchor fallback so the box starts on a fresh line (AC-055).
 func (v *Viewport) Start(a Anchor) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	if v.started {
 		return
 	}
@@ -79,6 +99,8 @@ func (v *Viewport) Start(a Anchor) {
 // Draw repaints the box. The cursor ends at column zero of the last row, which
 // is the position Insert and Teardown erase from.
 func (v *Viewport) Draw(lines []string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	if !v.started || v.hidden {
 		return
 	}
@@ -90,6 +112,8 @@ func (v *Viewport) Draw(lines []string) {
 // undrawn; the caller repaints with Draw so the box re-anchors below the new
 // line. If no box is on screen the line is written at the current cursor.
 func (v *Viewport) Insert(line string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	if !v.started || v.hidden {
 		return
 	}
@@ -99,6 +123,8 @@ func (v *Viewport) Insert(line string) {
 
 // Hide clears the box for a child that owns an alternate screen (`?1049h`).
 func (v *Viewport) Hide() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	if !v.started || v.hidden {
 		return
 	}
@@ -109,7 +135,9 @@ func (v *Viewport) Hide() {
 // Show redraws the box after the child leaves its alternate screen
 // (`?1049l`). The cursor is back where Hide erased the box.
 func (v *Viewport) Show(lines []string) {
-	if !v.hidden {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if !v.started || !v.hidden {
 		return
 	}
 	v.hidden = false
@@ -119,6 +147,8 @@ func (v *Viewport) Show(lines []string) {
 // Teardown clears the box and stops all further drawing. It is idempotent so
 // every exit path can call it.
 func (v *Viewport) Teardown() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	if !v.started {
 		return
 	}

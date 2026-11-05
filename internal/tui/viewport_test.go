@@ -211,3 +211,22 @@ func TestAltScreenLatchIsTwoState(t *testing.T) {
 		t.Fatal("the split AltEnter marker was not recognised")
 	}
 }
+
+// TestViewportShowBeforeStartIsInert keeps Show honest about lifecycle:
+// nothing can be redrawn before Start or after Teardown.
+func TestViewportShowBeforeStartIsInert(t *testing.T) {
+	var out bytes.Buffer
+	vp := NewViewport(&out, 80)
+	vp.Show(inlineBox)
+	if out.Len() != 0 {
+		t.Fatalf("Show before Start wrote %q", out.String())
+	}
+	vp.Start(Anchor{OK: true})
+	vp.Hide()
+	before := out.Len()
+	vp.Teardown()
+	vp.Show(inlineBox)
+	if out.Len() != before {
+		t.Fatalf("Show after Teardown wrote %q", out.String()[before:])
+	}
+}
