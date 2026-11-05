@@ -842,8 +842,8 @@ func TestPredownloadMixedRowExclusions(t *testing.T) {
 	if !strings.Contains(errs, ftpWarning) {
 		t.Errorf("missing the ftp warning %q:\n%s", ftpWarning, errs)
 	}
-	if strings.Contains(errs, "gamma-1.0_1") {
-		t.Errorf("a local row produced a warning:\n%s", errs)
+	if strings.Contains(errs, "gamma-1.0_1:") {
+		t.Errorf("a local row produced a per-package warning:\n%s", errs)
 	}
 	wantPaths := []string{
 		"/alpha-1.0_1.x86_64.xbps.sig2",
@@ -957,4 +957,32 @@ func TestPredownloadMetadataFailure(t *testing.T) {
 			t.Errorf("missing the fail-closed error:\n%s", errs)
 		}
 	})
+}
+
+// TestPredownloadFeedsTheDownloadView pins FR-041's view contract: the engine
+// events drive the seven-row Downloading Packages view, and the view clears
+// with no completion line when the fill ends.
+func TestPredownloadFeedsTheDownloadView(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.tty = true
+	e.useCacheDir(t.TempDir())
+	f := newRepoFixture(t)
+
+	pkgver := "alpha-1.0_1"
+	content := []byte("archive bytes for the view")
+	sha := f.add(pkgver, "x86_64", content)
+	e.set("XB_STUB_STDOUT", planLine(pkgver, f.URL(), len(content)+16))
+	e.set("XB_STUB_HASHES", hashLine(pkgver, sha, f.URL()))
+
+	code, _, errs := e.run("xbpretty", "install", "figlet", "-d", "-y")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if !strings.Contains(errs, "Downloading Packages") {
+		t.Errorf("the Download view was not drawn:\n%q", errs)
+	}
+	if strings.Contains(errs, "Transaction complete") {
+		t.Errorf("the view printed a completion line:\n%q", errs)
+	}
 }

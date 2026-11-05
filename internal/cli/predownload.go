@@ -192,7 +192,24 @@ func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome 
 	if st.downloadSink == nil {
 		st.downloadSink = newDownloadSink(st)
 	}
-	engineOpts.OnEvent = st.downloadSink.Event
+	// FR-041: the fill feeds #66's seven-row Download view from the engine's
+	// event stream. The view is created only when the live surface is allowed
+	// (TTY, no -v, not plain); the thin sink still records completions for
+	// the child's parser either way.
+	var view *downloadEventView
+	if mode := st.liveMode(); mode != liveOff {
+		live := newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode,
+			newProgressModel("download", targetsAsRows(targets), nil), st.theme)
+		live.Request(true)
+		view = &downloadEventView{live: live, written: map[string]int64{}}
+		defer view.finish()
+	}
+	engineOpts.OnEvent = func(ev download.Event) {
+		st.downloadSink.Event(ev)
+		if view != nil {
+			view.apply(ev)
+		}
+	}
 	if st.r.verbose {
 		engineOpts.Log = func(format string, args ...any) {
 			fmt.Fprintf(st.stderr, "verbose: "+format+"\n", args...)
@@ -224,9 +241,16 @@ func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome 
 		results = engine.Fetch(ctx, targets)
 	}
 	if ctx.Err() != nil {
+		if view != nil {
+			view.finish()
+		}
 		fmt.Fprintln(st.stderr, "xbpretty: interrupted")
 		outcome.interrupted = true
 		return outcome
+	}
+	// FR-041: on success clear; on failure clear before the per-file errors.
+	if view != nil {
+		view.finish()
 	}
 
 	outcome.attempted = len(results)
@@ -240,6 +264,68 @@ func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome 
 		}
 	}
 	return outcome
+}
+
+// downloadEventView adapts the engine's FR-041 events to #66's Download view
+// model. It tracks cumulative bytes per file because the engine reports the
+// size of each write, while the model wants the file's own percentage.
+type downloadEventView struct {
+	live    *liveProgress
+	written map[string]int64
+}
+
+func (v *downloadEventView) apply(ev download.Event) {
+	switch ev.Kind {
+	case download.EventFileTick:
+		if strings.HasSuffix(ev.File, ".sig2") {
+			return
+		}
+		v.written[ev.File] += ev.Bytes
+		percent := 0
+		if ev.Total > 0 {
+			percent = int(float64(v.written[ev.File]) / float64(ev.Total) * 100)
+			if percent > 100 {
+				percent = 100
+			}
+		}
+		v.live.Apply(false, func(m *progressModel) {
+			m.downloadTick(DownloadTick{Filename: ev.File, FilePercent: percent})
+		})
+	case download.EventCacheHit, download.EventFileDone:
+		v.live.Apply(true, func(m *progressModel) {
+			m.downloadDone(DownloadComplete{Filename: ev.File})
+		})
+	case download.EventRetry, download.EventFileFailed, download.EventFileStart:
+		v.live.Request(true)
+	case download.EventFinished:
+		v.live.Request(true)
+	}
+}
+
+func (v *downloadEventView) finish() {
+	v.live.Finish()
+}
+
+// targetsAsRows turns the fill's targets back into the row shape the progress
+// model seeds itself from: the exact plan bytes are what the view counts.
+func targetsAsRows(targets []download.Target) []xbps.Row {
+	rows := make([]xbps.Row, 0, len(targets))
+	for _, target := range targets {
+		name, version := xbps.SplitPkgver(target.Pkgver)
+		if name == "" {
+			name = target.Package
+		}
+		rows = append(rows, xbps.Row{
+			Name:         name,
+			Version:      version,
+			Action:       xbps.ActionInstall,
+			Arch:         target.Arch,
+			Repo:         target.Repository,
+			DownloadSize: target.Size,
+			HasDownload:  true,
+		})
+	}
+	return rows
 }
 
 // predownloadDisabledByPassthru applies FR-038's passthrough rule: `-c` or
