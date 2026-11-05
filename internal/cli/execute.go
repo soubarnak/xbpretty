@@ -46,6 +46,9 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 	}
 	stderr := st.r.lastStderr
 	if code == 0 {
+		// FR-031: the history entry is published first, then the line log,
+		// the reboot hint and any implicit autoremove.
+		st.finishHistory()
 		// FR-013: every real execution that exits 0 is logged, and `update`
 		// is one of them even though it produces no rows of its own.
 		if st.log {

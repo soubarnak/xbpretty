@@ -15,4 +15,10 @@ case "${1:-}" in
 esac
 printf '%s' "${XB_STUB_RUN_STDOUT:-${XB_STUB_STDOUT:-}}"
 printf '%s' "${XB_STUB_RUN_STDERR:-${XB_STUB_STDERR:-}}" >&2
-exit "${XB_STUB_EXIT:-0}"
+code="${XB_STUB_EXIT:-0}"
+# A successful real run flips the fixture to its after state so the
+# history snapshot sees the change; a failed run leaves it alone.
+case "${1:-}" in
+  -*y*) [ "$code" = 0 ] && [ -n "${XB_STUB_AFTER_MARK:-}" ] && : > "$XB_STUB_AFTER_MARK" ;;
+esac
+exit "$code"
