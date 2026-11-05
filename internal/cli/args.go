@@ -9,25 +9,48 @@ import (
 // options is one parsed command line: xbpretty's own flags, the command, the
 // package arguments, and everything after `--` for xbps.
 type options struct {
-	dryRun      bool
-	yes         bool
-	verbose     bool
-	noSync      bool
-	noLog       bool
-	color       string // "", "auto", "always" or "never"
-	version     bool
-	help        bool
-	completion  bool
-	command     string
-	args        []string
-	passthru    []string
-	dashDash    bool // a `--` was given, even with nothing after it
-	limit       int  // --limit N for `log`; 0 means not given
-	boxStyle    string
-	progressBar *bool
-	configPath  string // --config FILE; empty means the default user layer
-	explicit    map[string]bool
+	dryRun               bool
+	yes                  bool
+	verbose              bool
+	noSync               bool
+	noLog                bool
+	color                string // "", "auto", "always" or "never"
+	version              bool
+	help                 bool
+	completion           bool
+	command              string
+	args                 []string
+	passthru             []string
+	dashDash             bool // a `--` was given, even with nothing after it
+	limit                int  // --limit N for `log`; 0 means not given
+	boxStyle             string
+	progressBar          *bool
+	configPath           string // --config FILE; empty means the default layers
+	debug                bool   // --debug: report layers, legacy keys and the resolved config
+	noColor              bool   // --no-color: stronger than --color
+	update               bool   // --update: force the sync step
+	noUpdate             bool   // --no-update / --no-sync: suppress the sync step
+	simple               bool   // --simple
+	full                 bool   // --full / --safe
+	noFull               bool   // --no-full
+	autoRemove           *bool  // --auto-remove / --no-auto-remove
+	autoRemovePos        bool
+	autoRemoveNeg        bool
+	assumeNo             bool     // --assume-no
+	historyDir           string   // --history-dir DIR
+	country              []string // fetch's -c/--country
+	countryBeforeCommand bool
+	explicit             map[string]bool
 }
+
+// usageError is a usage rejection that also prints a hint line. FR-059's -c
+// collision uses it.
+type usageError struct {
+	msg  string
+	hint string
+}
+
+func (e *usageError) Error() string { return e.msg }
 
 // parseArgs reads xbpretty's flags, the command and the package arguments.
 // Flags may appear before or after the command; everything after `--` is
@@ -57,6 +80,7 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 				o.explicit["verbose"] = true
 			case "no-sync":
 				o.noSync = true
+				o.noUpdate = true
 				o.explicit["sync"] = true
 			case "no-log":
 				o.noLog = true
@@ -104,6 +128,69 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 				}
 				o.limit = n
 				o.explicit["limit"] = true
+			case "debug":
+				o.debug = true
+				o.explicit["debug"] = true
+			case "no-color":
+				o.noColor = true
+				o.explicit["no_color"] = true
+			case "tui":
+				o.explicit["tui"] = true
+			case "no-tui":
+				o.explicit["no_tui"] = true
+			case "update":
+				o.update = true
+				o.explicit["update"] = true
+			case "no-update":
+				o.noUpdate = true
+				o.explicit["sync"] = true
+			case "simple":
+				o.simple = true
+				o.explicit["simple"] = true
+			case "full", "safe":
+				o.full = true
+				o.explicit["full"] = true
+			case "no-full":
+				o.noFull = true
+				o.explicit["no_full"] = true
+			case "auto-remove", "autoremove":
+				val := true
+				o.autoRemove = &val
+				o.autoRemovePos = true
+				o.explicit["auto_remove"] = true
+			case "no-auto-remove", "no-autoremove":
+				val := false
+				o.autoRemove = &val
+				o.autoRemoveNeg = true
+				o.explicit["auto_remove"] = true
+			case "assume-no":
+				o.assumeNo = true
+				o.explicit["assume_no"] = true
+			case "history-dir":
+				if !hasValue {
+					if i+1 >= len(argv) {
+						return nil, fmt.Errorf("--history-dir needs a directory")
+					}
+					i++
+					value = argv[i]
+				}
+				if value == "" {
+					return nil, fmt.Errorf("--history-dir needs a directory")
+				}
+				o.historyDir = value
+				o.explicit["history_dir"] = true
+			case "country":
+				if !hasValue {
+					if i+1 >= len(argv) {
+						return nil, fmt.Errorf("-c/--country needs a value")
+					}
+					i++
+					value = argv[i]
+				}
+				o.country = append(o.country, value)
+				if knownCommand == "" && len(rest) == 0 {
+					o.countryBeforeCommand = true
+				}
 			case "version":
 				o.version = true
 			case "help":
@@ -140,6 +227,24 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 				return nil, fmt.Errorf("unknown flag --%s", name)
 			}
 		case len(arg) > 1 && arg[0] == '-':
+			// -c is fetch's --country; it is never --config.
+			if arg == "-c" || strings.HasPrefix(arg, "-c=") {
+				value := ""
+				if strings.HasPrefix(arg, "-c=") {
+					value = strings.TrimPrefix(arg, "-c=")
+				} else {
+					if i+1 >= len(argv) {
+						return nil, fmt.Errorf("-c/--country needs a value")
+					}
+					i++
+					value = argv[i]
+				}
+				o.country = append(o.country, value)
+				if knownCommand == "" && len(rest) == 0 {
+					o.countryBeforeCommand = true
+				}
+				continue
+			}
 			// A cluster such as -yn, or a long flag written short (-color=never).
 			if name, value, _ := strings.Cut(strings.TrimPrefix(arg, "-"), "="); name == "color" {
 				if !validColor(value) {
@@ -170,7 +275,13 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 		}
 	}
 
+	if err := o.checkConflicts(); err != nil {
+		return nil, err
+	}
 	if len(rest) == 0 {
+		if err := o.checkCountry(); err != nil {
+			return nil, err
+		}
 		if knownCommand == "" && len(o.passthru) > 0 {
 			// `xbpretty -- pkg` carries no command: treat it as an install.
 			o.command = "install"
@@ -207,7 +318,44 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 		o.command = cmd
 		o.args = rest[1:]
 	}
+	if err := o.checkCountry(); err != nil {
+		return nil, err
+	}
 	return o, nil
+}
+
+// checkConflicts enforces the flag pairs FR-003 makes mutually exclusive.
+func (o *options) checkConflicts() error {
+	// FR-057 gives --no-color stronger precedence than --color, so both may
+	// be present; the resolver picks Never.
+	if o.explicit["tui"] && o.explicit["no_tui"] {
+		return fmt.Errorf("--tui and --no-tui are mutually exclusive")
+	}
+	if o.yes && o.assumeNo {
+		return fmt.Errorf("-y and --assume-no are mutually exclusive")
+	}
+	if o.update && o.noUpdate {
+		return fmt.Errorf("--update and --no-update/--no-sync are mutually exclusive")
+	}
+	if o.autoRemovePos && o.autoRemoveNeg {
+		return fmt.Errorf("--auto-remove and --no-auto-remove are mutually exclusive")
+	}
+	return nil
+}
+
+// checkCountry reserves -c for fetch: on any other command (or before the
+// command) it is an unknown flag with the FR-059 hint.
+func (o *options) checkCountry() error {
+	if len(o.country) == 0 {
+		return nil
+	}
+	if o.command != "fetch" || o.countryBeforeCommand {
+		return &usageError{
+			msg:  "unknown flag -c",
+			hint: "xbpretty: -c is fetch's --country; config is --config",
+		}
+	}
+	return nil
 }
 
 func validColor(value string) bool {

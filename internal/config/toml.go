@@ -66,15 +66,15 @@ type tomlTable struct {
 }
 
 type tomlDoc struct {
+	path   string
 	top    []tomlEntry
 	tables []tomlTable
 }
 
-// parseDocument reads the whole supported TOML subset. allowBare exists for
-// the rev-5 value shim that a later ticket layers on top: the parser can
-// carry a bare scalar, but strict rev-6 parsing leaves it switched off so a
-// bare value is a parse error.
-func parseDocument(path string, data []byte, allowBare bool) (*tomlDoc, error) {
+// parseDocument reads the whole supported TOML subset. Bare scalars are
+// carried only for the ten rev-5 top-level keys (FR-056); every other position
+// stays strict TOML, so a bare value there is a parse error.
+func parseDocument(path string, data []byte) (*tomlDoc, error) {
 	if len(data) > maxConfigBytes {
 		if line := firstOversizedLine(data); line > 0 {
 			return nil, &Error{Path: path, Line: line, Message: "line is longer than 1 MiB"}
@@ -89,11 +89,10 @@ func parseDocument(path string, data []byte, allowBare bool) (*tomlDoc, error) {
 	}
 
 	p := &parser{
-		path:      path,
-		allowBare: allowBare,
-		doc:       &tomlDoc{},
-		explicit:  map[string]bool{},
-		keys:      map[string]map[string]bool{},
+		path:     path,
+		doc:      &tomlDoc{path: path},
+		explicit: map[string]bool{},
+		keys:     map[string]map[string]bool{},
 	}
 	if err := p.parseLines(data); err != nil {
 		return nil, err
@@ -125,12 +124,11 @@ func firstOversizedLine(data []byte) int {
 }
 
 type parser struct {
-	path      string
-	allowBare bool
-	doc       *tomlDoc
-	explicit  map[string]bool
-	keys      map[string]map[string]bool
-	current   *tomlTable
+	path     string
+	doc      *tomlDoc
+	explicit map[string]bool
+	keys     map[string]map[string]bool
+	current  *tomlTable
 }
 
 func (p *parser) parseLines(data []byte) error {
@@ -247,12 +245,17 @@ func (p *parser) parseKeyValue(line string, lineNo int) error {
 	if err := validateBareKey(keyPart, p.path, lineNo); err != nil {
 		return err
 	}
+	if p.current != nil && isLegacyKey(keyPart) && !canonicalKeyInTable(p.current.name, keyPart) {
+		return &Error{Path: p.path, Line: lineNo, Message: fmt.Sprintf(
+			"unknown key %q; rev-5 keys must appear before the first table", keyPart)}
+	}
 	rest := line[eq+1:]
 	if strings.TrimSpace(rest) == "" {
 		return &Error{Path: p.path, Line: lineNo, Message: "expected a value after '='"}
 	}
 
-	vp := &valueParser{path: p.path, line: lineNo, input: rest, allowBare: p.allowBare}
+	bareOK := p.current == nil && isLegacyKey(keyPart)
+	vp := &valueParser{path: p.path, line: lineNo, input: rest, allowBare: bareOK}
 	value, err := vp.parseValue()
 	if err != nil {
 		return err

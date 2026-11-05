@@ -143,7 +143,7 @@ func TestSchemaValidationErrors(t *testing.T) {
 	}{
 		{"unknown table", "[Bogus]\nx = true\n", 1, "unknown table [Bogus]"},
 		{"unknown nested table", "[Color.extra]\nx = true\n", 1, "unknown table [Color.extra]"},
-		{"unknown top-level key", "assume_yes = true\n", 1, "unknown key \"assume_yes\""},
+		{"unknown top-level key", "colour = true\n", 1, "unknown key \"colour\""},
 		{"unknown Nala key", "[Nala]\nnope = true\n", 2, `unknown key "nope" in [Nala]`},
 		{"misspelled Nala key with integer", "[Nala]\nauto_remov = 1\n", 2, `unknown key "auto_remov" in [Nala]`},
 		{"misspelled Nala key with string", "[Nala]\nassume_ye = \"true\"\n", 2, `unknown key "assume_ye" in [Nala]`},

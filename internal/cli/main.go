@@ -62,6 +62,12 @@ type state struct {
 	boxStyle    string
 	progressBar bool
 	unit        summary.SizeUnit
+	mode        config.UIMode
+	assumeYes   bool
+	autoRemove  bool
+	simple      bool
+	full        bool
+	historyDir  string
 }
 
 // Main runs xbpretty with the process arguments and returns its exit code.
@@ -87,6 +93,9 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 	opts, errArgs := parseArgs(args, cmd)
 	if errArgs != nil {
 		fmt.Fprintf(err, "xbpretty: %v\n", errArgs)
+		if he, ok := errArgs.(*usageError); ok && he.hint != "" {
+			fmt.Fprintln(err, he.hint)
+		}
 		usage(err)
 		return exitUsage
 	}
@@ -119,39 +128,41 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 
 	// FR-053: only help, version, completion and link bypass config. Every
 	// other command, including log, validates the selected layer.
-	cfg, loadErr := loadConfig(opts)
+	res, loadErr := loadConfig(opts)
 	if loadErr != nil {
 		fmt.Fprintf(err, "xbpretty: %v\n", loadErr)
 		return exitUsage
 	}
+	cfg := res.Config
+	resolved := resolveSettings(cfg, opts)
+	reportConfig(err, opts, res, resolved)
 	isLogCommand := opts.command == "log" && cmd == ""
 	if isLogCommand {
 		return st.runLog(opts)
 	}
-	verbose := opts.verbose
 	st.opts = opts
-	st.sync = cfg.Nala.AutoUpdate
-	if opts.explicit["sync"] {
-		st.sync = !opts.noSync
-	}
-	st.log = cfg.Xbps.TransactionLog
-	if opts.explicit["log"] {
-		st.log = !opts.noLog
-	}
-	st.color = wantColor(cfg.Color.Mode, opts)
+	st.mode = resolved.mode
+	st.assumeYes = resolved.assumeYes
+	st.autoRemove = resolved.autoRemove
+	st.simple = resolved.simple
+	st.full = resolved.full
+	st.historyDir = resolved.historyDir
+	st.sync = resolved.sync
+	st.log = resolved.log
+	st.color = wantColor(resolved.color, opts)
 	st.boxStyle = "rounded"
 	if opts.explicit["box_style"] {
 		st.boxStyle = opts.boxStyle
 	}
-	st.progressBar = cfg.Ui.Mode != config.ModePlain
+	st.progressBar = resolved.mode != config.ModePlain
 	if opts.explicit["progress_bar"] && opts.progressBar != nil {
 		st.progressBar = *opts.progressBar
 	}
-	st.unit = summary.SizeUnit(cfg.Ui.Unit)
+	st.unit = summary.SizeUnit(resolved.unit)
 	st.r = &runner{
 		cfg:     cfg,
 		out:     err,
-		verbose: verbose,
+		verbose: resolved.verbose,
 		stdout:  out,
 		stderr:  err,
 		stdin:   in,
@@ -171,13 +182,10 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 	return st.runTransaction(cmd, opts)
 }
 
-// loadConfig resolves the configuration layer for this run. --config replaces
-// the default user layer; system layers and trust are ticket #60.
-func loadConfig(opts *options) (config.Config, error) {
-	if opts.explicit["config"] {
-		return config.LoadFile(opts.configPath)
-	}
-	return config.Load()
+// loadConfig resolves the configuration layers for this run: the system and
+// user defaults, or --config replacing both (FR-054).
+func loadConfig(opts *options) (config.Result, error) {
+	return config.LoadSelected(opts.configPath)
 }
 
 // splitArgv takes the command out of argv[0] for the xbp-* link names.
@@ -196,7 +204,9 @@ func splitArgv(argv []string) (cmd string, args []string) {
 // terminal with a non-empty NO_COLOR unset.
 func wantColor(mode config.ColorMode, opts *options) bool {
 	value := mode
-	if opts.explicit["color"] {
+	if opts.noColor {
+		value = config.ColorNever
+	} else if opts.explicit["color"] {
 		value = colorModeFromFlag(opts.color)
 	}
 	switch value {
