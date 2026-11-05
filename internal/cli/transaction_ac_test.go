@@ -525,9 +525,9 @@ func TestAC056BinaryExistenceIsPerCommand(t *testing.T) {
 	}
 }
 
-// TestDownloadOnlyChecksComeFirst pins FR-040's checks before the #72 seam:
-// a non-root run gets the elevation hint, -n refuses, and a piped root run
-// gets the non-TTY line, all without reaching the seam.
+// TestDownloadOnlyChecksComeFirst pins FR-040's checks before the cache fill:
+// a non-root run gets the elevation hint naming the stop flag, -n refuses, and
+// a piped root run gets the non-TTY line, all without downloading anything.
 func TestDownloadOnlyChecksComeFirst(t *testing.T) {
 	t.Run("non-root", func(t *testing.T) {
 		e := newEnv(t)
@@ -540,8 +540,8 @@ func TestDownloadOnlyChecksComeFirst(t *testing.T) {
 		if !strings.Contains(errs, "hint: rerun as root: ") {
 			t.Errorf("missing the elevation hint:\n%s", errs)
 		}
-		if strings.Contains(errs, "download-only for install is not implemented") {
-			t.Errorf("the #72 seam ran before the checks:\n%s", errs)
+		if !strings.Contains(errs, "xbp install figlet --download-only") {
+			t.Errorf("the elevation hint drops the stop flag:\n%s", errs)
 		}
 	})
 	t.Run("assume-no", func(t *testing.T) {

@@ -914,6 +914,12 @@ func (st *state) privHint(cmd string, opts *options) {
 	if len(opts.args) > 0 {
 		line += " " + strings.Join(opts.args, " ")
 	}
+	// The hint has to reproduce the invocation that was refused, stop flags
+	// included: telling a --download-only user to run a full install would
+	// do more than they asked for.
+	if opts.downloadOnly {
+		line += " --download-only"
+	}
 	fmt.Fprintf(st.stderr, "hint: rerun as root: %s %s\n", elevate, line)
 }
 

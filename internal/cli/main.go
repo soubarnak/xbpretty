@@ -258,6 +258,10 @@ func (st *state) dispatch(opts *options) int {
 		}
 		return st.runHistory(opts)
 	case "undo", "redo":
+		// #70 owns replay. When undo/redo start running a real transaction
+		// (FR-033), they are real transactions under FR-036 too: their plan
+		// closure must go through st.predownload between the checks and the
+		// child, exactly like the six transaction commands above.
 		return st.runUnimplemented(opts.command, opts)
 	}
 	fmt.Fprintf(st.stderr, "xbpretty: unknown command %q\n", opts.command)

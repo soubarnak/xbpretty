@@ -22,6 +22,11 @@ const removePlanFixture = "wget-1.25.0_1 remove x86_64 https://repo-default.void
 // xbps 0.60.7 (see testdata/parser/README.md).
 const planFixture = "figlet-2.2.5_6 install x86_64 https://repo-default.voidlinux.org/current 672593 94372\n"
 
+// localPlanFixture is the same row on a filesystem repository. FR-036 excludes
+// it from the predownload set, so a built-binary test can run a real-looking
+// transaction with no network while still rendering a summary.
+const localPlanFixture = "figlet-2.2.5_6 install x86_64 /var/cache/xbps 672593 94372\n"
+
 // env is one test's world: a config file pointing at stub xbps binaries,
 // fixture variables for those stubs, and the command log.
 type env struct {

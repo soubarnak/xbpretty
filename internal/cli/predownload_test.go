@@ -283,13 +283,18 @@ func TestAC031DownloadOnlyFailsClosed(t *testing.T) {
 	e.useCacheDir(cache)
 	f := newRepoFixture(t)
 
-	good, bad := "alpha-1.0_1", "beta-2.0_1"
+	good, bad, later := "alpha-1.0_1", "beta-2.0_1", "gamma-3.0_1"
 	goodBytes := []byte("good archive")
 	badBytes := []byte("bad archive")
+	laterBytes := []byte("later archive")
 	goodSHA := f.add(good, "x86_64", goodBytes)
 	f.add(bad, "x86_64", badBytes)
-	plan := planLine(good, f.URL(), len(goodBytes)+16) + planLine(bad, f.URL(), len(badBytes)+16)
-	hashes := hashLine(good, goodSHA, f.URL()) + hashLine(bad, strings.Repeat("0", 64), f.URL())
+	laterSHA := f.add(later, "x86_64", laterBytes)
+	plan := planLine(good, f.URL(), len(goodBytes)+16) +
+		planLine(bad, f.URL(), len(badBytes)+16) +
+		planLine(later, f.URL(), len(laterBytes)+16)
+	hashes := hashLine(good, goodSHA, f.URL()) + hashLine(bad, strings.Repeat("0", 64), f.URL()) +
+		hashLine(later, laterSHA, f.URL())
 	e.set("XB_STUB_STDOUT", plan)
 	e.set("XB_STUB_HASHES", hashes)
 
@@ -305,6 +310,16 @@ func TestAC031DownloadOnlyFailsClosed(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cache, bad+".x86_64.xbps")); err == nil {
 		t.Error("the mismatching archive was published")
+	}
+	// Fail-closed abort is the first failure: the archive after it is never
+	// attempted, so no child would have covered it.
+	for _, path := range f.requestedPaths() {
+		if strings.Contains(path, later) {
+			t.Errorf("the run continued past the first failure: %q", f.requestedPaths())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(cache, later+".x86_64.xbps")); err == nil {
+		t.Error("an archive after the first failure was published")
 	}
 }
 
@@ -703,4 +718,243 @@ func downloadEventFileDone(file string, size int64) download.Event {
 
 func downloadEventCacheHit(file string, size int64) download.Event {
 	return download.Event{Kind: download.EventCacheHit, File: file, Bytes: size, Total: size}
+}
+
+// TestPredownloadPassthruSpellings pins FR-038's -c/-r rule for both the
+// short clusters and xbps's long --cachedir/--rootdir forms: the fill is off
+// and only the verbose line says so.
+func TestPredownloadPassthruSpellings(t *testing.T) {
+	cases := []struct {
+		name     string
+		passthru []string
+	}{
+		{"short cachedir", []string{"-c", "/tmp/other-cache"}},
+		{"short rootdir", []string{"-r", "/tmp/other-root"}},
+		{"short cluster", []string{"-cr", "/tmp/other"}},
+		{"long cachedir space", []string{"--cachedir", "/tmp/other-cache"}},
+		{"long cachedir equals", []string{"--cachedir=/tmp/other-cache"}},
+		{"long rootdir space", []string{"--rootdir", "/tmp/other-root"}},
+		{"long rootdir equals", []string{"--rootdir=/tmp/other-root"}},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.root = true
+			cache := t.TempDir()
+			e.useCacheDir(cache)
+			f := newRepoFixture(t)
+
+			pkgver := "alpha-1.0_1"
+			content := []byte("archive")
+			sha := f.add(pkgver, "x86_64", content)
+			e.set("XB_STUB_STDOUT", planLine(pkgver, f.URL(), len(content)+16))
+			e.set("XB_STUB_HASHES", hashLine(pkgver, sha, f.URL()))
+
+			argv := append([]string{"xbpretty", "install", "figlet", "-y", "-v", "--"}, tt.passthru...)
+			code, _, errs := e.run(argv...)
+			if code != 0 {
+				t.Fatalf("exit = %d, want 0\n%s", code, errs)
+			}
+			if got := f.requestCount(); got != 0 {
+				t.Errorf("%v still downloaded %d files: %q", tt.passthru, got, f.requestedPaths())
+			}
+			if !strings.Contains(errs, "verbose: predownload disabled by the -c/-r passthrough") {
+				t.Errorf("missing the verbose line:\n%s", errs)
+			}
+		})
+	}
+}
+
+// TestPredownloadInvalidFilename pins FR-037's rejection for both surfaces: a
+// real transaction falls back with FR-038's skip warning, and a fail-closed
+// surface prints the bare FR-037 line and exits 1.
+func TestPredownloadInvalidFilename(t *testing.T) {
+	pkgver := "evil..pkg-1.0_1"
+	setup := func(t *testing.T) (*env, *repoFixture) {
+		e := newEnv(t)
+		e.root = true
+		e.useCacheDir(t.TempDir())
+		f := newRepoFixture(t)
+		e.set("XB_STUB_STDOUT", planLine(pkgver, f.URL(), 4096))
+		e.set("XB_STUB_HASHES", "")
+		return e, f
+	}
+
+	t.Run("real transaction warns and falls back", func(t *testing.T) {
+		e, f := setup(t)
+		code, _, errs := e.run("xbpretty", "install", "figlet", "-y")
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0 (xbps takes over)\n%s", code, errs)
+		}
+		want := "xbpretty: predownload skipped: invalid package filename from repository metadata: " + pkgver +
+			"; xbps will download the archives\n"
+		if !strings.Contains(errs, want) {
+			t.Errorf("missing the skip warning %q:\n%s", want, errs)
+		}
+		if got := f.requestCount(); got != 0 {
+			t.Errorf("the invalid target was fetched: %q", f.requestedPaths())
+		}
+		if !ranRealCommand(e) {
+			t.Errorf("xbps never took over: %q", e.commands())
+		}
+	})
+
+	t.Run("download-only fails closed", func(t *testing.T) {
+		e, _ := setup(t)
+		code, _, errs := e.run("xbpretty", "install", "figlet", "-d", "-y")
+		if code != 1 {
+			t.Fatalf("exit = %d, want 1\n%s", code, errs)
+		}
+		want := "xbpretty: invalid package filename from repository metadata: " + pkgver + "\n"
+		if !strings.Contains(errs, want) {
+			t.Errorf("missing the FR-037 line %q:\n%s", want, errs)
+		}
+	})
+}
+
+// TestPredownloadMixedRowExclusions pins FR-036's row rules together: one
+// remote row is fetched, ftp gets exactly one warning, and local, hold,
+// configure and remove rows are never targets.
+func TestPredownloadMixedRowExclusions(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	cache := t.TempDir()
+	e.useCacheDir(cache)
+	f := newRepoFixture(t)
+
+	remote := "alpha-1.0_1"
+	content := []byte("remote archive")
+	sha := f.add(remote, "x86_64", content)
+	plan := planLine(remote, f.URL(), len(content)+16) +
+		planLine("beta-1.0_1", "ftp://ftp.example/current", 100) +
+		planLine("gamma-1.0_1", "/var/cache/xbps", 100) +
+		"delta-1.0_1 hold x86_64 " + f.URL() + " 1000 100\n" +
+		"epsilon-1.0_1 configure x86_64 " + f.URL() + " 1000 100\n" +
+		"zeta-1.0_1 remove x86_64 " + f.URL() + " 1000 100\n"
+	e.set("XB_STUB_STDOUT", plan)
+	e.set("XB_STUB_HASHES", hashLine(remote, sha, f.URL()))
+
+	code, _, errs := e.run("xbpretty", "install", "figlet", "-y")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	const ftpWarning = "1 archive(s) from ftp:// repositories were not predownloaded; xbps will fetch them\n"
+	if !strings.Contains(errs, ftpWarning) {
+		t.Errorf("missing the ftp warning %q:\n%s", ftpWarning, errs)
+	}
+	if strings.Contains(errs, "gamma-1.0_1") {
+		t.Errorf("a local row produced a warning:\n%s", errs)
+	}
+	wantPaths := []string{
+		"/alpha-1.0_1.x86_64.xbps.sig2",
+		"/alpha-1.0_1.x86_64.xbps",
+	}
+	if got := f.requestedPaths(); !equalStrings(got, wantPaths) {
+		t.Errorf("requested %q, want exactly the remote pair %q", got, wantPaths)
+	}
+}
+
+// TestDownloadOnlyAllCached pins FR-040's all-cached case: no network, no
+// output, exit 0.
+func TestDownloadOnlyAllCached(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	cache := t.TempDir()
+	e.useCacheDir(cache)
+	f := newRepoFixture(t)
+
+	pkgver := "alpha-1.0_1"
+	content := []byte("cached archive")
+	sha := f.add(pkgver, "x86_64", content)
+	if err := os.WriteFile(filepath.Join(cache, pkgver+".x86_64.xbps"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, pkgver+".x86_64.xbps.sig2"), []byte("sig"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.set("XB_STUB_STDOUT", planLine(pkgver, f.URL(), len(content)+16))
+	e.set("XB_STUB_HASHES", hashLine(pkgver, sha, f.URL()))
+
+	code, out, errs := e.run("xbpretty", "install", "figlet", "-d", "-y")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if got := f.requestCount(); got != 0 {
+		t.Errorf("an all-cached download-only run made %d requests: %q", got, f.requestedPaths())
+	}
+	if strings.Contains(errs, "predownload") {
+		t.Errorf("an all-cached run printed a predownload line:\n%s", errs)
+	}
+	if !strings.Contains(out, "Install") {
+		t.Errorf("the summary is missing:\n%s", out)
+	}
+}
+
+// TestDownloadOnlyMissingSignatureFailsClosed pins FR-040: a missing .sig2 on
+// a remote repository is a failure, not a fallback, when no child takes over.
+func TestDownloadOnlyMissingSignatureFailsClosed(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.useCacheDir(t.TempDir())
+	f := newRepoFixture(t)
+
+	pkgver := "alpha-1.0_1"
+	content := []byte("archive")
+	sha := f.add(pkgver, "x86_64", content)
+	f.refuse("/"+pkgver+".x86_64.xbps.sig2", http.StatusNotFound)
+	e.set("XB_STUB_STDOUT", planLine(pkgver, f.URL(), len(content)+16))
+	e.set("XB_STUB_HASHES", hashLine(pkgver, sha, f.URL()))
+
+	code, _, errs := e.run("xbpretty", "install", "figlet", "-d", "-y")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, errs)
+	}
+	if !strings.Contains(errs, "the repository no longer serves the signature") {
+		t.Errorf("missing the per-file signature error:\n%s", errs)
+	}
+}
+
+// TestPredownloadMetadataFailure pins FR-038's metadata-failure shape: the
+// bulk hash pass failing skips the fill with the skip warning for a real
+// transaction and fails closed for --download-only.
+func TestPredownloadMetadataFailure(t *testing.T) {
+	setup := func(t *testing.T) (*env, *repoFixture) {
+		e := newEnv(t)
+		e.root = true
+		e.useCacheDir(t.TempDir())
+		f := newRepoFixture(t)
+		pkgver := "alpha-1.0_1"
+		content := []byte("archive")
+		sha := f.add(pkgver, "x86_64", content)
+		e.set("XB_STUB_STDOUT", planLine(pkgver, f.URL(), len(content)+16))
+		e.set("XB_STUB_HASHES", hashLine(pkgver, sha, f.URL()))
+		e.set("XB_STUB_HASH_EXIT", "1")
+		return e, f
+	}
+
+	t.Run("real transaction warns and falls back", func(t *testing.T) {
+		e, f := setup(t)
+		code, _, errs := e.run("xbpretty", "install", "figlet", "-y")
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0 (xbps takes over)\n%s", code, errs)
+		}
+		want := "xbpretty: predownload skipped: repository metadata unavailable: xbps-query exited 1; xbps will download the archives\n"
+		if !strings.Contains(errs, want) {
+			t.Errorf("missing the skip warning %q:\n%s", want, errs)
+		}
+		if got := f.requestCount(); got != 0 {
+			t.Errorf("a transfer ran without metadata: %q", f.requestedPaths())
+		}
+	})
+
+	t.Run("download-only fails closed", func(t *testing.T) {
+		e, _ := setup(t)
+		code, _, errs := e.run("xbpretty", "install", "figlet", "-d", "-y")
+		if code != 1 {
+			t.Fatalf("exit = %d, want 1\n%s", code, errs)
+		}
+		if !strings.Contains(errs, "xbpretty: predownload: repository metadata unavailable: xbps-query exited 1") {
+			t.Errorf("missing the fail-closed error:\n%s", errs)
+		}
+	})
 }

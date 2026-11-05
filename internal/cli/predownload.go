@@ -94,12 +94,13 @@ func (st *state) predownload(rows []xbps.Row, failClosed bool) int {
 		return exitInterrupted
 	case outcome.invalid != nil:
 		// FR-037 names the offending metadata; there is nothing to fetch for
-		// that row. A child can still be told to do it, so only the
-		// fail-closed surfaces end here.
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", outcome.invalid)
+		// that row. A real transaction keeps FR-038's skip shape and lets
+		// xbps decide; a fail-closed surface has no child and ends here.
 		if failClosed {
+			fmt.Fprintf(st.stderr, "xbpretty: %v\n", outcome.invalid)
 			return exitRuntime
 		}
+		fmt.Fprintf(st.stderr, "xbpretty: predownload skipped: %v; xbps will download the archives\n", outcome.invalid)
 		return -1
 	case outcome.skipped != nil:
 		if failClosed {
@@ -134,23 +135,9 @@ func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome 
 
 	// FR-036's download set: downloading actions on http(s) repositories with
 	// a reported size (or an unreported download action). ftp and local rows
-	// are counted, never fetched.
-	planned := download.PlannedDownloadRows(rows)
-	var remote []xbps.Row
-	excludedFTP := 0
-	for _, row := range planned {
-		switch {
-		case download.IsFTPRepository(row.Repo):
-			excludedFTP++
-		case !download.IsRemoteRepository(row.Repo):
-			// Local and file:// repositories are excluded silently: xbps
-			// does not cache local archives.
-		default:
-			if download.IsDownloadRow(row) {
-				remote = append(remote, row)
-			}
-		}
-	}
+	// are counted, never fetched; one predicate decides both the targets and
+	// the FR-037 warning counts.
+	remote, excludedFTP, _ := download.PartitionDownloadRows(rows)
 	if excludedFTP > 0 {
 		fmt.Fprintf(st.stderr, "%d archive(s) from ftp:// repositories were not predownloaded; xbps will fetch them\n", excludedFTP)
 	}
@@ -176,7 +163,7 @@ func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome 
 	}
 	hashes := download.ParseHashes(res.stdout)
 
-	targets, _, _, err := download.TargetsFromRows(planned, hashes)
+	targets, _, _, err := download.TargetsFromRows(remote, hashes)
 	if err != nil {
 		outcome.invalid = err
 		return outcome
@@ -194,9 +181,7 @@ func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome 
 	// starts on a full cache filesystem. A fully cached plan asks for nothing.
 	var need uint64
 	for _, target := range targets {
-		if download.NeedsFetch(target, dir) {
-			need += target.Size
-		}
+		need += download.ArchiveNeedSize(target, dir)
 	}
 	if err := preflightFn(dir, need); err != nil {
 		outcome.skipped = fmt.Errorf("disk space check failed: %w", err)
@@ -219,7 +204,25 @@ func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome 
 	// exits 130 before any child is started.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	results := engine.Fetch(ctx, targets)
+	var results []download.Result
+	if failClosed {
+		// FR-038/ADR-0014: an explicit download aborts on the first exhausted
+		// file or hash mismatch. One target at a time keeps "first" literal
+		// and guarantees that every file verified before it stays published;
+		// there is no child to cover the remaining transfers.
+		for _, target := range targets {
+			if ctx.Err() != nil {
+				break
+			}
+			result := engine.FetchOne(ctx, target)
+			results = append(results, result)
+			if result.Err != nil {
+				break
+			}
+		}
+	} else {
+		results = engine.Fetch(ctx, targets)
+	}
 	if ctx.Err() != nil {
 		fmt.Fprintln(st.stderr, "xbpretty: interrupted")
 		outcome.interrupted = true
@@ -247,6 +250,13 @@ func (st *state) predownloadDisabledByPassthru() bool {
 		return false
 	}
 	for _, token := range st.opts.passthru {
+		// xbps spells the pair both ways: -c/-r and --cachedir/--rootdir,
+		// with the directory either as the next argument or after `=`.
+		switch {
+		case token == "--cachedir", strings.HasPrefix(token, "--cachedir="),
+			token == "--rootdir", strings.HasPrefix(token, "--rootdir="):
+			return true
+		}
 		if len(token) < 2 || token[0] != '-' || strings.HasPrefix(token, "--") {
 			continue
 		}

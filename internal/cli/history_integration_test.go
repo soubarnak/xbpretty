@@ -459,7 +459,11 @@ func TestHistoryNoWriteMatrix(t *testing.T) {
 		noLog bool
 	}{
 		{name: "dry run", args: []string{"install", "figlet", "--dry-run", "-y"}, code: 0},
-		{name: "download only", args: []string{"install", "figlet", "-y", "--download-only"}, code: 1},
+		{name: "download only", env: func(t *testing.T, dir string) testEnv {
+			// A filesystem repository leaves the download set empty, so the
+			// stop is a verified no-op with no network.
+			return historyRunEnv(t, dir).with("XB_STUB_STDOUT", localPlanFixture)
+		}, args: []string{"install", "figlet", "-y", "--download-only"}, code: 0},
 		{name: "assume no", args: []string{"install", "figlet", "-n"}, code: 1},
 		{name: "non-tty", args: []string{"install", "figlet"}, code: 1},
 		{name: "empty plan", env: func(t *testing.T, dir string) testEnv {

@@ -1,62 +1,37 @@
 package download
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// TestNeedsFetchIsTheReadOnlyScan pins FR-038's scan rules as the disk
-// preflight consumes them: a valid pair needs nothing, a missing signature or
-// a mismatching archive needs a transfer.
-func TestNeedsFetchIsTheReadOnlyScan(t *testing.T) {
-	content := []byte("archive bytes")
-	sum := sha256.Sum256(content)
-	sha := hex.EncodeToString(sum[:])
-	target := Target{Filename: "pkg-1.0_1.x86_64.xbps", SHA256: sha}
+// TestArchiveNeedSizeIsAPreflightEstimate pins FR-038's disk preflight input:
+// the plan size when the archive is absent, nothing when it is present, and
+// nothing extra when only the signature is missing.
+func TestArchiveNeedSizeIsAPreflightEstimate(t *testing.T) {
+	target := Target{Filename: "pkg-1.0_1.x86_64.xbps", Size: 4096}
 
-	t.Run("empty directory", func(t *testing.T) {
-		if !NeedsFetch(target, t.TempDir()) {
-			t.Error("an empty cache needs a fetch")
+	t.Run("missing archive", func(t *testing.T) {
+		if got := ArchiveNeedSize(target, t.TempDir()); got != 4096 {
+			t.Errorf("ArchiveNeedSize = %d, want the plan size 4096", got)
 		}
 	})
 
-	t.Run("valid pair is a hit", func(t *testing.T) {
+	t.Run("present archive", func(t *testing.T) {
 		dir := t.TempDir()
-		writeCacheFile(t, filepath.Join(dir, target.Filename), content)
-		writeCacheFile(t, filepath.Join(dir, target.Filename+".sig2"), []byte("sig"))
-		if NeedsFetch(target, dir) {
-			t.Error("a valid archive and signature is a cache hit")
+		writeCacheFile(t, filepath.Join(dir, target.Filename), []byte("archive"))
+		if got := ArchiveNeedSize(target, dir); got != 0 {
+			t.Errorf("ArchiveNeedSize = %d, want 0 for a present archive", got)
 		}
 	})
 
-	t.Run("missing signature", func(t *testing.T) {
+	t.Run("signature only is not archive bytes", func(t *testing.T) {
 		dir := t.TempDir()
-		writeCacheFile(t, filepath.Join(dir, target.Filename), content)
-		if !NeedsFetch(target, dir) {
-			t.Error("a missing .sig2 needs a fetch")
-		}
-	})
-
-	t.Run("hash mismatch", func(t *testing.T) {
-		dir := t.TempDir()
-		writeCacheFile(t, filepath.Join(dir, target.Filename), []byte("tampered"))
-		writeCacheFile(t, filepath.Join(dir, target.Filename+".sig2"), []byte("sig"))
-		if !NeedsFetch(target, dir) {
-			t.Error("a mismatching archive needs a refetch")
-		}
-	})
-
-	t.Run("no metadata hash trusts the files", func(t *testing.T) {
-		dir := t.TempDir()
-		writeCacheFile(t, filepath.Join(dir, target.Filename), content)
-		writeCacheFile(t, filepath.Join(dir, target.Filename+".sig2"), []byte("sig"))
-		target := Target{Filename: "pkg-1.0_1.x86_64.xbps"}
-		if NeedsFetch(target, dir) {
-			t.Error("without a metadata hash the pair is a cache hit")
+		writeCacheFile(t, filepath.Join(dir, target.Filename), []byte("archive"))
+		if got := ArchiveNeedSize(target, dir); got != 0 {
+			t.Errorf("ArchiveNeedSize = %d, want 0 when only the .sig2 is missing", got)
 		}
 	})
 }
