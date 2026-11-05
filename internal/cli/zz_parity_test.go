@@ -1,7 +1,7 @@
 //go:build linux
 
-// TestParity_* wrappers for FR-077's implementation-phase matrix. Each row's
-// test cell names one thin seam; keep the two in sync when coverage moves.
+// TestParity_* wrappers for FR-077's implementation-phase matrix. Each cell
+// names one thin seam; keep the cell and the wrapper in sync.
 
 package cli
 
@@ -48,7 +48,7 @@ func TestParity_P_CMD_010_upgrade(t *testing.T) {
 }
 
 func TestParity_P_CMD_011_full_upgrade(t *testing.T) {
-	TestFullUpgradeConfigChangesNothing(t)
+	parityFullUpgradeCommand(t)
 }
 
 func TestParity_P_CMD_012_safe_upgrade(t *testing.T) {
@@ -96,15 +96,15 @@ func TestParity_P_OPT_004_history_dir_dir(t *testing.T) {
 }
 
 func TestParity_P_OPT_005_tui(t *testing.T) {
-	TestS1GateMatrixPTY(t)
+	parityS1GateCase(t, "P-OPT-005")
 }
 
 func TestParity_P_OPT_006_no_tui(t *testing.T) {
-	TestS1GateMatrixPTY(t)
+	parityS1GateCase(t, "P-OPT-006")
 }
 
 func TestParity_P_OPT_007_o_option(t *testing.T) {
-	TestSurfaceNAFlagsRefuseBeforeConfigAndChildren(t)
+	parityNAFlagRefusal(t, "P-OPT-007")
 }
 
 func TestParity_P_OPT_008_color_when(t *testing.T) {
@@ -132,7 +132,7 @@ func TestParity_P_OPT_013_no_update(t *testing.T) {
 }
 
 func TestParity_P_OPT_014_allow_unauthenticated(t *testing.T) {
-	TestSurfaceNAFlagsRefuseBeforeConfigAndChildren(t)
+	parityNAFlagRefusal(t, "P-OPT-014")
 }
 
 func TestParity_P_OPT_015_y_assume_yes(t *testing.T) {
@@ -144,7 +144,7 @@ func TestParity_P_OPT_016_n_assume_no(t *testing.T) {
 }
 
 func TestParity_P_OPT_017_remove_essential(t *testing.T) {
-	TestSurfaceNAFlagsRefuseBeforeConfigAndChildren(t)
+	parityNAFlagRefusal(t, "P-OPT-017")
 }
 
 func TestParity_P_OPT_018_purge(t *testing.T) {
@@ -152,27 +152,27 @@ func TestParity_P_OPT_018_purge(t *testing.T) {
 }
 
 func TestParity_P_OPT_019_f_fix_broken(t *testing.T) {
-	TestSurfaceNAFlagsRefuseBeforeConfigAndChildren(t)
+	parityNAFlagRefusal(t, "P-OPT-019")
 }
 
 func TestParity_P_OPT_020_no_fix_broken(t *testing.T) {
-	TestSurfaceNoOpNegativesAddNothingToArgv(t)
+	parityNoOpNegative(t, "P-OPT-020")
 }
 
 func TestParity_P_OPT_021_install_recommends(t *testing.T) {
-	TestSurfaceNAFlagsRefuseBeforeConfigAndChildren(t)
+	parityNAFlagRefusal(t, "P-OPT-021")
 }
 
 func TestParity_P_OPT_022_no_install_recommends(t *testing.T) {
-	TestSurfaceNoOpNegativesAddNothingToArgv(t)
+	parityNoOpNegative(t, "P-OPT-022")
 }
 
 func TestParity_P_OPT_023_install_suggests(t *testing.T) {
-	TestSurfaceNAFlagsRefuseBeforeConfigAndChildren(t)
+	parityNAFlagRefusal(t, "P-OPT-023")
 }
 
 func TestParity_P_OPT_024_no_install_suggests(t *testing.T) {
-	TestSurfaceNoOpNegativesAddNothingToArgv(t)
+	parityNoOpNegative(t, "P-OPT-024")
 }
 
 func TestParity_P_OPT_025_a_all_versions(t *testing.T) {
@@ -240,7 +240,7 @@ func TestParity_P_OPT_040_https_only(t *testing.T) {
 }
 
 func TestParity_P_OPT_041_sources(t *testing.T) {
-	TestFetchNARefusalsMakeNoNetworkOrFileAccess(t)
+	parityFetchRefusalExact(t, "P-OPT-041")
 }
 
 func TestParity_P_OPT_042_auto_n(t *testing.T) {
@@ -252,19 +252,19 @@ func TestParity_P_OPT_043_c_country(t *testing.T) {
 }
 
 func TestParity_P_OPT_044_debian(t *testing.T) {
-	TestFetchNARefusalsMakeNoNetworkOrFileAccess(t)
+	parityFetchRefusalExact(t, "P-OPT-044")
 }
 
 func TestParity_P_OPT_045_ubuntu(t *testing.T) {
-	TestFetchNARefusalsMakeNoNetworkOrFileAccess(t)
+	parityFetchRefusalExact(t, "P-OPT-045")
 }
 
 func TestParity_P_OPT_046_devuan(t *testing.T) {
-	TestFetchNARefusalsMakeNoNetworkOrFileAccess(t)
+	parityFetchRefusalExact(t, "P-OPT-046")
 }
 
 func TestParity_P_OPT_047_remove_config(t *testing.T) {
-	TestSurfaceNAFlagsRefuseBeforeConfigAndChildren(t)
+	parityNAFlagRefusal(t, "P-OPT-047")
 }
 
 func TestParity_P_OPT_048_reinstall(t *testing.T) {
@@ -272,7 +272,7 @@ func TestParity_P_OPT_048_reinstall(t *testing.T) {
 }
 
 func TestParity_P_OPT_049_t_target_release(t *testing.T) {
-	TestSurfaceNAFlagsRefuseBeforeConfigAndChildren(t)
+	parityNAFlagRefusal(t, "P-OPT-049")
 }
 
 func TestParity_P_OPT_050_print_uris(t *testing.T) {
@@ -280,19 +280,19 @@ func TestParity_P_OPT_050_print_uris(t *testing.T) {
 }
 
 func TestParity_P_OPT_051_exclude(t *testing.T) {
-	TestSurfaceNAFlagsRefuseBeforeConfigAndChildren(t)
+	parityNAFlagRefusal(t, "P-OPT-051")
 }
 
 func TestParity_P_OPT_052_full(t *testing.T) {
-	TestFullUpgradeConfigChangesNothing(t)
+	parityUpgradeFlagNoop(t, "P-OPT-052")
 }
 
 func TestParity_P_OPT_053_no_full(t *testing.T) {
-	TestFullUpgradeConfigChangesNothing(t)
+	parityUpgradeFlagNoop(t, "P-OPT-053")
 }
 
 func TestParity_P_OPT_054_safe(t *testing.T) {
-	TestFullUpgradeConfigChangesNothing(t)
+	parityUpgradeFlagNoop(t, "P-OPT-054")
 }
 
 func TestParity_P_OPT_056_history_clear_all(t *testing.T) {
@@ -351,14 +351,6 @@ func TestParity_P_CFG_009_color_mode(t *testing.T) {
 	TestIntegrationConfigColorModeEndToEnd(t)
 }
 
-func TestParity_P_CFG_021_toml_outside_the_supported(t *testing.T) {
-	TestTOMLOutsideSubsetExitsTwo(t)
-}
-
-func TestParity_P_VIS_001_nine_role_default_palette(t *testing.T) {
-	TestSGRPrefix(t)
-}
-
 func TestParity_P_VIS_002_section_rule(t *testing.T) {
 	TestRuleWidthFallsBackFromTTYToColumns(t)
 }
@@ -396,7 +388,7 @@ func TestParity_P_VIS_018_mirror_score_finished(t *testing.T) {
 }
 
 func TestParity_P_VIS_019_plain_progress_line(t *testing.T) {
-	TestPlainLineGolden(t)
+	TestAC047PlainLineOverPTY(t)
 }
 
 func TestParity_P_VIS_020_discovery_row_format_and(t *testing.T) {
@@ -423,24 +415,20 @@ func TestParity_P_VIS_025_machine_json_never_coloured(t *testing.T) {
 	TestAC022ShowMachineCarriesPropertiesAndNoANSI(t)
 }
 
-func TestParity_P_VIS_026_simple_layout(t *testing.T) {
-	TestPlainLineGolden(t)
-}
-
 func TestParity_P_VIS_030_download_view_mirror_table(t *testing.T) {
 	parityDownloadNoMirrorTable(t)
 }
 
 func TestParity_P_VIS_031_fetched_completion_line(t *testing.T) {
-	parityUpdateNoFetched(t)
+	parityUpdateTelemetryAbsence(t)
 }
 
 func TestParity_P_VIS_032_nothing_to_fetch(t *testing.T) {
-	parityUpdateNoNothingToFetch(t)
+	parityUpdateTelemetryAbsence(t)
 }
 
 func TestParity_P_VIS_033_dpkg_conffile_and_status(t *testing.T) {
-	TestAC048ChildOutputForwardedVerbatim(t)
+	parityNoDpkgProtocol(t)
 }
 
 func TestParity_P_TUI_001_transaction_summary_screen(t *testing.T) {
@@ -456,7 +444,7 @@ func TestParity_P_TUI_003_fetch_picker(t *testing.T) {
 }
 
 func TestParity_P_TUI_004_inline_progress_viewport(t *testing.T) {
-	TestAC046WidgetOverPTY80(t)
+	TestInlineViewportOnTheNormalScreen(t)
 }
 
 func TestParity_P_TUI_005_release_info(t *testing.T) {
@@ -468,7 +456,7 @@ func TestParity_P_BEH_001_root_requirement_and_refusal(t *testing.T) {
 }
 
 func TestParity_P_BEH_002_exit_code_set(t *testing.T) {
-	TestExitCodePassThrough(t)
+	parityExitCodeMatrix(t)
 }
 
 func TestParity_P_BEH_003_stream_split_and_durable(t *testing.T) {
@@ -488,7 +476,7 @@ func TestParity_P_BEH_006_history_store_and_schema(t *testing.T) {
 }
 
 func TestParity_P_BEH_007_history_list_and_detail(t *testing.T) {
-	TestHistoryListAndDetail(t)
+	TestHistoryDetailReplayAndGroupOrder(t)
 }
 
 func TestParity_P_BEH_008_history_undo(t *testing.T) {
@@ -544,7 +532,7 @@ func TestParity_P_BEH_024_sync_step(t *testing.T) {
 }
 
 func TestParity_P_BEH_025_n_a_flag_contract(t *testing.T) {
-	TestSurfaceNAFlagsRefuseBeforeConfigAndChildren(t)
+	parityNAFlagRefusal(t, "P-BEH-025")
 }
 
 func TestParity_P_BEH_026_non_tty_refusal(t *testing.T) {
@@ -560,7 +548,7 @@ func TestParity_P_BEH_028_dynamic_completion_protocol(t *testing.T) {
 }
 
 func TestParity_P_BEH_029_i18n(t *testing.T) {
-	TestAC018VerboseShowsPassSetAndLocale(t)
+	parityNoI18nCatalog(t)
 }
 
 func TestParity_P_BEH_030_config_migration(t *testing.T) {
@@ -568,7 +556,7 @@ func TestParity_P_BEH_030_config_migration(t *testing.T) {
 }
 
 func TestParity_P_BEH_032_o_apt_option_passthrough(t *testing.T) {
-	TestSurfaceNAFlagsRefuseBeforeConfigAndChildren(t)
+	parityNAFlagRefusal(t, "P-BEH-032")
 }
 
 func TestParity_P_BEH_033_moo_and_the_no(t *testing.T) {
@@ -579,12 +567,16 @@ func TestParity_P_BEH_034_config_files_only_replay(t *testing.T) {
 	TestUndoUpgradeRestoresExactOldVersionFromCache(t)
 }
 
+func TestParity_P_BEH_035_per_domain_mirror_rotation(t *testing.T) {
+	parityNoMirrorRotation(t)
+}
+
 func TestParity_P_BEH_038_apt_auth_config(t *testing.T) {
 	parityNoAuthFileRead(t)
 }
 
 func TestParity_P_BEH_039_q_to_cancel_key(t *testing.T) {
-	TestInlineViewportCtrlCExits130AndTearsDown(t)
+	parityNoQKeyInInline(t)
 }
 
 func TestParity_P_BEH_040_direct_deb_url_install(t *testing.T) {
@@ -601,8 +593,4 @@ func TestParity_P_PKG_002_apt_sources_written_by(t *testing.T) {
 
 func TestParity_P_PKG_004_multi_suite_ppas(t *testing.T) {
 	parityNoPpaArtifacts(t)
-}
-
-func TestParity_P_PKG_005_nala_conf_shipped_in(t *testing.T) {
-	parityTemplateHasNoEtcConfig(t)
 }

@@ -51,3 +51,55 @@ func TestImplementationModeDetection(t *testing.T) {
 		t.Fatal("spec phase reported after internal/spec exists")
 	}
 }
+
+// TestReleaseGateIsAccepted pins the release-gate branch of the
+// implementation-phase rule: a gate needs no declared test.
+func TestReleaseGateIsAccepted(t *testing.T) {
+	m := &Matrix{Matrix: []MatrixRow{
+		{ID: "P-PKG-003", Test: "release: 9-arch signed repository"},
+	}}
+	if err := m.requireTestCells(); err != nil {
+		t.Fatalf("release gate rejected: %v", err)
+	}
+	if err := m.checkTestCells(map[string]bool{}); err != nil {
+		t.Fatalf("release gate failed test resolution: %v", err)
+	}
+}
+
+// TestCitedTestMustCarryItsRowID pins the anti-copy rule: a TestParity_ cell
+// copied from another row is rejected even when the function exists.
+func TestCitedTestMustCarryItsRowID(t *testing.T) {
+	m := &Matrix{Matrix: []MatrixRow{
+		{ID: "P-CMD-001", Test: "TestParity_P_CMD_002_search"},
+	}}
+	err := m.checkTestCells(map[string]bool{"TestParity_P_CMD_002_search": true})
+	want := "parity: P-CMD-001 cites test TestParity_P_CMD_002_search, which does not carry its id prefix TestParity_P_CMD_001_"
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want exactly %q", err, want)
+	}
+}
+
+// TestMatrixOrderMustFollowInventory pins AC-061's no-renumbered-row clause.
+func TestMatrixOrderMustFollowInventory(t *testing.T) {
+	m := &Matrix{
+		Inventory: []InventoryRow{{ID: "P-CMD-001"}, {ID: "P-CMD-002"}},
+		Matrix:    []MatrixRow{{ID: "P-CMD-002"}, {ID: "P-CMD-001"}},
+	}
+	err := m.checkOrder()
+	want := "parity: matrix row 1 is P-CMD-002, inventory row 1 is P-CMD-001; the matrix must follow the inventory order"
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want exactly %q", err, want)
+	}
+}
+
+// TestGenericNAPhraseIsRejected pins AC-062's vague-prose rejection.
+func TestGenericNAPhraseIsRejected(t *testing.T) {
+	err := checkNABehaviour(MatrixRow{ID: "P-VIS-999", Behaviour: "not applicable on xbps"})
+	want := `parity: P-VIS-999 is n/a but its behaviour is the generic phrase "not applicable"; name the exact refusal or absence`
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want exactly %q", err, want)
+	}
+	if err := checkNABehaviour(MatrixRow{ID: "P-VIS-999", Behaviour: "`Downgrade` never renders"}); err != nil {
+		t.Errorf("a concrete absence was rejected: %v", err)
+	}
+}

@@ -28,15 +28,34 @@ libbaz-2.0_2 update x86_64 https://repo-default.voidlinux.org/current 15728640 4
 
 // buildTuiBinary builds the binary with the xbpretty_testroot hook so a
 // non-root test process can exercise the root-gated S1 screen.
+var (
+	tuiBinOnce sync.Once
+	tuiBinPath string
+	tuiBinErr  error
+)
+
 func buildTuiBinary(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "xbpretty")
-	cmd := exec.Command("go", "build", "-tags", "xbpretty_testroot", "-o", bin, "../../cmd/xbpretty")
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building test binary: %v\n%s", err, out)
+	tuiBinOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "xbp-tui-")
+		if err != nil {
+			tuiBinErr = err
+			return
+		}
+		bin := filepath.Join(dir, "xbpretty")
+		cmd := exec.Command("go", "build", "-tags", "xbpretty_testroot", "-o", bin, "../../cmd/xbpretty")
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			tuiBinErr = err
+			t.Logf("tui build output:\n%s", out)
+			return
+		}
+		tuiBinPath = bin
+	})
+	if tuiBinErr != nil {
+		t.Fatalf("building tui test binary: %v", tuiBinErr)
 	}
-	return bin
+	return tuiBinPath
 }
 
 // tuiOldQuery answers the old-version lookups the S1 model needs and reports
@@ -164,6 +183,8 @@ type ptyRun struct {
 	cap    *capture
 	stderr *syncBuffer
 	wait   chan error
+	stop   chan struct{}
+	done   chan struct{}
 	before term.State
 }
 
@@ -184,7 +205,7 @@ func startPty(t *testing.T, bin string, env map[string]string, args []string, co
 	if err != nil {
 		t.Fatalf("GetState before start: %v", err)
 	}
-	r := &ptyRun{master: master, slave: slave, cmd: cmd, cap: &capture{}, stderr: &syncBuffer{}, wait: make(chan error, 1), before: before}
+	r := &ptyRun{master: master, slave: slave, cmd: cmd, cap: &capture{}, stderr: &syncBuffer{}, wait: make(chan error, 1), stop: make(chan struct{}), done: make(chan struct{}), before: before}
 	cmd.Stderr = r.stderr
 	t.Cleanup(func() {
 		if cmd.Process != nil {
@@ -193,18 +214,7 @@ func startPty(t *testing.T, bin string, env map[string]string, args []string, co
 		master.Close()
 		slave.Close()
 	})
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := master.Read(buf)
-			if n > 0 {
-				r.cap.add(buf[:n])
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
+	r.startReader()
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("starting the binary: %v", err)
 	}
@@ -219,14 +229,96 @@ func (r *ptyRun) send(t *testing.T, s string) {
 	}
 }
 
+// startReader starts the select-based pty reader. stop is closed after the
+// child exits; done closes when the reader has stopped, so the capture is
+// complete without a fixed sleep.
+func (r *ptyRun) startReader() {
+	if r.stop == nil {
+		r.stop = make(chan struct{})
+	}
+	if r.done == nil {
+		r.done = make(chan struct{})
+	}
+	go func() {
+		defer close(r.done)
+		buf := make([]byte, 4096)
+		fd := int(r.master.Fd())
+		for {
+			select {
+			case <-r.stop:
+				return
+			default:
+			}
+			ready, err := ptyReadable(fd, 20*time.Millisecond)
+			if err != nil {
+				return
+			}
+			if !ready {
+				continue
+			}
+			n, err := syscall.Read(fd, buf)
+			if n > 0 {
+				r.cap.add(buf[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+}
+
+// drainCapture reads the pty buffer that the stopped reader left behind. The
+// deadline only bounds an already-exited child's buffered tail; data returns
+// immediately, so this is not a fixed-sleep heuristic.
+func (r *ptyRun) drainCapture(t *testing.T) {
+	t.Helper()
+	buf := make([]byte, 4096)
+	fd := int(r.master.Fd())
+	for {
+		ready, err := ptyReadable(fd, 0)
+		if err != nil || !ready {
+			return
+		}
+		n, err := syscall.Read(fd, buf)
+		if n > 0 {
+			r.cap.add(buf[:n])
+			continue
+		}
+		if n == 0 || err != nil {
+			return
+		}
+	}
+}
+
+// ptyReadable reports whether fd has bytes ready, waiting up to timeout.
+func ptyReadable(fd int, timeout time.Duration) (bool, error) {
+	var set syscall.FdSet
+	set.Bits[fd/64] |= 1 << (uint(fd) % 64)
+	tv := syscall.NsecToTimeval(timeout.Nanoseconds())
+	n, err := syscall.Select(fd+1, &set, nil, nil, &tv)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (r *ptyRun) exitCode(t *testing.T) int {
 	t.Helper()
 	select {
 	case err := <-r.wait:
-		// The pty reader is a separate goroutine; under load it can still be
-		// draining when the child exits. Give the capture a moment to settle
-		// before the caller asserts on it.
-		r.waitCaptureQuiet()
+		// The child has exited, so every byte it wrote is in the pty buffer.
+		// Stop the reader with an expired read deadline, wait for it to close
+		// done, then drain the buffer synchronously. The slave stays open for
+		// tests that inspect the restored termios state.
+		if r.done != nil {
+			close(r.stop)
+			select {
+			case <-r.done:
+			case <-time.After(2 * time.Second):
+				t.Log("the pty reader did not stop within 2s")
+			}
+			r.drainCapture(t)
+		}
 		if err == nil {
 			return 0
 		}
@@ -238,28 +330,6 @@ func (r *ptyRun) exitCode(t *testing.T) int {
 	case <-time.After(10 * time.Second):
 		t.Fatalf("binary did not exit; stderr:\n%s", r.stderr.String())
 		return -1
-	}
-}
-
-// waitCaptureQuiet blocks until the pty capture stops growing. The child has
-// already exited; this only lets the reader goroutine finish copying the last
-// frame.
-func (r *ptyRun) waitCaptureQuiet() {
-	last := -1
-	stable := 0
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		n := len(r.cap.String())
-		if n == last {
-			stable++
-			if stable == 5 {
-				return
-			}
-		} else {
-			last = n
-			stable = 0
-		}
-		time.Sleep(2 * time.Millisecond)
 	}
 }
 

@@ -57,7 +57,7 @@ func TestFilenameRejectsPathMetacharacters(t *testing.T) {
 // answer: `<pkgver>: <sha256> (<repository>)`, keyed by (repository, pkgver).
 func TestParseHashesKeysByRepositoryAndPkgver(t *testing.T) {
 	stdout := strings.Join([]string{
-		"figlet-2.2.5_6: 94372aabbccddeeff00112233445566778899aabbccddeeff0011223344556677 (https://repo-default.voidlinux.org/current)",
+		"figlet-2.2.5_6: 94372aabbccddeeff00112233445566778899aabbccddeeff001122334455667 (https://repo-default.voidlinux.org/current)",
 		"wget-1.25.0_1: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef (https://mirror.example/current/)",
 		"[*] nano-8.2_1: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (https://mirror.example/current)",
 		"",
@@ -65,7 +65,7 @@ func TestParseHashesKeysByRepositoryAndPkgver(t *testing.T) {
 	}, "\n")
 	hashes := ParseHashes(stdout)
 	want := map[HashKey]string{
-		{Repository: "https://repo-default.voidlinux.org/current", Pkgver: "figlet-2.2.5_6"}: "94372aabbccddeeff00112233445566778899aabbccddeeff0011223344556677",
+		{Repository: "https://repo-default.voidlinux.org/current", Pkgver: "figlet-2.2.5_6"}: "94372aabbccddeeff00112233445566778899aabbccddeeff001122334455667",
 		{Repository: "https://mirror.example/current", Pkgver: "wget-1.25.0_1"}:              "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		{Repository: "https://mirror.example/current", Pkgver: "nano-8.2_1"}:                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}
@@ -85,7 +85,7 @@ func TestParseResolvedReadsThreeOrFourLines(t *testing.T) {
 		"figlet-2.2.5_6",
 		"https://repo-default.voidlinux.org/current",
 		"x86_64",
-		"94372aabbccddeeff00112233445566778899aabbccddeeff0011223344556677",
+		"94372aabbccddeeff00112233445566778899aabbccddeeff001122334455667",
 	}, "\n"))
 	if err != nil {
 		t.Fatalf("ParseResolved with hash: %v", err)

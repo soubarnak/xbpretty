@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -13,16 +14,34 @@ import (
 // integration tests drive the real binary against the stub xbps binaries in
 // testdata/stub, so the whole flow runs without touching a package system.
 
+var (
+	plainBinOnce sync.Once
+	plainBinPath string
+	plainBinErr  error
+)
+
 func buildBinary(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "xbpretty")
-	cmd := exec.Command("go", "build", "-o", bin, "../../cmd/xbpretty")
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building test binary: %v\n%s", err, out)
+	plainBinOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "xbp-plain-")
+		if err != nil {
+			plainBinErr = err
+			return
+		}
+		bin := filepath.Join(dir, "xbpretty")
+		cmd := exec.Command("go", "build", "-o", bin, "../../cmd/xbpretty")
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			plainBinErr = err
+			t.Logf("plain build output:\n%s", out)
+			return
+		}
+		plainBinPath = bin
+	})
+	if plainBinErr != nil {
+		t.Fatalf("building test binary: %v", plainBinErr)
 	}
-	return bin
+	return plainBinPath
 }
 
 // integrationConfig writes a rev 6 default layer pointing at the stubs, with

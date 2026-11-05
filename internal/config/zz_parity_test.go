@@ -1,5 +1,5 @@
-// TestParity_* wrappers for FR-077's implementation-phase matrix. Each row's
-// test cell names one thin seam; keep the two in sync when coverage moves.
+// TestParity_* wrappers for FR-077's implementation-phase matrix. Each cell
+// names one thin seam; keep the cell and the wrapper in sync.
 
 package config
 
@@ -47,6 +47,10 @@ func TestParity_P_CFG_019_color_theme_style_grammar(t *testing.T) {
 
 func TestParity_P_CFG_020_color_theme_modifier_vocabulary(t *testing.T) {
 	TestStyleModifierForms(t)
+}
+
+func TestParity_P_CFG_021_toml_outside_the_supported(t *testing.T) {
+	parityConfigRejectsWithPathAndLine(t)
 }
 
 func TestParity_P_BEH_037_apt_acquire_proxy_keys(t *testing.T) {

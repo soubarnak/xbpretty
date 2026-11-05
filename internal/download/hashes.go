@@ -1,6 +1,7 @@
 package download
 
 import (
+	"encoding/hex"
 	"fmt"
 	"strings"
 )
@@ -24,7 +25,7 @@ func ParseHashes(stdout string) map[HashKey]string {
 			continue
 		}
 		value, repository := splitRepositorySuffix(right)
-		if left == "" || value == "" || repository == "" {
+		if left == "" || !validSHA256(value) || repository == "" {
 			continue
 		}
 		out[HashKeyFor(repository, left)] = value
@@ -69,9 +70,22 @@ func ParseResolved(stdout string) (Resolved, error) {
 		return Resolved{}, fmt.Errorf("xbps-query returned %d lines, want 3 or 4", len(lines))
 	}
 	resolved := Resolved{Pkgver: lines[0], Repository: lines[1], Arch: lines[2]}
-	if len(lines) == 4 {
+	if len(lines) == 4 && validSHA256(lines[3]) {
 		resolved.SHA256 = lines[3]
 		resolved.HasHash = true
 	}
 	return resolved, nil
+}
+
+// validSHA256 reports whether value is a 64-character hexadecimal SHA-256.
+// FR-037 accepts exactly one content hash: a SHA-512-only, MD5-only or empty
+// value is not a filename-sha256 and must not be treated as one.
+func validSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	if _, err := hex.DecodeString(value); err != nil {
+		return false
+	}
+	return true
 }

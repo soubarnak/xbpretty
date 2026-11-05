@@ -22,7 +22,7 @@ func TestPrintURIsEmitsOneObjectPerPlannedDownload(t *testing.T) {
 	e.tty = false
 	e.set("XB_STUB_STDOUT", upgradePlanFixture)
 	e.set("XB_STUB_HASHES", strings.Join([]string{
-		"figlet-2.2.5_6: 94372aabbccddeeff00112233445566778899aabbccddeeff0011223344556677 (https://repo-default.voidlinux.org/current)",
+		"figlet-2.2.5_6: 94372aabbccddeeff00112233445566778899aabbccddeeff001122334455667 (https://repo-default.voidlinux.org/current)",
 		"wget-1.25.0_1: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef (https://repo-default.voidlinux.org/current)",
 	}, "\n"))
 
@@ -46,7 +46,7 @@ func TestPrintURIsEmitsOneObjectPerPlannedDownload(t *testing.T) {
 			"url":           "https://repo-default.voidlinux.org/current/figlet-2.2.5_6.x86_64.xbps",
 			"signature_url": "https://repo-default.voidlinux.org/current/figlet-2.2.5_6.x86_64.xbps.sig2",
 			"size":          float64(94372),
-			"sha256":        "94372aabbccddeeff00112233445566778899aabbccddeeff0011223344556677",
+			"sha256":        "94372aabbccddeeff00112233445566778899aabbccddeeff001122334455667",
 		},
 		{
 			"schema":        float64(1),

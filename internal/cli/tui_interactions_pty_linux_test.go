@@ -510,18 +510,7 @@ func startPtyCombined(t *testing.T, bin string, env map[string]string, args []st
 		master.Close()
 		slave.Close()
 	})
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := master.Read(buf)
-			if n > 0 {
-				r.cap.add(buf[:n])
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
+	r.startReader()
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("starting the binary: %v", err)
 	}

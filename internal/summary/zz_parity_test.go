@@ -1,9 +1,13 @@
-// TestParity_* wrappers for FR-077's implementation-phase matrix. Each row's
-// test cell names one thin seam; keep the two in sync when coverage moves.
+// TestParity_* wrappers for FR-077's implementation-phase matrix. Each cell
+// names one thin seam; keep the cell and the wrapper in sync.
 
 package summary
 
 import "testing"
+
+func TestParity_P_VIS_001_nine_role_default_palette(t *testing.T) {
+	TestRolesUseNalasPrefixes(t)
+}
 
 func TestParity_P_VIS_003_section_label_line(t *testing.T) {
 	TestRendererGoldens(t)
@@ -34,7 +38,11 @@ func TestParity_P_VIS_009_summary_heading_and_footer(t *testing.T) {
 }
 
 func TestParity_P_VIS_010_size_block(t *testing.T) {
-	TestFooterCountsOnlyNonEmptySections(t)
+	TestRendererGoldens(t)
+}
+
+func TestParity_P_VIS_026_simple_layout(t *testing.T) {
+	TestRendererGoldens(t)
 }
 
 func TestParity_P_VIS_027_summary_and_widget_size(t *testing.T) {

@@ -79,10 +79,9 @@ func Build(rows []Row, held map[string]bool, old map[string]Old) *Summary {
 		if isHeld {
 			// A held package is left out of the transaction: xbps fetches
 			// and unpacks nothing for it, so it is reported under Held and
-			// nowhere else (FR-011).
-			if row.Reason == "" {
-				row.Reason = manualHold
-			}
+			// nowhere else (FR-011). xbps has exactly one hold reason; apt's
+			// Excluded/Kept back/Phased vocabulary can never render (FR-064).
+			row.Reason = manualHold
 			s.Hold = append(s.Hold, row)
 			continue
 		}

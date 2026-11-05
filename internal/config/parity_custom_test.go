@@ -17,3 +17,15 @@ func parityNoAcquireProxyConfig(t *testing.T) {
 		t.Errorf("error = %q, want %q", got, want)
 	}
 }
+
+// parityConfigRejectsWithPathAndLine proves P-CFG-021's error shape: the
+// unsupported construct names the config path and the offending line.
+func parityConfigRejectsWithPathAndLine(t *testing.T) {
+	_, err := Parse("rev6.toml", strings.NewReader("[Nala]\nauto_remove = 1.5\n"))
+	if err == nil {
+		t.Fatal("a float parsed; the TOML subset must reject it")
+	}
+	if got, want := err.Error(), "config rev6.toml:2: floats are not supported"; got != want {
+		t.Errorf("error = %q, want %q", got, want)
+	}
+}
