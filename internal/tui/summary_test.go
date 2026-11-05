@@ -53,6 +53,7 @@ func TestSummaryGoldens(t *testing.T) {
 		{"held-diff-80x24", goldenHeldMixed(), 80, 24},
 		{"scrollable-80x24", goldenScrollable(), 80, 24},
 		{"history-80x24", goldenHistory(), 80, 24},
+		{"downgrade-80x24", goldenDowngrade(), 80, 24},
 		{"reinstall-80x24", goldenReInstall(), 80, 24},
 	}
 	for _, c := range cases {
@@ -328,5 +329,53 @@ func TestRenderPackageInfo(t *testing.T) {
 	}
 	if strings.Contains(small, "Package:") {
 		t.Errorf("too-small package info still draws the body:\n%s", small)
+	}
+}
+
+// TestDowngradeTabShowsBothVersions is FR-069's history adaptation of the
+// version-diff shape: a recorded Downgrade is a two-version operation, so its
+// old version must stay on screen instead of collapsing to one column.
+func TestDowngradeTabShowsBothVersions(t *testing.T) {
+	model := &SummaryModel{
+		Title:   "xbpretty History",
+		History: true,
+		Tabs: []Tab{{Label: "Downgrade", Rows: []PkgRow{
+			{Name: "curl", Old: "8.17.0_1", New: "8.16.0_1", Size: "2 MiB", NewSpans: versionSpans("8.17.0_1", "8.16.0_1")},
+		}}},
+	}
+	frame := RenderSummary(model, 80, 24, DefaultTheme()).Text()
+	for _, want := range []string{"Old Version:", "New Version:", "8.17.0_1", "8.16.0_1"} {
+		if !strings.Contains(frame, want) {
+			t.Errorf("downgrade frame missing %q:\n%s", want, frame)
+		}
+	}
+}
+
+// TestManyOperationTabsStayInsideTheBody is FR-069 with the full ten-group
+// entry: the strip shifts to keep the active tab visible but may never paint
+// over the border or the one-column inner padding.
+func TestManyOperationTabsStayInsideTheBody(t *testing.T) {
+	labels := []string{"Remove", "AutoRemove", "Purge", "AutoPurge", "Install", "Reinstall", "Upgrade", "Downgrade", "Configure", "Held"}
+	tabs := make([]Tab, 0, len(labels))
+	for _, label := range labels {
+		tabs = append(tabs, Tab{Label: label, Rows: []PkgRow{{Name: "pkg", Old: "1.0_1", New: "1.0_1", Size: "1 MiB"}}})
+	}
+	for _, geometry := range []struct{ w, h int }{{80, 24}, {60, 18}} {
+		model := &SummaryModel{Title: "xbpretty History", History: true, Tabs: tabs, Active: len(tabs) - 1}
+		buf := RenderSummary(model, geometry.w, geometry.h, DefaultTheme())
+		for _, y := range []int{1, 2} {
+			if got := buf.Get(0, y).R; got != '┃' {
+				t.Errorf("%dx%d row %d left border = %q, want ┃", geometry.w, geometry.h, y, got)
+			}
+			if got := buf.Get(1, y).R; got != ' ' {
+				t.Errorf("%dx%d row %d inner padding = %q, want space", geometry.w, geometry.h, y, got)
+			}
+			if got := buf.Get(geometry.w-1, y).R; got != '┃' {
+				t.Errorf("%dx%d row %d right border = %q, want ┃", geometry.w, geometry.h, y, got)
+			}
+			if got := buf.Get(geometry.w-2, y).R; got != ' ' {
+				t.Errorf("%dx%d row %d right padding = %q, want space", geometry.w, geometry.h, y, got)
+			}
+		}
 	}
 }

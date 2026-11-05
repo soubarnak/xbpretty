@@ -334,12 +334,12 @@ func (st *state) compareVersions(before, after string) int {
 // runHistory is FR-032's read surface: list, or one entry's detail.
 func (st *state) runHistory(opts *options) int {
 	if opts.subcommand == "info" || opts.subcommand == "show" {
-		return st.runHistoryDetail(opts.args[0])
+		return st.runHistoryDetail(opts, opts.args[0])
 	}
 	if len(opts.args) == 0 {
 		return st.runHistoryList()
 	}
-	return st.runHistoryDetail(opts.args[0])
+	return st.runHistoryDetail(opts, opts.args[0])
 }
 
 func (st *state) runHistoryList() int {
@@ -381,7 +381,7 @@ func (st *state) lineLogNote() {
 	fmt.Fprintln(st.stderr, "xbpretty: earlier transactions are only in the line log and cannot be replayed; run 'xbp log' to read them")
 }
 
-func (st *state) runHistoryDetail(selector string) int {
+func (st *state) runHistoryDetail(opts *options, selector string) int {
 	id, last, ok := parseHistorySelector(selector)
 	if !ok {
 		fmt.Fprintf(st.stderr, "xbpretty: invalid history selector %q; use an integer id or 'last'\n", selector)
@@ -411,6 +411,12 @@ func (st *state) runHistoryDetail(selector string) int {
 			return exitRuntime
 		}
 		entry = found
+	}
+	// FR-069: a non-empty entry may open the read-only full-screen detail;
+	// an entry with no group rows, a closed gate or a below-floor terminal
+	// keeps the text detail.
+	if code, ran := st.maybeRunHistoryScreen(opts, entry); ran {
+		return code
 	}
 	writeHistoryDetail(st.stdout, entry)
 	return exitOK
