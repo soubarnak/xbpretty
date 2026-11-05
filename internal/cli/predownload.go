@@ -192,6 +192,11 @@ func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome 
 	if st.downloadSink == nil {
 		st.downloadSink = newDownloadSink(st)
 	}
+	// FR-041/FR-072: Ctrl-C cancels the engine, which removes `.part`, then
+	// the run exits 130 before any child is started. The handler is armed
+	// before cbreak so a signal cannot catch the terminal mid-change.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	// FR-041: the fill feeds #66's seven-row Download view from the engine's
 	// event stream. The view is created only when the live surface is allowed
 	// (TTY, no -v, not plain); the thin sink still records completions for
@@ -200,6 +205,10 @@ func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome 
 	if mode := st.liveMode(); mode != liveOff {
 		live := newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode,
 			newProgressModel("download", targetsAsRows(targets), nil), st.theme)
+		// xbpretty owns these transfers: the box and cbreak stay up until the
+		// fill finishes or Ctrl-C cancels it (FR-072).
+		inline := st.startInline(live)
+		defer inline.Close()
 		live.Request(true)
 		view = &downloadEventView{live: live, written: map[string]int64{}}
 		defer view.finish()
@@ -217,10 +226,6 @@ func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome 
 	}
 	engine := download.New(engineOpts)
 
-	// FR-041: Ctrl-C cancels the engine, which removes `.part`, then the run
-	// exits 130 before any child is started.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	var results []download.Result
 	if failClosed {
 		// FR-038/ADR-0014: an explicit download aborts on the first exhausted

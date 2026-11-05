@@ -1082,6 +1082,13 @@ func relativeDir(path string) string {
 
 // beginUpdateLive starts the adapted Updating Package Lists view when the
 // suppression matrix allows a live surface.
+//
+// Scope note for #79: the S4 inline viewport (scrollback insertion, cbreak,
+// the width watcher and the ?1049 latch) is wired to the post-S1 transaction
+// phases only — the predownload fill and the commit child. Update's repository
+// sync and the fetch picker's MirrorScore view keep the #66 in-place renderer:
+// they are childless or single-shot surfaces with no completed package lines
+// to insert, and neither is entered from S1. See ADR-0017 §4.
 func (st *state) beginUpdateLive() *liveProgress {
 	mode := st.liveMode()
 	if mode == liveOff {

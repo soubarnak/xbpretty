@@ -89,13 +89,50 @@ func (r *runner) isInteractive() bool {
 // to capture live download telemetry ticks and errors without block buffering.
 // In non-interactive mode or when -v/--verbose is passed, it falls back to direct pipes.
 func (r *runner) stream(name string, args ...string) (int, error) {
-	if r.isInteractive() {
-		return r.streamHybrid(name, args...)
+	return r.streamWithSignals(nil, name, args...)
+}
+
+// streamWithSignals runs a command with SIGINT/SIGTERM forwarded to it. A nil
+// channel makes the call own the signal registration; a caller that has
+// already armed one passes it in, which closes the window where the inline
+// viewport has changed the terminal but no child exists to forward to. The
+// caller keeps ownership of a supplied channel and closes it after the run.
+func (r *runner) streamWithSignals(sigs chan os.Signal, name string, args ...string) (int, error) {
+	if sigs == nil {
+		sigs, release := streamSignals(nil)
+		defer release()
+		if r.isInteractive() {
+			return r.streamHybridWithSignals(sigs, name, args...)
+		}
+		return r.streamDirectWithSignals(sigs, name, args...)
 	}
-	return r.streamDirect(name, args...)
+	if r.isInteractive() {
+		return r.streamHybridWithSignals(sigs, name, args...)
+	}
+	return r.streamDirectWithSignals(sigs, name, args...)
+}
+
+// streamSignals uses a supplied channel as-is (the caller owns it) or arms and
+// owns a fresh SIGINT/SIGTERM registration.
+func streamSignals(sigs chan os.Signal) (chan os.Signal, func()) {
+	if sigs != nil {
+		return sigs, func() {}
+	}
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	return ch, func() {
+		signal.Stop(ch)
+		close(ch)
+	}
 }
 
 func (r *runner) streamHybrid(name string, args ...string) (int, error) {
+	return r.streamHybridWithSignals(nil, name, args...)
+}
+
+func (r *runner) streamHybridWithSignals(sigs chan os.Signal, name string, args ...string) (int, error) {
+	sigs, release := streamSignals(sigs)
+	defer release()
 	r.echo(name, args)
 	if r.parser == nil {
 		r.parser = NewStreamParser(0, 0)
@@ -103,7 +140,7 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 
 	master, slave, err := openPty()
 	if err != nil {
-		return r.streamDirect(name, args...)
+		return r.streamDirectWithSignals(sigs, name, args...)
 	}
 	defer master.Close()
 
@@ -148,12 +185,6 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 		}
 	}()
 
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	defer func() {
-		signal.Stop(sigs)
-		close(sigs)
-	}()
 	go func() {
 		for s := range sigs {
 			if cmd.Process != nil {
@@ -181,6 +212,11 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 			if r.parser != nil {
 				r.parser.FeedStdout(line)
 			}
+			// FR-072: a child that owns an alternate screen hides the box and
+			// gives termios back; the matching leave redraws it.
+			if r.liveProgress != nil {
+				r.liveProgress.ObserveChildOutput(line)
+			}
 			// FR-066: child stdout is never copied to xbpretty's stdout.
 			// With no live view it is forwarded verbatim on stderr.
 			if !r.live {
@@ -207,6 +243,9 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 				if r.parser != nil {
 					r.parser.FeedStderr(s.Text())
 				}
+				if r.liveProgress != nil {
+					r.liveProgress.ObserveChildOutput(s.Text())
+				}
 			}
 		}()
 
@@ -225,6 +264,12 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 }
 
 func (r *runner) streamDirect(name string, args ...string) (int, error) {
+	return r.streamDirectWithSignals(nil, name, args...)
+}
+
+func (r *runner) streamDirectWithSignals(sigs chan os.Signal, name string, args ...string) (int, error) {
+	sigs, release := streamSignals(sigs)
+	defer release()
 	r.echo(name, args)
 	cmd := exec.Command(name, args...)
 	cmd.Env = r.env()
@@ -248,12 +293,6 @@ func (r *runner) streamDirect(name string, args ...string) (int, error) {
 		return 1, fmt.Errorf("starting %s: %w", name, err)
 	}
 
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	defer func() {
-		signal.Stop(sigs)
-		close(sigs)
-	}()
 	go func() {
 		for s := range sigs {
 			if cmd.Process != nil {

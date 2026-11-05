@@ -108,6 +108,12 @@ func (st *state) runFetch(opts *options) int {
 	// FR-064's Testing Mirrors view is fed from #73's ProgressEvent stream.
 	// Ctrl-C cancels the round: xbpretty owns these requests, so it tears the
 	// view down, prints the interruption and exits 130 (FR-072).
+	//
+	// #79 scope: MirrorScore keeps #66's in-place renderer rather than the S4
+	// inline viewport. It is a childless probe round with no completed
+	// download/unpack lines, so there is nothing to insert into scrollback;
+	// the transaction phases (predownload and the commit child) carry the
+	// viewport.
 	var live *liveProgress
 	progress := mirrorScoreEvents
 	sigCh := make(chan os.Signal, 1)

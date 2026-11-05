@@ -10,6 +10,8 @@ import (
 
 	"github.com/soubarnak/xbpretty/internal/fetch"
 	"github.com/soubarnak/xbpretty/internal/summary"
+	"github.com/soubarnak/xbpretty/internal/term"
+	"github.com/soubarnak/xbpretty/internal/tui"
 	"github.com/soubarnak/xbpretty/internal/xbps"
 )
 
@@ -42,6 +44,10 @@ type progressModel struct {
 	completedCount int
 	lastCompleted  string
 	inFlight       map[string]uint64
+
+	// inserts holds completed lines the inline viewport must push above the
+	// box on the next draw (FR-072). Without a viewport they are dropped.
+	inserts []string
 
 	// Install state: U = 2·A unpack units for install/update rows plus one
 	// configure unit for configure-only rows.
@@ -194,6 +200,7 @@ func (m *progressModel) downloadDone(done DownloadComplete) {
 	m.completedBytes += size
 	m.completedCount++
 	m.lastCompleted = done.Filename
+	m.inserts = append(m.inserts, "Last completed: "+done.Filename)
 	delete(m.inFlight, key)
 }
 
@@ -235,6 +242,12 @@ func (m *progressModel) packageEvent(event PackageEvent) {
 	case "removed":
 		m.kind = viewRemove
 		m.removed[event.Package] = true
+	}
+	// A finished package action is a completed child line; the viewport
+	// inserts it into scrollback above the box (FR-072).
+	switch event.Action {
+	case "installed", "updated", "configured", "removed":
+		m.inserts = append(m.inserts, event.Package+": "+event.Action+" successfully.")
 	}
 }
 
@@ -538,6 +551,14 @@ type liveProgress struct {
 	drawn  int
 	closed bool
 
+	// Inline viewport (FR-072). viewport is set only for the widget; the
+	// plain line keeps its 40-cell in-place form. When guard is set the
+	// latch leaves cbreak for the duration of a child's alternate screen.
+	viewport *tui.Viewport
+	guard    *term.Guard
+	cbreak   bool
+	latch    tui.AltScreenLatch
+
 	lastDraw time.Time
 	timer    *time.Timer
 	now      func() time.Time
@@ -559,27 +580,85 @@ func newLiveProgress(out io.Writer, color bool, width int, mode liveMode, model 
 	}
 }
 
+// SetInline attaches the inline viewport that replaces the renderer's own
+// in-place drawing (FR-072). guard is optional: it is the cbreak session the
+// child's `?1049h` latch must leave and later re-enter.
+func (l *liveProgress) SetInline(vp *tui.Viewport, guard *term.Guard, cbreak bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.viewport = vp
+	l.guard = guard
+	l.cbreak = cbreak
+}
+
+// SetCbreak records whether cbreak is currently held. The commit child runs
+// with the user's termios, so its `?1049l` must not re-enter cbreak.
+func (l *liveProgress) SetCbreak(on bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cbreak = on
+}
+
+// ObserveChildOutput feeds one chunk of child output to the two-state
+// alt-screen latch. On `?1049h` the box is hidden and termios restored; on
+// `?1049l` cbreak is re-entered and the box redrawn on the same tick.
+func (l *liveProgress) ObserveChildOutput(chunk string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	defer l.guardRenderPanic()
+	if l.viewport == nil || l.closed {
+		return
+	}
+	hide, show := l.latch.Observe(chunk)
+	if hide {
+		l.viewport.Hide()
+		if l.guard != nil && l.cbreak {
+			l.guard.RestoreTermios()
+		}
+	}
+	if show {
+		if l.guard != nil && l.cbreak {
+			_ = l.guard.EnterInline()
+		}
+		l.viewport.Show(l.renderLinesLocked())
+	}
+}
+
 // Apply serializes one model mutation with the renderer. The stdout scanner
 // and the stderr parser call it from different goroutines, so every model
 // access must go through here; drawLocked already holds the same lock.
 func (l *liveProgress) Apply(force bool, update func(*progressModel)) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	defer l.guardRenderPanic()
 	if l.closed {
 		return
 	}
 	update(l.model)
+	if l.flushInsertsLocked() {
+		// A completion always repaints: the box must re-anchor below the
+		// line that was just pushed into scrollback.
+		force = true
+	}
 	l.requestLocked(force)
 }
 
-// SetWidth applies a SIGWINCH width change; the next redraw uses it.
+// SetWidth applies a SIGWINCH width change; the next redraw uses it. The box
+// reflows horizontally and keeps its fixed view height.
 func (l *liveProgress) SetWidth(columns int) {
 	if columns <= 0 {
 		return
 	}
 	l.mu.Lock()
+	defer l.mu.Unlock()
+	defer l.guardRenderPanic()
 	l.width = columns
-	l.mu.Unlock()
+	if l.viewport != nil {
+		l.viewport.SetWidth(columns)
+	}
+	if !l.closed && l.drawn > 0 {
+		l.drawLocked()
+	}
 }
 
 // Request redraws now on a forced event, otherwise coalesces to one draw per
@@ -615,35 +694,85 @@ func (l *liveProgress) requestLocked(force bool) {
 }
 
 func (l *liveProgress) drawLocked() {
+	defer l.guardRenderPanic()
 	if l.closed {
 		return
 	}
 	if l.mode == livePlainMode {
 		fmt.Fprintf(l.out, "\r\x1b[2K%s", renderPlainLine(l.model.plain()))
 		l.drawn = 1
-	} else {
-		lines := renderProgressViewThemed(l.model.view(), l.width, l.color, l.theme)
-		if l.drawn == 0 {
-			fmt.Fprint(l.out, strings.Join(lines, "\n"))
-		} else {
-			var b strings.Builder
-			b.WriteString("\r")
-			if l.drawn > 1 {
-				fmt.Fprintf(&b, "\x1b[%dA", l.drawn-1)
-			}
-			for i, line := range lines {
-				b.WriteString("\x1b[K")
-				b.WriteString(line)
-				if i < len(lines)-1 {
-					b.WriteByte('\n')
-				}
-			}
-			b.WriteString("\x1b[J")
-			fmt.Fprint(l.out, b.String())
+		l.lastDraw = l.now()
+		return
+	}
+	lines := l.renderLinesLocked()
+	if l.viewport != nil {
+		if len(lines) > 0 {
+			l.viewport.Draw(lines)
 		}
 		l.drawn = len(lines)
+		l.lastDraw = l.now()
+		return
 	}
+	if l.drawn == 0 {
+		fmt.Fprint(l.out, strings.Join(lines, "\n"))
+	} else {
+		var b strings.Builder
+		b.WriteString("\r")
+		if l.drawn > 1 {
+			fmt.Fprintf(&b, "\x1b[%dA", l.drawn-1)
+		}
+		for i, line := range lines {
+			b.WriteString("\x1b[K")
+			b.WriteString(line)
+			if i < len(lines)-1 {
+				b.WriteByte('\n')
+			}
+		}
+		b.WriteString("\x1b[J")
+		fmt.Fprint(l.out, b.String())
+	}
+	l.drawn = len(lines)
 	l.lastDraw = l.now()
+}
+
+// guardRenderPanic restores the terminal before a render panic is re-raised:
+// a broken draw must never leave the inline box painted or cbreak held. It is
+// also called from the deferred coalescing timer, which has no caller to
+// unwind through.
+func (l *liveProgress) guardRenderPanic() {
+	r := recover()
+	if r == nil {
+		return
+	}
+	if l.viewport != nil {
+		l.viewport.Teardown()
+	}
+	if l.guard != nil {
+		l.guard.Restore()
+	}
+	panic(r)
+}
+
+// renderLinesLocked renders the current frame with the configured theme.
+func (l *liveProgress) renderLinesLocked() []string {
+	return renderProgressViewThemed(l.model.view(), l.width, l.color, l.theme)
+}
+
+// flushInsertsLocked writes every completed child line above the box. The
+// lines are consumed even without a viewport: nothing else displays them.
+func (l *liveProgress) flushInsertsLocked() bool {
+	if len(l.model.inserts) == 0 {
+		return false
+	}
+	lines := l.model.inserts
+	l.model.inserts = nil
+	if l.viewport == nil {
+		return false
+	}
+	for _, line := range lines {
+		l.viewport.Insert(line)
+	}
+	return true
 }
 
 // Finish tears the live surface down. Success clears without any completion
@@ -659,6 +788,11 @@ func (l *liveProgress) Finish() {
 	if l.timer != nil {
 		l.timer.Stop()
 		l.timer = nil
+	}
+	if l.viewport != nil {
+		l.viewport.Teardown()
+		l.drawn = 0
+		return
 	}
 	if l.drawn == 0 {
 		return

@@ -3,8 +3,10 @@ package cli
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/soubarnak/xbpretty/internal/config"
@@ -55,12 +57,24 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 	// the parser already reads. No live view means the child output is
 	// forwarded verbatim instead.
 	var live *liveProgress
+	// FR-072: a signal must be caught before cbreak is entered. The channel is
+	// armed ahead of the viewport and handed to the stream, so a SIGINT in the
+	// window between the terminal change and the child is still forwarded and
+	// the deferred restore runs.
+	var sigs chan os.Signal
 	if mode := st.liveMode(); mode != liveOff {
 		model := newProgressModel(cmd, rows, nil)
 		live = newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode, model, st.theme)
 		st.r.live = true
 		st.r.liveProgress = live
-		defer live.Finish()
+		if mode == liveWidgetMode {
+			sigs = make(chan os.Signal, 1)
+			signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+			defer func() {
+				signal.Stop(sigs)
+				close(sigs)
+			}()
+		}
 		parser := st.r.parser
 		parser.OnDownloadTick = func(tick DownloadTick) {
 			live.Apply(false, func(m *progressModel) { m.downloadTick(tick) })
@@ -75,10 +89,18 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 		parser.OnPackageEvent = func(event PackageEvent) {
 			live.Apply(true, func(m *progressModel) { m.packageEvent(event) })
 		}
+		// FR-072: the viewport exists on the normal screen before the child
+		// starts, and termios is handed back before the commit child, which
+		// may prompt on stdin. Finish is registered after Close so it runs
+		// first, keeping teardown clear of the last draw.
+		inline := st.startInline(live)
+		defer inline.Close()
+		defer live.Finish()
+		inline.RestoreTermios()
 		live.Request(true)
 	}
 
-	code, err := st.r.stream(bin, args...)
+	code, err := st.r.streamWithSignals(sigs, bin, args...)
 	if live != nil {
 		live.Finish()
 		st.r.live = false
