@@ -130,3 +130,102 @@ func TestStartInlineOnlyForTheWidget(t *testing.T) {
 		t.Errorf("startInline drew without a viewport: %q", out.String())
 	}
 }
+
+// TestLiveProgressLatchLeavesAndReentersCbreak is the direct half of FR-072's
+// latch: a child's `?1049h` restores the user's termios, and `?1049l` puts
+// cbreak back before the next draw.
+func TestLiveProgressLatchLeavesAndReentersCbreak(t *testing.T) {
+	master, slave, err := openPty()
+	if err != nil {
+		t.Skipf("no pseudo-terminal: %v", err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	before, err := term.GetState(slave)
+	if err != nil {
+		t.Skipf("no termios: %v", err)
+	}
+	guard := term.NewGuard(slave, slave)
+	if err := guard.EnterInline(); err != nil {
+		t.Skipf("no cbreak: %v", err)
+	}
+	defer guard.Restore()
+
+	var out bytes.Buffer
+	model := newProgressModel("install", downloadPlan(), nil)
+	live := newLiveProgress(&out, false, 80, liveWidgetMode, model, summary.DefaultTheme())
+	vp := tui.NewViewport(&out, 80)
+	vp.Start(tui.Anchor{OK: true})
+	live.SetInline(vp, guard, true)
+	live.Request(true)
+
+	live.ObserveChildOutput("entering " + term.AltEnter)
+	if !vp.Hidden() {
+		t.Fatal("AltEnter did not hide the box")
+	}
+	hidden, err := term.GetState(slave)
+	if err != nil {
+		t.Fatalf("GetState hidden: %v", err)
+	}
+	if !hidden.Equal(before) {
+		t.Errorf("termios not restored while the child owns the alternate screen")
+	}
+	live.ObserveChildOutput(term.AltLeave)
+	if vp.Hidden() {
+		t.Fatal("AltLeave did not show the box")
+	}
+	shown, err := term.GetState(slave)
+	if err != nil {
+		t.Fatalf("GetState shown: %v", err)
+	}
+	if shown.Equal(before) {
+		t.Errorf("cbreak was not re-entered after the child left")
+	}
+}
+
+// TestLiveProgressRenderPanicRestoresTerminal pins FR-072's panic path: a draw
+// panic tears the box down, restores the guard and re-raises, so a crashed
+// render can never leave the terminal in cbreak.
+func TestLiveProgressRenderPanicRestoresTerminal(t *testing.T) {
+	master, slave, err := openPty()
+	if err != nil {
+		t.Skipf("no pseudo-terminal: %v", err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	before, err := term.GetState(slave)
+	if err != nil {
+		t.Skipf("no termios: %v", err)
+	}
+	guard := term.NewGuard(slave, slave)
+	if err := guard.EnterInline(); err != nil {
+		t.Skipf("no cbreak: %v", err)
+	}
+
+	var out bytes.Buffer
+	model := newProgressModel("install", downloadPlan(), nil)
+	live := newLiveProgress(&out, false, 80, liveWidgetMode, model, summary.DefaultTheme())
+	vp := tui.NewViewport(&out, 80)
+	vp.Start(tui.Anchor{OK: true})
+	live.SetInline(vp, guard, true)
+	live.Request(true)
+
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("the render panic was swallowed")
+			}
+		}()
+		live.Apply(true, func(*progressModel) { panic("render boom") })
+	}()
+	after, err := term.GetState(slave)
+	if err != nil {
+		t.Fatalf("GetState after panic: %v", err)
+	}
+	if !after.Equal(before) {
+		t.Errorf("termios not restored after a render panic")
+	}
+	if !strings.HasSuffix(out.String(), "\x1b[J") {
+		t.Errorf("the box was not cleared by the panic path: %q", out.String())
+	}
+}

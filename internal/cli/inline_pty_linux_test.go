@@ -179,17 +179,14 @@ func TestInlineViewportOnTheNormalScreen(t *testing.T) {
 	if strings.Contains(capture, term.AltEnter) {
 		t.Error("xbpretty entered an alternate screen")
 	}
-	// No-anchor fallback: the DSR query is followed by \r\n before the box.
-	query := strings.Index(capture, term.DSRQuery)
+	// FR-072's no-anchor fallback is the only inline path: a DSR query would
+	// have to read the queued stdin bytes, so the box starts on a fresh line.
 	firstBox := strings.Index(capture, "╭")
-	if query < 0 {
-		t.Fatalf("the viewport never asked for an anchor:\n%q", capture)
+	if strings.Contains(capture, term.DSRQuery) {
+		t.Errorf("the inline viewport sent a DSR query")
 	}
-	if firstBox < 0 || firstBox < query {
-		t.Fatalf("the box did not start after the DSR query:\n%q", capture)
-	}
-	if !strings.Contains(capture[query+len(term.DSRQuery):firstBox], term.NoAnchor) {
-		t.Errorf("the DSR-silent terminal did not take the no-anchor fallback")
+	if firstBox < 0 || !strings.HasSuffix(capture[:firstBox], term.NoAnchor) {
+		t.Errorf("the box did not start with the no-anchor fallback:\n%q", capture[:maxInt(0, firstBox)])
 	}
 	for _, line := range []string{
 		"Last completed: alpha-1_1.x86_64.xbps",
@@ -201,10 +198,15 @@ func TestInlineViewportOnTheNormalScreen(t *testing.T) {
 			t.Errorf("completed line %q was not inserted into scrollback:\n%q", line, capture)
 			continue
 		}
-		// The pty's OPOST gives the inserted line "\r\r\n"; only the line
-		// itself and a following box redraw matter.
-		if strings.Index(capture[at:], "╭") < 0 {
-			t.Errorf("the box did not re-anchor below %q", line)
+		// The immediate sequence is <erase><line><box>: the box is erased,
+		// the completed line becomes scrollback, and the box is redrawn on
+		// the next rows with no other output between.
+		if !strings.HasSuffix(capture[:at], "\x1b[J") {
+			t.Errorf("inserted line %q is not preceded by the box erase:\n%q", line, capture[maxInt(0, at-16):at])
+		}
+		rest := capture[at+len(line):]
+		if !strings.HasPrefix(rest, "\r\n╭") && !strings.HasPrefix(rest, "╭") {
+			t.Errorf("the box did not follow inserted line %q immediately: %q", line, rest[:minInt(len(rest), 8)])
 		}
 	}
 	if !strings.Contains(capture, "q") == false && false {
@@ -217,13 +219,15 @@ func TestInlineViewportOnTheNormalScreen(t *testing.T) {
 }
 
 // TestInlineViewportHidesForChildAlternateScreen pins the `?1049h/l` latch:
-// the child's enter hides the box and hands termios back, the leave redraws.
+// the child's enter is seen through the stderr scanner's CR split, the box is
+// erased while hidden, and the leave redraws it. The cbreak half of the latch
+// is proven directly in TestLiveProgressLatchLeavesAndReentersCbreak.
 func TestInlineViewportHidesForChildAlternateScreen(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "entered")
-	extra := `printf '\033[?1049h'
+	extra := `printf '\033[?1049h\r' >&2
 touch ` + marker + `
 sleep 0.25
-printf '\033[?1049l'
+printf '\033[?1049l\r' >&2
 `
 	newInlineEnv(t, writeInlineStub(t, extra))
 	r := startInlinePty(t, []string{"xbpretty", "install", "-y", "alpha"}, 80, 24)
@@ -241,14 +245,14 @@ printf '\033[?1049l'
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	// While the child owns the screen the box must be gone and cbreak left.
-	hiddenAt := len(r.cap.String())
-	if now, err := term.GetState(r.slave); err == nil && !now.Equal(r.before) {
-		t.Errorf("termios was not restored while the child owned the alternate screen")
-	}
-	time.Sleep(50 * time.Millisecond)
-	if strings.Count(r.cap.String()[hiddenAt:], "╭") != 0 {
-		t.Errorf("the box was drawn while hidden:\n%q", r.cap.String()[hiddenAt:])
+	// The enter is observed by the latch, which erases the box and draws
+	// nothing while hidden. The child is still asleep, so the erase is the
+	// final write.
+	hidden := r.waitFor(t, "the hidden box", func(s string) bool {
+		return strings.HasSuffix(s, "\x1b[J")
+	})
+	if strings.Index(hidden[strings.LastIndex(hidden, "\x1b[J"):], "╭") >= 0 {
+		t.Errorf("a box was drawn while hidden:\n%q", hidden)
 	}
 	if code := r.exitCode(t); code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, r.cap.String())
@@ -257,8 +261,8 @@ printf '\033[?1049l'
 	if strings.Contains(capture, term.AltEnter) || strings.Contains(capture, term.AltLeave) {
 		t.Errorf("xbpretty echoed the child's alternate-screen markers")
 	}
-	if !strings.Contains(capture[hiddenAt:], "╭") {
-		t.Errorf("the box was not redrawn after the child left:\n%q", capture[hiddenAt:])
+	if !strings.Contains(capture, "\x1b[J╭") && !strings.Contains(capture, "\x1b[J\r╭") {
+		t.Errorf("the box was not redrawn immediately after the hide erase:\n%q", capture)
 	}
 	r.assertTermiosRestored(t)
 }
@@ -304,8 +308,8 @@ func TestInlineViewportResizeReflowsWidthOnly(t *testing.T) {
 }
 
 // TestInlineViewportCtrlCExits130AndTearsDown is FR-072's owned-transfer
-// signal path: cbreak with ISIG reaches the handler, the box clears, the
-// interruption prints and the exit code is 130 with termios restored.
+// signal path, delivered as SIGINT to the process (the signal a ^C produces).
+// TestInlineViewportCtrlCThroughTheTTY covers the real ^C byte on a pty.
 func TestInlineViewportCtrlCExits130AndTearsDown(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
@@ -392,6 +396,19 @@ type ptyAll struct {
 
 func startPtyAll(t *testing.T, bin string, env map[string]string, args []string, cols, rows int) *ptyAll {
 	t.Helper()
+	return startPtyAllMode(t, bin, env, args, cols, rows, false)
+}
+
+// startPtyAllControlling makes the pty the child's controlling terminal, so a
+// ^C byte written to the master reaches the foreground process group as
+// SIGINT, exactly as a real terminal does.
+func startPtyAllControlling(t *testing.T, bin string, env map[string]string, args []string, cols, rows int) *ptyAll {
+	t.Helper()
+	return startPtyAllMode(t, bin, env, args, cols, rows, true)
+}
+
+func startPtyAllMode(t *testing.T, bin string, env map[string]string, args []string, cols, rows int, controlling bool) *ptyAll {
+	t.Helper()
 	master, slave, err := openPty()
 	if err != nil {
 		t.Skipf("no pseudo-terminal: %v", err)
@@ -400,6 +417,9 @@ func startPtyAll(t *testing.T, bin string, env map[string]string, args []string,
 	cmd := exec.Command(bin, args...)
 	cmd.Env = envWith(env)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+	if controlling {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+	}
 	before, err := term.GetState(slave)
 	if err != nil {
 		t.Fatalf("GetState before: %v", err)
@@ -485,7 +505,7 @@ PLAN
     ;;
 esac
 printf '[ 50%%] libfoo-1.3_1.x86_64.xbps: [7MB 50%%] 10MB/s ETA: 00m01s\033[K\r' >&2
-sleep 0.05
+sleep 0.50
 printf 'libfoo-1.3_1.x86_64.xbps: 15MB [avg rate: 10MB/s]\033[K\n' >&2
 printf '[*] Unpacking packages\n'
 printf 'libfoo-1.3_1: unpacking ...\n'
@@ -566,19 +586,20 @@ func TestInlineViewportAfterS1Confirm(t *testing.T) {
 	}
 	capture := r.cap.String()
 
-	// The S1 leave is ordered before the viewport's DSR query, which is
-	// ordered before the first box; the child starts after both.
+	// The S1 leave is ordered before the first viewport box; the child starts
+	// after both. No DSR query may appear, because it would consume stdin.
 	leave := strings.Index(capture, term.AltLeave)
 	cursorShow := strings.Index(capture, term.CursorShow)
 	mouseOff := strings.LastIndex(capture, term.MouseOff)
-	queryAt := strings.Index(capture, term.DSRQuery)
 	boxAt := strings.Index(capture, "╭")
 	if leave < 0 || cursorShow < 0 || mouseOff < 0 {
 		t.Fatalf("S1 did not restore before the viewport; capture:\n%q", capture)
 	}
-	if !(leave < cursorShow && cursorShow < queryAt && queryAt < boxAt) {
-		t.Errorf("handoff order leave=%d cursor=%d query=%d box=%d, want leave < cursor < query < box",
-			leave, cursorShow, queryAt, boxAt)
+	if !(leave < cursorShow && cursorShow < boxAt) {
+		t.Errorf("handoff order leave=%d cursor=%d box=%d, want leave < cursor < box", leave, cursorShow, boxAt)
+	}
+	if strings.Contains(capture, term.DSRQuery) {
+		t.Errorf("the inline viewport sent a DSR query")
 	}
 	if got := strings.Count(capture, term.AltEnter); got != 1 {
 		t.Errorf("alternate-screen entries = %d, want 1 (S1 only)", got)
@@ -607,4 +628,197 @@ func TestInlineViewportAfterS1Confirm(t *testing.T) {
 	if !after.Equal(r.before) {
 		t.Errorf("termios flags not restored after the inline run")
 	}
+}
+
+// writeStdinStub is a child that records the first line it reads from stdin,
+// proving the inline viewport left queued input for it.
+func writeStdinStub(t *testing.T) (string, string) {
+	t.Helper()
+	marker := filepath.Join(t.TempDir(), "stdin-line")
+	path := filepath.Join(t.TempDir(), "stdin-child")
+	script := `#!/bin/sh
+case "${1:-}" in
+  -*n*)
+    cat <<'PLAN'
+alpha-1_1 install x86_64 https://repo-default.voidlinux.org/current 409600 409600
+PLAN
+    exit 0
+    ;;
+esac
+IFS= read -r line
+printf '%s' "$line" > ` + marker + `
+printf '[ 50%%] alpha-1_1.x86_64.xbps: [200KB 50%%] 10MB/s ETA: 00m01s\033[K\r' >&2
+sleep 0.05
+printf 'alpha-1_1.x86_64.xbps: 400KB [avg rate: 10MB/s]\033[K\n' >&2
+exit 0
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path, marker
+}
+
+// TestInlineViewportDoesNotConsumeChildStdin pins FR-072's "no keys": bytes
+// written while the viewport is starting stay queued and reach the child.
+func TestInlineViewportDoesNotConsumeChildStdin(t *testing.T) {
+	stub, marker := writeStdinStub(t)
+	newInlineEnv(t, stub)
+	r := startInlinePty(t, []string{"xbpretty", "install", "-y", "alpha"}, 80, 24)
+	// Sent immediately, before the child can have read anything; a DSR
+	// handshake on the same terminal would have swallowed it.
+	r.send(t, "HELLO\n")
+	if code := r.exitCode(t); code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, r.cap.String())
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, err := os.ReadFile(marker)
+		if err == nil && string(got) == "HELLO" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the child never read the queued stdin line (marker=%q, err=%v)", got, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestInlineSignalInCbreakWindowRestoresTermios delivers SIGINT after cbreak
+// is entered but before the child exists. The pre-armed handler must keep the
+// signal alive, the child still reports the interruption and the deferred
+// restore must put the termios flags back.
+func TestInlineSignalInCbreakWindowRestoresTermios(t *testing.T) {
+	newInlineEnv(t, writeInlineStub(t, "sleep 0.20\n"))
+	orig := inlineEnteredFn
+	fired := false
+	inlineEnteredFn = func() {
+		if fired {
+			return
+		}
+		fired = true
+		_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
+	}
+	t.Cleanup(func() { inlineEnteredFn = orig })
+
+	r := startInlinePty(t, []string{"xbpretty", "install", "-y", "alpha"}, 80, 24)
+	r.waitFor(t, "the Download view", func(s string) bool {
+		return strings.Contains(s, "Downloading Packages")
+	})
+	code := r.exitCode(t)
+	if code != exitInterrupted {
+		t.Fatalf("exit = %d, want 130\n%s", code, r.cap.String())
+	}
+	r.assertTermiosRestored(t)
+	if strings.Contains(r.cap.String(), term.AltEnter) {
+		t.Error("the signal path entered an alternate screen")
+	}
+}
+
+// TestInlineViewportResizeDuringPredownload pins AC-055's resize rule while
+// xbpretty owns the transfer: the inline surface's own SIGWINCH watcher
+// reflows the box to 60 columns without changing its fixed height.
+func TestInlineViewportResizeDuringPredownload(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.set("XB_STUB_EXIT", "0")
+	e.useCacheDir(t.TempDir())
+	f := newRepoFixture(t)
+	pkgver := "alpha-1.0_1"
+	content := []byte("archive")
+	sha := f.add(pkgver, "x86_64", content)
+	e.set("XB_STUB_STDOUT", planLine(pkgver, f.URL(), len(content)+16))
+	e.set("XB_STUB_HASHES", hashLine(pkgver, sha, f.URL()))
+	e.set("TERM", "xterm")
+	e.writeConfig("")
+	terminalize(t)
+
+	f.mu.Lock()
+	f.block = make(chan struct{})
+	f.started = make(chan string, 4)
+	started := f.started
+	block := f.block
+	f.mu.Unlock()
+
+	r := startInlinePty(t, []string{"xbpretty", "install", "figlet", "-y"}, 80, 24)
+	r.waitFor(t, "the Download view", func(s string) bool {
+		return strings.Contains(s, "Downloading Packages")
+	})
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		close(block)
+		t.Fatalf("the transfer never started; capture:\n%q", r.cap.String())
+	}
+	setProgressPtySize(t, r.slave, 60, 24)
+	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
+		close(block)
+		t.Fatalf("SIGWINCH: %v", err)
+	}
+	r.waitFor(t, "the 60-column predownload frame", func(s string) bool {
+		for _, frame := range progressFrames(s) {
+			lines := frameLines(frame)
+			if strings.Contains(frame, "Downloading Packages") && len(lines) == heightDownload &&
+				visibleWidth(strings.TrimRight(lines[0], "\r")) == 60 {
+				return true
+			}
+		}
+		return false
+	})
+	close(block)
+	if code := r.exitCode(t); code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, r.cap.String())
+	}
+	r.assertTermiosRestored(t)
+}
+
+// TestInlineViewportCtrlCThroughTheTTY is the real terminal path: a ^C byte on
+// the pty reaches the foreground process group, the child reports 130 and the
+// deferred teardown restores the terminal.
+func TestInlineViewportCtrlCThroughTheTTY(t *testing.T) {
+	bin := buildTuiBinary(t)
+	dir := t.TempDir()
+	query := tuiOldQuery(t, dir)
+	env := inlineScreenEnv(t, dir, query, writeInlineScreenStub(t))
+	r := startPtyAllControlling(t, bin, env, []string{"upgrade"}, 80, 24)
+
+	r.waitFor(t, "the S1 frame", func(s string) bool {
+		return strings.Contains(s, "xbpretty Upgrade")
+	})
+	r.send(t, "y")
+	r.waitFor(t, "the inline box", func(s string) bool {
+		return strings.Contains(s, "Downloading Packages") || strings.Contains(s, "Installing Packages")
+	})
+	r.send(t, "\x03")
+	if code := r.exitCode(t); code != exitInterrupted {
+		t.Fatalf("exit = %d, want 130\n%s", code, r.cap.String())
+	}
+	after, err := term.GetState(r.slave)
+	if err != nil {
+		t.Fatalf("GetState after: %v", err)
+	}
+	if !after.Equal(r.before) {
+		t.Errorf("termios flags not restored after a ^C")
+	}
+	capture := r.cap.String()
+	if strings.Count(capture, term.AltEnter) != 1 {
+		t.Errorf("alternate-screen entries = %d, want 1 (S1 only)", strings.Count(capture, term.AltEnter))
+	}
+	// The box is torn down after the interruption rather than left painted.
+	if strings.HasSuffix(capture, "╯\r") {
+		t.Errorf("the inline box was left on screen after ^C")
+	}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

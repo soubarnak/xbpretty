@@ -605,6 +605,7 @@ func (l *liveProgress) SetCbreak(on bool) {
 func (l *liveProgress) ObserveChildOutput(chunk string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	defer l.guardRenderPanic()
 	if l.viewport == nil || l.closed {
 		return
 	}
@@ -629,6 +630,7 @@ func (l *liveProgress) ObserveChildOutput(chunk string) {
 func (l *liveProgress) Apply(force bool, update func(*progressModel)) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	defer l.guardRenderPanic()
 	if l.closed {
 		return
 	}
@@ -649,6 +651,7 @@ func (l *liveProgress) SetWidth(columns int) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	defer l.guardRenderPanic()
 	l.width = columns
 	if l.viewport != nil {
 		l.viewport.SetWidth(columns)
@@ -691,6 +694,7 @@ func (l *liveProgress) requestLocked(force bool) {
 }
 
 func (l *liveProgress) drawLocked() {
+	defer l.guardRenderPanic()
 	if l.closed {
 		return
 	}
@@ -729,6 +733,24 @@ func (l *liveProgress) drawLocked() {
 	}
 	l.drawn = len(lines)
 	l.lastDraw = l.now()
+}
+
+// guardRenderPanic restores the terminal before a render panic is re-raised:
+// a broken draw must never leave the inline box painted or cbreak held. It is
+// also called from the deferred coalescing timer, which has no caller to
+// unwind through.
+func (l *liveProgress) guardRenderPanic() {
+	r := recover()
+	if r == nil {
+		return
+	}
+	if l.viewport != nil {
+		l.viewport.Teardown()
+	}
+	if l.guard != nil {
+		l.guard.Restore()
+	}
+	panic(r)
 }
 
 // renderLinesLocked renders the current frame with the configured theme.
