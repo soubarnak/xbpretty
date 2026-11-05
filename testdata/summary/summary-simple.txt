@@ -1,0 +1,12 @@
+Remove: 1
+  nano
+Install: 2
+  figlet, cowsay
+Upgrade: 1
+  voiced
+Held: 1
+  acl (Manual hold)
+
+ Total download size: 12 MiB
+ Disk space to free: 2 MiB
+

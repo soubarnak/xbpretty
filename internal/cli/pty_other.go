@@ -16,6 +16,8 @@ func inheritPtySize(src, dst *os.File) error {
 	return errors.New("pty not supported on non-linux systems")
 }
 
+// terminalWidth has no ioctl on this platform, so callers fall back to
+// COLUMNS and then 80.
 func terminalWidth(w io.Writer) int {
-	return 80
+	return 0
 }

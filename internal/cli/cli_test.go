@@ -279,10 +279,10 @@ func rowLine(out, name string) string {
 	return ""
 }
 
-// TestAC009AutoremoveOrphansLandInRemoveGroup drives the captured
-// `xbps-remove -on` plan (testdata/parser/0607/autoremove.txt): the orphans
-// are the Remove group, each row carrying the bytes its removal frees.
-func TestAC009AutoremoveOrphansLandInRemoveGroup(t *testing.T) {
+// TestAC009AutoremoveOrphansLandInAutoRemoveGroup drives the captured
+// `xbps-remove -on` plan (testdata/parser/0607/autoremove.txt): the orphans are
+// nala's AutoRemove group, each row carrying the bytes its removal frees.
+func TestAC009AutoremoveOrphansLandInAutoRemoveGroup(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.set("XB_STUB_STDOUT", planCapture(t, "0607/autoremove.txt"))
@@ -293,15 +293,15 @@ func TestAC009AutoremoveOrphansLandInRemoveGroup(t *testing.T) {
 	if cmds := e.transactionCalls(); len(cmds) != 1 || cmds[0] != "-n -o" {
 		t.Errorf("commands = %q, want one -n -o dry run", cmds)
 	}
-	if !strings.Contains(out, "Remove") {
-		t.Errorf("no Remove group:\n%s", out)
+	if !strings.Contains(out, "\n AutoRemove\n") {
+		t.Errorf("no AutoRemove group:\n%s", out)
 	}
 	for _, row := range []struct{ name, version, size string }{
-		{"cups", "2.4.19_1", "13.1 MiB"},
-		{"font-ibm-plex-ttf", "6.4.0_2", "58.3 MiB"},
-		{"lsof", "4.99.7_1", "333.4 KiB"},
-		{"steam-udev-rules", "1.0.0.61+20260625_1", "17.2 KiB"},
-		{"zenity", "4.0.5_1", "10.5 MiB"},
+		{"cups", "2.4.19_1", "13 MiB"},
+		{"font-ibm-plex-ttf", "6.4.0_2", "58 MiB"},
+		{"lsof", "4.99.7_1", "333 KiB"},
+		{"steam-udev-rules", "1.0.0.61+20260625_1", "17 KiB"},
+		{"zenity", "4.0.5_1", "11 MiB"},
 	} {
 		line := rowLine(out, row.name)
 		if line == "" {
@@ -312,10 +312,10 @@ func TestAC009AutoremoveOrphansLandInRemoveGroup(t *testing.T) {
 			t.Errorf("%s row = %q, want version %s and size %s", row.name, line, row.version, row.size)
 		}
 	}
-	if !strings.Contains(out, "5 remove") {
-		t.Errorf("footer is missing the remove count:\n%s", out)
+	if !strings.Contains(out, "AutoRemove 5") {
+		t.Errorf("footer is missing the AutoRemove count:\n%s", out)
 	}
-	if !strings.Contains(out, "-82.3 MiB disk") {
+	if !strings.Contains(out, "Disk space to free: 82 MiB") {
 		t.Errorf("footer is missing the freed disk total:\n%s", out)
 	}
 }
@@ -610,13 +610,13 @@ func TestAC010RemovalFreesWithNoDownload(t *testing.T) {
 	if strings.Contains(out, "805.3 KiB") {
 		t.Errorf("the removal is shown by its download size:\n%s", out)
 	}
-	if !strings.Contains(out, "wget  1.25.0_1  3.5 MiB") {
+	if line := rowLine(out, "wget"); !strings.Contains(line, "1.25.0_1") || !strings.Contains(line, "4 MiB") {
 		t.Errorf("the removal's freed bytes are missing:\n%s", out)
 	}
 	if strings.Contains(out, "download") {
 		t.Errorf("the footer reports a download for a removal:\n%s", out)
 	}
-	if !strings.Contains(out, "-3.5 MiB disk") {
+	if !strings.Contains(out, "Disk space to free: 4 MiB") {
 		t.Errorf("the footer is missing the freed disk delta:\n%s", out)
 	}
 }
@@ -1715,7 +1715,7 @@ func TestStubClassifiesEveryArgvShape(t *testing.T) {
 	}
 }
 
-func TestNalaRoundedContainersInteractive(t *testing.T) {
+func TestNalaInlineSummaryInteractive(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.tty = true
@@ -1727,20 +1727,30 @@ func TestNalaRoundedContainersInteractive(t *testing.T) {
 	}
 
 	plain := ansiEscape.ReplaceAllString(out, "")
-	if !strings.Contains(plain, "╭── Packages To Upgrade (1)") {
-		t.Errorf("interactive output missing rounded upgrade box:\n%s", out)
+	for _, want := range []string{
+		"================================================================================",
+		" Upgrade",
+		" Package:",
+		"Old Version:",
+		"New Version:",
+		" Summary",
+		" Upgrade 1",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("interactive output missing %q:\n%s", want, out)
+		}
 	}
-	if !strings.Contains(plain, "╭── Summary") {
-		t.Errorf("interactive output missing rounded summary card:\n%s", out)
+	if !strings.Contains(out, "\x1b[1;39mUpgrade\x1b[0m") {
+		t.Errorf("section label is not Highlight:\n%s", out)
 	}
-	if !strings.Contains(out, "\x1b[38;5;202m") {
-		t.Errorf("interactive output missing orange version diff:\n%s", out)
+	if !strings.Contains(out, "\x1b[1;94mxbps\x1b[0m") {
+		t.Errorf("upgrade name is not Secondary:\n%s", out)
 	}
-	if !strings.Contains(out, "\x1b[1;34m") {
-		t.Errorf("interactive output missing blue action color:\n%s", out)
+	if !strings.Contains(out, "\x1b[1;93m8_1\x1b[0m") {
+		t.Errorf("changed version tail is not Notice:\n%s", out)
 	}
-	if !strings.Contains(plain, "0.60.7_1 → 0.60.8_1") {
-		t.Errorf("interactive output missing version arrow delta:\n%s", out)
+	if strings.Contains(out, "\x1b[38;5;202m") || strings.Contains(out, "→") {
+		t.Errorf("retired arrow/ANSI-202 diff is still rendered:\n%s", out)
 	}
 }
 
@@ -1776,9 +1786,9 @@ func TestNalaPlaintextWhenNoColor(t *testing.T) {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
 
-	// Interactive with NO_COLOR renders uncolored box layout (Issue 4)
-	if !strings.Contains(out, "╭") || !strings.Contains(out, "╰") || !strings.Contains(out, "│") {
-		t.Errorf("NO_COLOR interactive output missing box border runes:\n%s", out)
+	// Interactive with NO_COLOR keeps the nala frame but emits no ANSI.
+	if !strings.Contains(out, "\n Upgrade\n") || !strings.Contains(out, "\n Summary\n") {
+		t.Errorf("NO_COLOR interactive output missing the nala summary frame:\n%s", out)
 	}
 	if strings.Contains(out, "\x1b[") {
 		t.Errorf("NO_COLOR output contains ANSI escape codes:\n%s", out)
@@ -2004,7 +2014,7 @@ exit 2
 	}
 }
 
-func TestBoxStyleFlagOverridesDefault(t *testing.T) {
+func TestSummaryIgnoresRetiredBoxStyle(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.tty = true
@@ -2016,8 +2026,11 @@ func TestBoxStyleFlagOverridesDefault(t *testing.T) {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
 	plain := ansiEscape.ReplaceAllString(out, "")
-	if !strings.Contains(plain, "┌── Packages To Upgrade (1)") {
-		t.Errorf("flag override output missing classic header:\n%s", out)
+	if !strings.Contains(plain, "\n Upgrade\n") {
+		t.Errorf("summary is missing the nala Upgrade section:\n%s", out)
+	}
+	if strings.Contains(plain, "┌") || strings.Contains(plain, "╭") {
+		t.Errorf("the retired box_style still changes the summary:\n%s", out)
 	}
 }
 
@@ -2185,7 +2198,7 @@ exit 0
 	}
 
 	// 5. Verify stdout holds strictly the plan summary (ADR-0005)
-	if !strings.Contains(out, "Packages To Install") {
+	if !strings.Contains(out, "Install") {
 		t.Errorf("expected plan summary in stdout, got:\n%s", out)
 	}
 	if strings.Contains(out, "Downloading...") || strings.Contains(out, "Running xbps...") {
@@ -2317,7 +2330,7 @@ exit 0
 	if code != 0 {
 		t.Fatalf("classic code %d: %s", code, errs)
 	}
-	if !strings.Contains(out, "Packages To Install") {
+	if !strings.Contains(out, "Install") {
 		t.Errorf("stdout missing classic plan summary:\n%s", out)
 	}
 	plain := ansiEscape.ReplaceAllString(errs, "")
@@ -2333,7 +2346,7 @@ exit 0
 	if code != 0 {
 		t.Fatalf("ascii code %d: %s", code, errs)
 	}
-	if !strings.Contains(out, "Packages To Install") {
+	if !strings.Contains(out, "Install") {
 		t.Errorf("stdout missing ascii plan summary:\n%s", out)
 	}
 	plain = ansiEscape.ReplaceAllString(errs, "")
