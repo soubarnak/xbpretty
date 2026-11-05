@@ -34,6 +34,10 @@ func implicitEnv(t *testing.T, extra ...string) (bin string, env map[string]stri
 		"XBPRETTY_TEST_EUID":      "0",
 		"XBPRETTY_TEST_TRUST_UID": strconv.Itoa(os.Getuid()),
 		"NO_COLOR":                "1",
+		// Hermetic predownload: a writable cache and a closed-port proxy.
+		"XBPRETTY_TEST_CACHE_DIR": filepath.Join(filepath.Dir(cfgDir), "xbps-cache"),
+		"HTTP_PROXY":              "http://127.0.0.1:1",
+		"HTTPS_PROXY":             "http://127.0.0.1:1",
 	}
 }
 
@@ -417,12 +421,15 @@ func TestAC013ImplicitAutoremove(t *testing.T) {
 
 	t.Run("download-only never plans or executes the orphan transaction", func(t *testing.T) {
 		bin, env := implicitEnv(t)
+		// A filesystem repository keeps the download set empty: the stop is a
+		// verified no-op, so no transfer can reach the network here.
+		env["XB_STUB_STDOUT"] = localPlanFixture
 		clearLog(t, implicitLog(env))
 		// --auto-remove makes the implicit run eligible even under -y, so
 		// this pins download-only's suppression rather than the -y rule.
 		code, _, errs := surfaceRun(t, bin, env, "install", "figlet", "--download-only", "-y", "--auto-remove")
-		if code != 1 {
-			t.Fatalf("exit = %d, want 1 (the #72 seam)\n%s", code, errs)
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0 (verified no-op)\n%s", code, errs)
 		}
 		calls := transactionArgv(t, implicitLog(env))
 		for _, c := range calls {
@@ -462,7 +469,7 @@ func TestAC013ImplicitAutoremove(t *testing.T) {
 		clearLog(t, implicitLog(env))
 		code, _, errs := surfaceRun(t, bin, env, "download", "figlet")
 		if code != 1 {
-			t.Errorf("exit = %d, want 1 (the #72 seam)\n%s", code, errs)
+			t.Errorf("exit = %d, want 1 (the stub cannot resolve the name)\n%s", code, errs)
 		}
 		for _, c := range transactionArgv(t, implicitLog(env)) {
 			if strings.Contains(" "+c+" ", " -o ") {

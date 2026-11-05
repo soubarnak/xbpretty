@@ -525,31 +525,9 @@ func TestAC056BinaryExistenceIsPerCommand(t *testing.T) {
 	}
 }
 
-// TestDownloadOnlyAndImplicitAutoremoveSeams proves the #72/#64 seams never
-// fall through to a real transaction. The exit code is the seam's temporary
-// one; #72 owns the real download-only behaviour and replaces it. The
-// checks-first tests above pin the flow that must survive that replacement.
-func TestDownloadOnlyAndImplicitAutoremoveSeams(t *testing.T) {
-	e := newEnv(t)
-	e.root = true
-	e.tty = true
-	code, _, errs := e.run("xbpretty", "install", "figlet", "--download-only", "-y")
-	if code != 1 {
-		t.Errorf("exit = %d, want 1 (the seam stops the run)", code)
-	}
-	if !strings.Contains(errs, "not implemented in this build") {
-		t.Errorf("the download-only seam did not announce itself:\n%s", errs)
-	}
-	for _, c := range e.commands() {
-		if strings.HasPrefix(c, "-y") {
-			t.Errorf("download-only ran a real transaction: %q", c)
-		}
-	}
-}
-
-// TestDownloadOnlyChecksComeFirst pins FR-040's checks before the #72 seam:
-// a non-root run gets the elevation hint, -n refuses, and a piped root run
-// gets the non-TTY line, all without reaching the seam.
+// TestDownloadOnlyChecksComeFirst pins FR-040's checks before the cache fill:
+// a non-root run gets the elevation hint naming the stop flag, -n refuses, and
+// a piped root run gets the non-TTY line, all without downloading anything.
 func TestDownloadOnlyChecksComeFirst(t *testing.T) {
 	t.Run("non-root", func(t *testing.T) {
 		e := newEnv(t)
@@ -562,8 +540,8 @@ func TestDownloadOnlyChecksComeFirst(t *testing.T) {
 		if !strings.Contains(errs, "hint: rerun as root: ") {
 			t.Errorf("missing the elevation hint:\n%s", errs)
 		}
-		if strings.Contains(errs, "download-only for install is not implemented") {
-			t.Errorf("the #72 seam ran before the checks:\n%s", errs)
+		if !strings.Contains(errs, "xbp install figlet --download-only") {
+			t.Errorf("the elevation hint drops the stop flag:\n%s", errs)
 		}
 	})
 	t.Run("assume-no", func(t *testing.T) {

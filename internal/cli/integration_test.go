@@ -73,6 +73,11 @@ func integrationCmd(bin string, cfgDir, logPath string, args ...string) *exec.Cm
 		"XB_STUB_LOG="+logPath,
 		"XB_STUB_STDOUT="+planFixture,
 		"NO_COLOR=",
+		// The default plan points at the real Void repository. A real
+		// transaction would predownload there; point the engine at a closed
+		// local port so an enabled fill can never reach the network.
+		"HTTP_PROXY=http://127.0.0.1:1",
+		"HTTPS_PROXY=http://127.0.0.1:1",
 	)
 	return cmd
 }

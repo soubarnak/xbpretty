@@ -71,6 +71,12 @@ func cleanEnv(t *testing.T, dir string) testEnv {
 		"XB_STUB_STDOUT":  planFixture,
 		"XB_STUB_QUERY":   "figlet-2.2.5_6\n657KB\n",
 		"XB_STUB_EXIT":    "0",
+		// Every fake-root real transaction predownloads. Give it a writable
+		// cache in the test's temp dir and point any transfer at a closed
+		// local port, so no test touches /var/cache/xbps or the network.
+		"XBPRETTY_TEST_CACHE_DIR": filepath.Join(dir, "xbps-cache"),
+		"HTTP_PROXY":              "http://127.0.0.1:1",
+		"HTTPS_PROXY":             "http://127.0.0.1:1",
 	}
 }
 
