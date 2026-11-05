@@ -9,6 +9,7 @@ import (
 
 	"github.com/soubarnak/xbpretty/internal/completion"
 	"github.com/soubarnak/xbpretty/internal/config"
+	"github.com/soubarnak/xbpretty/internal/spec"
 	"github.com/soubarnak/xbpretty/internal/summary"
 )
 
@@ -82,13 +83,27 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		err = os.Stderr
 	}
 
-	cmd, args := splitArgv(argv)
+	knownCmd, args := splitArgv(argv)
 
-	opts, errArgs := parseArgs(args, cmd)
-	if errArgs != nil {
-		fmt.Fprintf(err, "xbpretty: %v\n", errArgs)
-		usage(err)
+	opts, parseErr := parseArgs(args, knownCmd)
+	if parseErr != nil {
+		printUsageError(err, parseErr)
 		return exitUsage
+	}
+	// FR-019: an N/A flag is accepted by the parser and refused before config
+	// resolution, any child, and any summary.
+	if len(opts.refusals) > 0 {
+		for _, tail := range opts.refusals {
+			fmt.Fprintf(err, "xbpretty: %s\n", tail)
+		}
+		return exitUsage
+	}
+
+	st := &state{stdout: out, stderr: err, stdin: in}
+
+	// moo is hidden and never touches config or xbps.
+	if opts.command == "moo" {
+		return runMoo(out, opts)
 	}
 	if opts.help {
 		usage(out)
@@ -98,37 +113,33 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		printVersion(out, err)
 		return exitOK
 	}
-
-	st := &state{
-		stdout: out,
-		stderr: err,
-		stdin:  in,
+	if opts.command == "" {
+		usage(out)
+		fmt.Fprintln(err, "xbpretty: no command given; run 'xbpretty --help' for usage")
+		return exitRuntime
 	}
-	if opts.completion || cmd == "completion" {
+
+	// Positional validation runs before config, so completion and link still
+	// bypass config while their arity is checked.
+	if code, stop := validateInvocation(opts, err); stop {
+		return code
+	}
+
+	// FR-004 / FR-053: completion and link bypass config.
+	if opts.command == "completion" {
 		return st.runCompletion(opts)
 	}
-	if cmd == "link" || opts.command == "link" {
+	if opts.command == "link" {
 		return st.runLink(opts)
 	}
 
-	if opts.explicit["limit"] && opts.command != "log" {
-		fmt.Fprintln(err, "xbpretty: --limit only applies to the log command")
-		usage(err)
-		return exitUsage
-	}
-
-	// FR-053: only help, version, completion and link bypass config. Every
-	// other command, including log, validates the selected layer.
+	// FR-053: every remaining command validates the selected config layer.
 	cfg, loadErr := loadConfig(opts)
 	if loadErr != nil {
 		fmt.Fprintf(err, "xbpretty: %v\n", loadErr)
 		return exitUsage
 	}
-	isLogCommand := opts.command == "log" && cmd == ""
-	if isLogCommand {
-		return st.runLog(opts)
-	}
-	verbose := opts.verbose
+
 	st.opts = opts
 	st.sync = cfg.Nala.AutoUpdate
 	if opts.explicit["sync"] {
@@ -151,24 +162,101 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 	st.r = &runner{
 		cfg:     cfg,
 		out:     err,
-		verbose: verbose,
+		verbose: opts.verbose,
 		stdout:  out,
 		stderr:  err,
 		stdin:   in,
 	}
 
-	if cmd == "" {
-		cmd = opts.command
-	}
-	if cmd == "" {
-		usage(err)
-		return exitUsage
+	if opts.command == "log" {
+		return st.runLog(opts)
 	}
 	if resolveErr := cfg.Resolve(); resolveErr != nil {
 		fmt.Fprintf(err, "xbpretty: %v\n", resolveErr)
 		return exitRuntime
 	}
-	return st.runTransaction(cmd, opts)
+	return st.dispatch(opts)
+}
+
+// printUsageError prints a parse error and the optional FR-059 hint.
+func printUsageError(err io.Writer, parseErr error) {
+	fmt.Fprintf(err, "xbpretty: %v\n", parseErr)
+	if ue, ok := parseErr.(*usageError); ok && ue.hint != "" {
+		fmt.Fprintf(err, "xbpretty: %s\n", ue.hint)
+	}
+	usage(err)
+}
+
+// dispatch routes a parsed command to its implementation. Commands whose
+// owning ticket has not landed yet go to the single runUnimplemented seam.
+func (st *state) dispatch(opts *options) int {
+	switch opts.command {
+	case "log":
+		return st.runLog(opts)
+	case "install", "remove", "upgrade", "autoremove", "update":
+		return st.runTransaction(opts.command, opts)
+	case "full-upgrade", "safe-upgrade":
+		// The upgrade family is an equivalence in FR-011.
+		return st.runTransaction("upgrade", opts)
+	case "purge", "autopurge", "download", "clean", "list", "search", "show",
+		"policy", "history", "undo", "redo", "fetch":
+		return st.runUnimplemented(opts.command, opts)
+	}
+	fmt.Fprintf(st.stderr, "xbpretty: unknown command %q\n", opts.command)
+	return exitUsage
+}
+
+// validateInvocation applies FR-021's positional rules before config is read.
+func validateInvocation(opts *options, err io.Writer) (int, bool) {
+	args := opts.args
+	switch opts.command {
+	case "install", "remove", "purge", "download":
+		if len(args) == 0 && len(opts.passthru) == 0 {
+			fmt.Fprintf(err, "xbpretty: %s needs at least one package\n", opts.command)
+			return exitRuntime, true
+		}
+	case "show", "search":
+		if len(args) == 0 {
+			fmt.Fprintf(err, "xbpretty: %s needs at least one package\n", opts.command)
+			return exitRuntime, true
+		}
+	case "upgrade", "full-upgrade", "safe-upgrade", "autoremove", "autopurge", "update", "clean", "fetch":
+		if len(args) > 0 {
+			fmt.Fprintf(err, "xbpretty: %s takes no package arguments\n", opts.command)
+			return exitUsage, true
+		}
+	case "completion":
+		if len(args) == 0 || len(args) > 1 {
+			fmt.Fprintln(err, "usage: xbpretty completion bash|zsh|fish")
+			return exitUsage, true
+		}
+	case "link":
+		if len(args) > 1 {
+			fmt.Fprintln(err, "xbpretty: link takes at most one directory")
+			return exitUsage, true
+		}
+	case "history":
+		if opts.subcommand == "" || opts.subcommand == "info" || opts.subcommand == "show" {
+			if len(args) > 1 {
+				fmt.Fprintln(err, "xbpretty: history takes no package arguments")
+				return exitUsage, true
+			}
+		}
+		if (opts.subcommand == "info" || opts.subcommand == "show") && len(args) == 0 {
+			fmt.Fprintln(err, "xbpretty: history info needs an entry id or 'last'")
+			return exitUsage, true
+		}
+		if opts.subcommand == "clear" && len(args) > 1 {
+			fmt.Fprintln(err, "xbpretty: history takes no package arguments")
+			return exitUsage, true
+		}
+	case "undo", "redo":
+		if len(args) > 1 {
+			fmt.Fprintf(err, "xbpretty: %s takes at most one entry id or 'last'\n", opts.command)
+			return exitUsage, true
+		}
+	}
+	return exitOK, false
 }
 
 // loadConfig resolves the configuration layer for this run. --config replaces
@@ -195,6 +283,9 @@ func splitArgv(argv []string) (cmd string, args []string) {
 // explicit --color wins over [Color] mode, and Auto means colour only on a
 // terminal with a non-empty NO_COLOR unset.
 func wantColor(mode config.ColorMode, opts *options) bool {
+	if opts.explicit["no-color"] {
+		return false
+	}
 	value := mode
 	if opts.explicit["color"] {
 		value = colorModeFromFlag(opts.color)
@@ -250,15 +341,25 @@ func (st *state) runLink(opts *options) int {
 	if dir == "" {
 		dir = filepath.Dir(target)
 	}
-	names := []string{"xbp", "xbp-install", "xbp-remove", "xbp-upgrade", "xbp-autoremove", "xbp-update"}
 	status := exitOK
-	for _, name := range names {
+	for _, name := range spec.LinkNames() {
 		link := filepath.Join(dir, name)
-		if existing, err := os.Readlink(link); err == nil {
-			if existing == target {
-				continue
+		info, lerr := os.Lstat(link)
+		if lerr == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				existing, _ := os.Readlink(link)
+				if sameSymlinkTarget(dir, existing, target) {
+					continue
+				}
+				fmt.Fprintf(st.stderr, "xbpretty: %s already exists and points to %s, not overwriting\n", link, existing)
+			} else {
+				fmt.Fprintf(st.stderr, "xbpretty: %s already exists and points to %s, not overwriting\n", link, describeExisting(info))
 			}
-			fmt.Fprintf(st.stderr, "xbpretty: %s already exists and points to %s, not overwriting\n", link, existing)
+			status = exitRuntime
+			continue
+		}
+		if !os.IsNotExist(lerr) {
+			fmt.Fprintf(st.stderr, "xbpretty: cannot create %s: %v\n", link, lerr)
 			status = exitRuntime
 			continue
 		}
@@ -268,6 +369,38 @@ func (st *state) runLink(opts *options) int {
 		}
 	}
 	return status
+}
+
+// sameSymlinkTarget reports whether an existing link already names this
+// binary, whether it was written absolute or relative to DIR.
+func sameSymlinkTarget(dir, existing, target string) bool {
+	if existing == target {
+		return true
+	}
+	resolved := existing
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(dir, resolved)
+	}
+	got, err := filepath.EvalSymlinks(resolved)
+	if err != nil {
+		return false
+	}
+	want, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return false
+	}
+	return got == want
+}
+
+func describeExisting(info os.FileInfo) string {
+	switch {
+	case info.IsDir():
+		return "a directory"
+	case info.Mode().IsRegular():
+		return "a regular file"
+	default:
+		return "a non-symlink"
+	}
 }
 
 // printVersion prints xbpretty's version and the detected xbps version.
@@ -294,5 +427,5 @@ func detectXBPS() (string, error) {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, usageText)
+	fmt.Fprint(w, spec.Usage())
 }

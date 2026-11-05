@@ -946,7 +946,13 @@ func TestAC013RebootHint(t *testing.T) {
 			e.root = true
 			e.set("XB_STUB_STDOUT", tt.plan)
 			e.set("XB_STUB_OLD", tt.old)
-			code, out, errs := e.run("xbpretty", tt.cmd, "-y")
+			var code int
+			var out, errs string
+			if tt.cmd == "install" {
+				code, out, errs = e.run("xbpretty", tt.cmd, "figlet", "-y")
+			} else {
+				code, out, errs = e.run("xbpretty", tt.cmd, "-y")
+			}
 			if code != 0 {
 				t.Fatalf("exit = %d, want 0\n%s", code, errs)
 			}

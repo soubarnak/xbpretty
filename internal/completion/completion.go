@@ -1,14 +1,41 @@
-// Package completion generates the shell completion scripts for FR-024.
+// Package completion generates the shell completion scripts from the shared
+// command table in internal/spec (FR-005).
 package completion
 
-// Subcommands xbpretty dispatches on, in help order.
-var Subcommands = []string{
-	"install", "remove", "upgrade", "autoremove", "update", "completion", "link", "log",
-}
+import (
+	"github.com/soubarnak/xbpretty/internal/spec"
+)
 
-// Flags accepted by xbpretty's own argument parser. --limit is offered only
-// after the log command; the scripts spell that out themselves.
-var Flags = []string{
-	"-n", "--dry-run", "-y", "--yes", "-v", "--verbose",
-	"--no-sync", "--no-log", "--color", "--limit", "--version",
+// Subcommands are the visible commands, in help order.
+var Subcommands = func() []string {
+	var names []string
+	for _, c := range spec.VisibleCommands() {
+		names = append(names, c.Name)
+	}
+	return names
+}()
+
+// Flags is every accepted, advertised flag spelling. The script generator
+// places each spelling under the commands that accept it; N/A, no-op and
+// hidden flags are deliberately absent.
+var Flags = advertisedSpellings()
+
+func advertisedSpellings() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(s string) {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	for _, f := range spec.Flags {
+		if f.Hidden || f.Refusal != "" || f.NoOp {
+			continue
+		}
+		for _, s := range spec.FlagSpellings(f) {
+			add(s)
+		}
+	}
+	return out
 }
