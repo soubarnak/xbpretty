@@ -134,10 +134,11 @@ func (m *SummaryModel) SetSelection(row int) {
 }
 
 // tabHasVersionDiff reports whether a tab's rows include a changed version.
-// Upgrade always has the two-version shape; Held only when at least one row
-// differs, so every cell in the section keeps the same column count.
+// Upgrade and Downgrade always have the two-version shape (a history entry can
+// record a downgrade); Held only when at least one row differs, so every cell
+// in the section keeps the same column count.
 func tabHasVersionDiff(t Tab) bool {
-	if t.Label == "Upgrade" {
+	if t.Label == "Upgrade" || t.Label == "Downgrade" {
 		return true
 	}
 	if t.Label != "Held" {
@@ -153,7 +154,7 @@ func tabHasVersionDiff(t Tab) bool {
 
 func headersFor(t Tab, hasDiff bool) []string {
 	switch t.Label {
-	case "Upgrade":
+	case "Upgrade", "Downgrade":
 		return []string{"Package:", "Old Version:", "New Version:", "Size:"}
 	case "Held":
 		if hasDiff {
@@ -168,7 +169,7 @@ func headersFor(t Tab, hasDiff bool) []string {
 // lists the same five (or four) columns on every row.
 func cellsFor(t Tab, r PkgRow, hasDiff bool) []string {
 	switch t.Label {
-	case "Upgrade":
+	case "Upgrade", "Downgrade":
 		return []string{r.Name, r.Old, r.New, r.Size}
 	case "Held":
 		if hasDiff {
@@ -349,8 +350,23 @@ func RenderSummary(m *SummaryModel, w, h int, t Theme) *Buffer {
 		if i == m.Active {
 			st = t.style(RolePrimary)
 		}
-		buf.DrawTextLimit(x+pos, by, l, st, bw-pos)
+		drawX := x + pos
 		pos += term.StringWidth(l) + 1
+		// Shift-to-active may move the strip's start outside the body. Clip
+		// the label at the body's left edge instead of painting over the
+		// border and the inner padding (FR-068/FR-071).
+		if drawX >= bx+bw {
+			continue
+		}
+		if drawX < bx {
+			skip := bx - drawX
+			if skip >= term.StringWidth(l) {
+				continue
+			}
+			l = dropCells(l, skip)
+			drawX = bx
+		}
+		buf.DrawTextLimit(drawX, by, l, st, bx+bw-drawX)
 	}
 	underStart := bx + activeStart - shift
 	if underStart < bx {
@@ -451,7 +467,7 @@ func RenderSummary(m *SummaryModel, w, h int, t Theme) *Buffer {
 				} else if ci == 0 {
 					st = t.style(roleFor(tab.Label))
 				}
-				if !selected && (tab.Label == "Upgrade" || tab.Label == "Held") && ci == 2 && len(r.NewSpans) > 0 {
+				if !selected && (tab.Label == "Upgrade" || tab.Label == "Downgrade" || tab.Label == "Held") && ci == 2 && len(r.NewSpans) > 0 {
 					drawSpansAligned(buf, cx, y, widths[ci], r.NewSpans, t, aligns[ci])
 					continue
 				}
@@ -623,6 +639,19 @@ func drawSpansAligned(buf *Buffer, x, y, w int, spans []Span, t Theme, align int
 	for _, sp := range spans {
 		col = buf.DrawTextLimit(col, y, sp.Text, t.style(sp.Role), x+w-col)
 	}
+}
+
+// dropCells removes the first n terminal cells from s, never splitting a wide
+// rune: a rune that would straddle the cut is dropped whole.
+func dropCells(s string, n int) string {
+	col := 0
+	for i, r := range s {
+		if col >= n {
+			return s[i:]
+		}
+		col += term.RuneWidth(r)
+	}
+	return ""
 }
 
 // wrapText word-wraps at spaces and hard-splits a single overlong token,

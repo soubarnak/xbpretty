@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/soubarnak/xbpretty/internal/config"
 	"github.com/soubarnak/xbpretty/internal/history"
 	"github.com/soubarnak/xbpretty/internal/summary"
+	"github.com/soubarnak/xbpretty/internal/tui"
 )
 
 // TestHistoryScreenGate is FR-067's S2 predicate: the full-screen gate with no
@@ -119,13 +121,126 @@ func TestHistoryToTuiGroupsInFixedOrder(t *testing.T) {
 	if model.Download != "" || model.Disk != "" || model.DiskLabel != "" {
 		t.Errorf("history model carries download/disk data: %q/%q/%q", model.Download, model.DiskLabel, model.Disk)
 	}
-	for _, line := range model.Help {
-		if line != "(↑) move up | (↓) move down" && line != "(→) next tab | (←) previous tab" && line != "(q) quit" {
-			t.Errorf("unexpected history help line %q", line)
-		}
+	wantHelp := "(s) package info | (q) quit"
+	if len(model.Help) == 0 || model.Help[len(model.Help)-1] != wantHelp {
+		t.Errorf("history help = %v, want a final %q line", model.Help, wantHelp)
 	}
 }
 
 func versionState(v string) *history.PackageState {
 	return &history.PackageState{Version: &v}
+}
+
+// TestHistoryRowSizesFollowOperationSemantics is FR-069's table reuse: a
+// removal shows the recorded installed size, the install/upgrade family the
+// download size, and an unrecorded size the em dash, in the configured unit.
+func TestHistoryRowSizesFollowOperationSemantics(t *testing.T) {
+	entry := history.Entry{
+		Packages: []history.Transition{
+			{Name: "nano", Operation: history.OpRemove, Before: versionState("9.2_1"), InstalledSize: 3 * 1024 * 1024, Size: 1024 * 1024},
+			{Name: "figlet", Operation: history.OpInstall, After: versionState("2.2.5_6"), Size: 92 * 1024, InstalledSize: 500 * 1024 * 1024},
+			{Name: "glibc", Operation: history.OpUpgrade, Before: versionState("2.41_1"), After: versionState("2.41_2"), Size: 12 * 1024 * 1024, InstalledSize: 100 * 1024 * 1024},
+			{Name: "zsh", Operation: history.OpConfigure, Before: versionState("5.9_3"), InstalledSize: 7 * 1024 * 1024, Size: 9 * 1024 * 1024},
+			{Name: "bash", Operation: history.OpHeld, Before: versionState("5.2_1"), After: versionState("5.2_1")},
+		},
+	}
+	cases := []struct {
+		unit  summary.SizeUnit
+		sizes map[string]string
+	}{
+		{summary.SizeBinary, map[string]string{
+			"nano": "3 MiB", "figlet": "92 KiB", "glibc": "12 MiB", "zsh": "7 MiB", "bash": "—",
+		}},
+		{summary.SizeDecimal, map[string]string{
+			"nano": "3 MB", "figlet": "94 KB", "glibc": "13 MB", "zsh": "7 MB", "bash": "—",
+		}},
+	}
+	for _, tc := range cases {
+		model := historyToTui(entry, tc.unit)
+		got := map[string]string{}
+		for _, tab := range model.Tabs {
+			for _, row := range tab.Rows {
+				got[row.Name] = row.Size
+			}
+		}
+		for name, want := range tc.sizes {
+			if got[name] != want {
+				t.Errorf("unit %v: %s size = %q, want %q", tc.unit, name, got[name], want)
+			}
+		}
+	}
+}
+
+// TestHistoryPackageInfoRemoveRow is FR-069's read-only package info: a
+// removal's single version is Version, never a duplicate Installed row, and
+// the help returns to history.
+func TestHistoryPackageInfoRemoveRow(t *testing.T) {
+	model := historyToTui(history.Entry{Packages: []history.Transition{
+		{Name: "nano", Operation: history.OpRemove, Before: versionState("9.2_1"), InstalledSize: 3 * 1024 * 1024},
+	}}, summary.SizeBinary)
+	info := summaryPackageInfo(model)
+	if info == nil {
+		t.Fatal("summaryPackageInfo returned nil")
+	}
+	if got, ok := infoField(t, info, "Version"); !ok || got != "9.2_1" {
+		t.Errorf("Version = %q/%v, want 9.2_1", got, ok)
+	}
+	for _, absent := range []string{"Installed", "Recorded", "Available"} {
+		if _, ok := infoField(t, info, absent); ok {
+			t.Errorf("removal package info unexpectedly has %s", absent)
+		}
+	}
+	versions := 0
+	for _, f := range info.Fields {
+		if f.Label == "Version" {
+			versions++
+		}
+	}
+	if versions != 1 {
+		t.Errorf("package info has %d Version fields, want 1: %+v", versions, info.Fields)
+	}
+	if len(info.Help) != 1 || info.Help[0] != "(q) back to history" {
+		t.Errorf("history package-info help = %v, want (q) back to history", info.Help)
+	}
+}
+
+// TestHistoryPackageInfoUpgradeRow proves a two-version row uses the recorded
+// labels: Recorded for the before state and Version for the after state.
+func TestHistoryPackageInfoUpgradeRow(t *testing.T) {
+	model := historyToTui(history.Entry{Packages: []history.Transition{
+		{Name: "glibc", Operation: history.OpUpgrade, Before: versionState("2.41_1"), After: versionState("2.41_2"), Size: 12 * 1024 * 1024},
+	}}, summary.SizeBinary)
+	info := summaryPackageInfo(model)
+	if got, ok := infoField(t, info, "Recorded"); !ok || got != "2.41_1" {
+		t.Errorf("Recorded = %q/%v, want 2.41_1", got, ok)
+	}
+	if got, ok := infoField(t, info, "Version"); !ok || got != "2.41_2" {
+		t.Errorf("Version = %q/%v, want 2.41_2", got, ok)
+	}
+	if _, ok := infoField(t, info, "Available"); ok {
+		t.Error("history package info still uses the forward-looking Available label")
+	}
+}
+
+// TestHistoryHelpMentionsPackageInfo keeps the required `s` binding
+// discoverable in the counts-only footer.
+func TestHistoryHelpMentionsPackageInfo(t *testing.T) {
+	joined := strings.Join(historyScreenHelp(), "\n")
+	if !strings.Contains(joined, "(s) package info") {
+		t.Errorf("history help does not mention s: %q", joined)
+	}
+}
+
+// Ensure the S1 info view keeps its forward-looking labels.
+func TestS1PackageInfoStillUsesAvailable(t *testing.T) {
+	model := &tui.SummaryModel{Title: "xbpretty Install", Tabs: []tui.Tab{{Label: "Install", Rows: []tui.PkgRow{
+		{Name: "figlet", New: "2.2.5_6", Size: "92 KiB"},
+	}}}}
+	info := summaryPackageInfo(model)
+	if got, ok := infoField(t, info, "Available"); !ok || got != "2.2.5_6" {
+		t.Errorf("Available = %q/%v, want 2.2.5_6", got, ok)
+	}
+	if len(info.Help) != 1 || info.Help[0] != "(q) back to summary" {
+		t.Errorf("S1 package-info help = %v, want (q) back to summary", info.Help)
+	}
 }

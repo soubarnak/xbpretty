@@ -353,9 +353,16 @@ func summaryPackageInfo(model *tui.SummaryModel) *tui.PackageInfoModel {
 		return nil
 	}
 	tab, _ := model.ActiveTab()
+	// The read-only history detail records what happened: its versions are
+	// Version/Recorded, and it goes back to history rather than the summary.
+	// S1 keeps its forward-looking Available/Installed labels.
+	back := "(q) back to summary"
+	if model.History {
+		back = "(q) back to history"
+	}
 	info := &tui.PackageInfoModel{
 		Title: model.Title,
-		Help:  []string{"(q) back to summary"},
+		Help:  []string{back},
 		Fields: []tui.InfoField{
 			{Label: "Package", Value: row.Name},
 			{Label: "Operation", Value: tab.Label},
@@ -366,16 +373,29 @@ func summaryPackageInfo(model *tui.SummaryModel) *tui.PackageInfoModel {
 			info.Fields = append(info.Fields, tui.InfoField{Label: label, Value: value})
 		}
 	}
-	if row.Old != "" && row.Old != row.New {
-		add("Installed", row.Old)
+	// An old version is a second field only when there is a new version to
+	// contrast it with; a removal's one version is its Version.
+	if row.Old != "" && row.New != "" && row.Old != row.New {
+		if model.History {
+			add("Recorded", row.Old)
+		} else {
+			add("Installed", row.Old)
+		}
 	}
-	// A removal, Held or Configure row has no newer version to offer, so its
-	// version is not "Available"; only the install-family tabs are.
-	if infoVersionIsAvailable(tab.Label) && row.New != "" {
+	switch {
+	case model.History:
+		if row.New != "" {
+			add("Version", row.New)
+		} else {
+			add("Version", row.Old)
+		}
+	case infoVersionIsAvailable(tab.Label) && row.New != "":
+		// A removal, Held or Configure row has no newer version to offer, so
+		// its version is not "Available"; only the install-family tabs are.
 		add("Available", row.New)
-	} else if row.New != "" {
+	case row.New != "":
 		add("Version", row.New)
-	} else {
+	default:
 		add("Version", row.Old)
 	}
 	if row.Reason != "" {

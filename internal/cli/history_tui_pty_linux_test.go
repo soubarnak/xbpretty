@@ -111,21 +111,15 @@ func TestHistoryDetailScreenFrame(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Remove: 1 Pkgs", "Install:1 Pkgs", "Upgrade:1 Pkgs", "Held:   1 Pkgs",
-		"Package:", "Version:", "Size:", "nano", "(q) quit",
+		"Package:", "Version:", "Size:", "nano", "(s) package info | (q) quit",
 	} {
 		if !strings.Contains(frame, want) {
 			t.Errorf("frame missing %q:\n%s", want, frame)
 		}
 	}
 	for _, unwanted := range []string{
-		"Total download size:", "Disk space required:", "Disk space to free:",
-		"(y) start", "(↑) move up",
+		"Total download size:", "Disk space required:", "Disk space to free:", "(y) start",
 	} {
-		// The help block wraps; (↑) move up legitimately appears once. Only
-		// the download/disk rows and the confirmation help are forbidden.
-		if unwanted == "(↑) move up" {
-			continue
-		}
 		if strings.Contains(frame, unwanted) {
 			t.Errorf("history frame still draws %q:\n%s", unwanted, frame)
 		}
@@ -239,7 +233,7 @@ func TestHistoryDetailNavigationAndPackageInfo(t *testing.T) {
 	r.send(t, "s")
 	frames = waitFrameCount(t, r, dump, 13)
 	info := frames[12]
-	for _, want := range []string{"xbpretty History", "Package:", "figlet", "Operation:", "Install", "(q) back to summary"} {
+	for _, want := range []string{"xbpretty History", "Package:", "figlet", "Operation:", "Install", "(q) back to history"} {
 		if !strings.Contains(info, want) {
 			t.Errorf("package-info frame missing %q:\n%s", want, info)
 		}
@@ -479,10 +473,12 @@ func TestHistoryDetailNoGroupsFallsBackToText(t *testing.T) {
 	env := historyTuiEnv(t, dir, empty)
 
 	r := startPty(t, bin, env, []string{"history", "1"}, 80, 24)
+	out := waitCapture(t, r, "the text detail", func(s string) bool {
+		return strings.Contains(s, "Altered: 0")
+	})
 	if code := r.exitCode(t); code != 0 {
 		t.Fatalf("exit = %d, want 0\nstderr:\n%s", code, r.stderr.String())
 	}
-	out := r.cap.String()
 	if strings.Contains(out, term.AltEnter) {
 		t.Errorf("an empty entry opened the history screen: %q", out)
 	}
@@ -501,10 +497,14 @@ func TestHistoryListStaysText(t *testing.T) {
 	env := historyTuiEnv(t, dir, historyFullEntry())
 
 	r := startPty(t, bin, env, []string{"history"}, 80, 24)
+	// The list header ends with Altered; waiting for it drains the whole table
+	// before the pty reader is asked to stop.
+	out := waitCapture(t, r, "the history list", func(s string) bool {
+		return strings.Contains(s, "Altered")
+	})
 	if code := r.exitCode(t); code != 0 {
 		t.Fatalf("exit = %d, want 0\nstderr:\n%s", code, r.stderr.String())
 	}
-	out := r.cap.String()
 	if strings.Contains(out, term.AltEnter) {
 		t.Errorf("the history list opened the alternate screen: %q", out)
 	}
@@ -551,5 +551,40 @@ func TestHistoryDetailBelowFloorIgnoresConfirmKeys(t *testing.T) {
 	r.send(t, "q")
 	if code := r.exitCode(t); code != 0 {
 		t.Errorf("below-floor quit exit = %d, want 0\nstderr:\n%s", code, r.stderr.String())
+	}
+}
+
+// TestHistoryDetailPackageInfoRemoveRow is FR-069's `s` on a removal row: the
+// single recorded version is Version, the duplicate Installed row is gone, and
+// the help returns to history.
+func TestHistoryDetailPackageInfoRemoveRow(t *testing.T) {
+	bin := buildTuiBinary(t)
+	dir := t.TempDir()
+	dump := t.TempDir()
+	env := historyFrameEnv(t, dir, historyFullEntry(), dump)
+
+	r := startPty(t, bin, env, []string{"history", "1"}, 80, 24)
+	frames := waitFrameCount(t, r, dump, 1)
+	if got := selectedPackage(t, frames[0]); got != "nano" {
+		t.Fatalf("initial selection = %q, want nano", got)
+	}
+	r.send(t, "s")
+	frames = waitFrameCount(t, r, dump, 2)
+	info := frames[1]
+	for _, want := range []string{"Package:", "nano", "Version:", "9.2_1", "(q) back to history"} {
+		if !strings.Contains(info, want) {
+			t.Errorf("removal package info missing %q:\n%s", want, info)
+		}
+	}
+	for _, absent := range []string{"Installed:", "Recorded:", "Available:", "(q) back to summary"} {
+		if strings.Contains(info, absent) {
+			t.Errorf("removal package info still shows %q:\n%s", absent, info)
+		}
+	}
+	r.send(t, "q")
+	waitFrameCount(t, r, dump, 3)
+	r.send(t, "q")
+	if code := r.exitCode(t); code != 0 {
+		t.Errorf("quit exit = %d, want 0\nstderr:\n%s", code, r.stderr.String())
 	}
 }

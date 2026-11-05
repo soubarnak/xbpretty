@@ -26,7 +26,7 @@ func historyScreenHelp() []string {
 	return []string{
 		"(↑) move up | (↓) move down",
 		"(→) next tab | (←) previous tab",
-		"(q) quit",
+		"(s) package info | (q) quit",
 	}
 }
 

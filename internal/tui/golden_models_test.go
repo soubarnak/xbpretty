@@ -95,7 +95,25 @@ func goldenHistory() *SummaryModel {
 		Help: []string{
 			"(↑) move up | (↓) move down",
 			"(→) next tab | (←) previous tab",
-			"(q) quit",
+			"(s) package info | (q) quit",
+		},
+	}
+}
+
+// goldenDowngrade is the two-version history shape: a Downgrade group must
+// keep the recorded old version, exactly like Upgrade.
+func goldenDowngrade() *SummaryModel {
+	return &SummaryModel{
+		Title:   "xbpretty History",
+		History: true,
+		Tabs: []Tab{{Label: "Downgrade", Rows: []PkgRow{
+			{Name: "curl", Old: "8.17.0_1", New: "8.16.0_1", Size: "2 MiB", NewSpans: versionSpans("8.17.0_1", "8.16.0_1")},
+			{Name: "wget", Old: "1.24.5_1", New: "1.24.4_1", Size: "1 MiB", NewSpans: versionSpans("1.24.5_1", "1.24.4_1")},
+		}}},
+		Help: []string{
+			"(↑) move up | (↓) move down",
+			"(→) next tab | (←) previous tab",
+			"(s) package info | (q) quit",
 		},
 	}
 }
