@@ -223,6 +223,10 @@ func (r *ptyRun) exitCode(t *testing.T) int {
 	t.Helper()
 	select {
 	case err := <-r.wait:
+		// The pty reader is a separate goroutine; under load it can still be
+		// draining when the child exits. Give the capture a moment to settle
+		// before the caller asserts on it.
+		r.waitCaptureQuiet()
 		if err == nil {
 			return 0
 		}
@@ -234,6 +238,28 @@ func (r *ptyRun) exitCode(t *testing.T) int {
 	case <-time.After(10 * time.Second):
 		t.Fatalf("binary did not exit; stderr:\n%s", r.stderr.String())
 		return -1
+	}
+}
+
+// waitCaptureQuiet blocks until the pty capture stops growing. The child has
+// already exited; this only lets the reader goroutine finish copying the last
+// frame.
+func (r *ptyRun) waitCaptureQuiet() {
+	last := -1
+	stable := 0
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		n := len(r.cap.String())
+		if n == last {
+			stable++
+			if stable == 5 {
+				return
+			}
+		} else {
+			last = n
+			stable = 0
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 
