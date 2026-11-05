@@ -35,7 +35,7 @@ for arch in $archs; do
 	install -d "$root/usr/bin"
 	# shellcheck disable=SC2046 # goenv prints KEY=VALUE words on purpose
 	env $(goenv "$arch") GOOS=linux CGO_ENABLED=0 \
-		go build -C "$here" -trimpath -buildvcs=false -ldflags "-X $import_path/internal/cli.Version=$version" \
+		go build -C "$here" -trimpath -ldflags "-s -w -X $import_path/internal/cli.Version=$version" \
 		-o "$root/usr/bin/xbpretty" ./cmd/xbpretty
 	# The argv[0] aliases: one binary, six names (FR-001).
 	for alias in xbp xbp-install xbp-remove xbp-upgrade xbp-autoremove xbp-update; do

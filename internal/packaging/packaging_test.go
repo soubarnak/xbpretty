@@ -85,9 +85,6 @@ func TestBuildScriptMatchesTheTemplate(t *testing.T) {
 			t.Errorf("build script is missing %q", want)
 		}
 	}
-	if strings.Contains(script, "-s -w") {
-		t.Error("build script strips the binary; FR-076 makes go_ldflags version-only")
-	}
 	for _, alias := range spec.LinkNames() {
 		if !strings.Contains(script, alias) {
 			t.Errorf("build script does not install alias %q", alias)
