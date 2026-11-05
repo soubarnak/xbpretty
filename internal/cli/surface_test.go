@@ -107,22 +107,20 @@ func TestSurfaceHelpAndVersionBypassConfig(t *testing.T) {
 	if code != 0 || !strings.HasPrefix(out, "xbpretty dev\n") {
 		t.Errorf("-V list = %d, %q, %q; want the root version output", code, out, errs)
 	}
-	// After list/search, -V is --virtual, not --version. The command is still
-	// a stub, but it must not print the version.
-	code, out, _ = surfaceRun(t, bin, emptyConfigDir(t), "list", "-V")
+	// After list/search, -V is --virtual, not --version. It must not print
+	// the version; whether the discovery query succeeds depends on whether a
+	// real xbps-query is installed in the test environment.
+	_, out, _ = surfaceRun(t, bin, emptyConfigDir(t), "list", "-V")
 	if strings.Contains(out, "xbpretty dev") {
 		t.Errorf("list -V printed the version:\n%s", out)
-	}
-	if code == 0 {
-		t.Errorf("list -V exited 0; the discovery stub should have run")
 	}
 	code, out, _ = surfaceRun(t, bin, env, "list", "--version")
 	if code != 0 || !strings.HasPrefix(out, "xbpretty dev\n") {
 		t.Errorf("list --version = %d, %q; want version output", code, out)
 	}
-	code, out, _ = surfaceRun(t, bin, emptyConfigDir(t), "search", "-V")
-	if strings.Contains(out, "xbpretty dev") || code == 0 {
-		t.Errorf("search -V = %d, %q; want the virtual flag, not the version", code, out)
+	_, out, _ = surfaceRun(t, bin, emptyConfigDir(t), "search", "-V")
+	if strings.Contains(out, "xbpretty dev") {
+		t.Errorf("search -V printed the version: %q", out)
 	}
 	// completion bypasses an invalid config too.
 	code, out, _ = surfaceRun(t, bin, env, "completion", "bash")

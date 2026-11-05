@@ -207,7 +207,13 @@ func (st *state) dispatch(opts *options) int {
 	case "full-upgrade", "safe-upgrade":
 		// The upgrade family is an equivalence in FR-011.
 		return st.runTransaction("upgrade", opts)
-	case "purge", "autopurge", "download", "clean", "list", "search", "show",
+	case "list":
+		return st.runList(opts)
+	case "search":
+		return st.runSearch(opts)
+	case "show":
+		return st.runShow(opts)
+	case "purge", "autopurge", "download", "clean",
 		"policy", "history", "undo", "redo", "fetch":
 		return st.runUnimplemented(opts.command, opts)
 	}
