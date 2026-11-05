@@ -75,6 +75,12 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 		parser.OnPackageEvent = func(event PackageEvent) {
 			live.Apply(true, func(m *progressModel) { m.packageEvent(event) })
 		}
+		// FR-072: the viewport exists on the normal screen before the child
+		// starts, and termios is handed back before the commit child, which
+		// may prompt on stdin.
+		inline := st.startInline(live)
+		defer inline.Close()
+		inline.RestoreTermios()
 		live.Request(true)
 	}
 

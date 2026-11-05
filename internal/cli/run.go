@@ -181,6 +181,11 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 			if r.parser != nil {
 				r.parser.FeedStdout(line)
 			}
+			// FR-072: a child that owns an alternate screen hides the box and
+			// gives termios back; the matching leave redraws it.
+			if r.liveProgress != nil {
+				r.liveProgress.ObserveChildOutput(line)
+			}
 			// FR-066: child stdout is never copied to xbpretty's stdout.
 			// With no live view it is forwarded verbatim on stderr.
 			if !r.live {
@@ -206,6 +211,9 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 			for s.Scan() {
 				if r.parser != nil {
 					r.parser.FeedStderr(s.Text())
+				}
+				if r.liveProgress != nil {
+					r.liveProgress.ObserveChildOutput(s.Text())
 				}
 			}
 		}()

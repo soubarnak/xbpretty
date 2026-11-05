@@ -200,6 +200,10 @@ func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome 
 	if mode := st.liveMode(); mode != liveOff {
 		live := newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode,
 			newProgressModel("download", targetsAsRows(targets), nil), st.theme)
+		// xbpretty owns these transfers: the box and cbreak stay up until the
+		// fill finishes or Ctrl-C cancels it (FR-072).
+		inline := st.startInline(live)
+		defer inline.Close()
 		live.Request(true)
 		view = &downloadEventView{live: live, written: map[string]int64{}}
 		defer view.finish()
