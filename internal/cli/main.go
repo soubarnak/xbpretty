@@ -268,7 +268,19 @@ func validateInvocation(opts *options, err io.Writer) (int, bool) {
 			fmt.Fprintln(err, "xbpretty: fetch takes no arguments and no -- passthrough")
 			return exitUsage, true
 		}
-	case "upgrade", "full-upgrade", "safe-upgrade", "autoremove", "autopurge", "update", "clean":
+	case "update":
+		// update has no transaction to pass `--` arguments to: it is a sync
+		// plus one count dry run. Reject the passthrough rather than silently
+		// dropping it (FR-012, FR-021).
+		if opts.dashDash {
+			fmt.Fprintln(err, "xbpretty: update takes no arguments and no -- passthrough")
+			return exitUsage, true
+		}
+		if len(args) > 0 {
+			fmt.Fprintf(err, "xbpretty: %s takes no package arguments\n", opts.command)
+			return exitUsage, true
+		}
+	case "upgrade", "full-upgrade", "safe-upgrade", "autoremove", "autopurge", "clean":
 		if len(args) > 0 {
 			fmt.Fprintf(err, "xbpretty: %s takes no package arguments\n", opts.command)
 			return exitUsage, true

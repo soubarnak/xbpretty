@@ -13,8 +13,9 @@ import (
 // This file drives configuration behaviour through the built binary: layers,
 // --config replacement, --debug reporting, the sudo/doas home rules, the
 // privileged-path trust gate and the rev-5 migration warnings. Files that need
-// root behaviour are built with the xbpretty_testroot tag; the hook it adds is
-// documented in internal/config/testroot_testhook.go.
+// root behaviour are built with the xbpretty_testroot tag; the hooks it adds
+// are documented in internal/config/testroot_testhook.go and
+// internal/cli/root_testhook.go.
 
 const aggregateRev5Warning = "https://github.com/soubarnak/xbpretty/blob/main/docs/migration-rev6.md"
 

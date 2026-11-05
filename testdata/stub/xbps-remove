@@ -13,6 +13,6 @@ case "${1:-}" in
     exit "${XB_STUB_PLAN_EXIT:-0}"
     ;;
 esac
-printf '%s' "${XB_STUB_RUN_STDOUT:-${XB_STUB_STDOUT:-}}"
-printf '%s' "${XB_STUB_RUN_STDERR:-${XB_STUB_STDERR:-}}" >&2
+printf '%s' "${XB_STUB_RUN_STDOUT-${XB_STUB_STDOUT:-}}"
+printf '%s' "${XB_STUB_RUN_STDERR-${XB_STUB_STDERR:-}}" >&2
 exit "${XB_STUB_EXIT:-0}"
