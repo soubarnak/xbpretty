@@ -81,6 +81,25 @@ const (
 // lets the CLI loop exercise its panic restore path directly.
 var screenPanic = func() bool { return false }
 
+// The screen hooks are test-only seams. Production builds keep tui.Open,
+// tui.RenderSummary and no frame dump; the xbpretty_testroot hook swaps them
+// so a PTY test can force an init/render failure and inspect each drawn frame.
+var (
+	openScreenFn    = tui.Open
+	renderSummaryFn = tui.RenderSummary
+	drawScreenFn    = func(scr *tui.Screen, buf *tui.Buffer) error { return scr.Draw(buf) }
+	screenDumpFn    func(*tui.Buffer)
+)
+
+// summaryScreenPolicy is the reusable interaction policy. #76 runs S1 with
+// confirmation enabled; #77 reuses the loop read-only (Confirm false), where
+// y/Y and n/N are inert and every quit key returns screenRefused for its
+// caller to map to exit 0.
+type summaryScreenPolicy struct {
+	// Confirm enables y/Y to confirm and n/N to refuse.
+	Confirm bool
+}
+
 // maybeRunSummaryScreen opens S1 when every gate and the entry floor pass. It
 // returns the outcome; the caller keeps the text path when it is unavailable.
 func (st *state) maybeRunSummaryScreen(opts *options, cmd string, rows []xbps.Row) (screenOutcome, int) {
@@ -100,15 +119,22 @@ func (st *state) maybeRunSummaryScreen(opts *options, cmd string, rows []xbps.Ro
 }
 
 // runSummaryScreen owns the S1 loop: enter, draw, key/resize/signal handling,
-// and restore on every return path. The interaction policy here is the engine
-// baseline: y confirms and the cancellation keys refuse. Navigation, tabs, the
-// package-info view and the remaining bindings are #76's seam.
+// and restore on every return path. The interaction policy here is S1's: y
+// confirms and the cancellation keys refuse. #77 reuses the same loop with
+// Confirm false for the read-only history detail.
 func (st *state) runSummaryScreen(out *os.File, model *tui.SummaryModel) (screenOutcome, int) {
+	return st.runSummaryScreenPolicy(out, model, summaryScreenPolicy{Confirm: true})
+}
+
+// runSummaryScreenPolicy is the reusable full-screen summary loop. The
+// package-info view is part of the same loop and shares the frame; keys other
+// than the documented bindings are ignored.
+func (st *state) runSummaryScreenPolicy(out *os.File, model *tui.SummaryModel, policy summaryScreenPolicy) (screenOutcome, int) {
 	in, ok := asFile(st.stdin)
 	if !ok {
 		return screenUnavailable, -1
 	}
-	scr, err := tui.Open(in, out, st.color, true)
+	scr, err := openScreenFn(in, out, st.color, true)
 	if err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: full-screen interface unavailable (%v); showing the text summary\n", err)
 		return screenUnavailable, -1
@@ -124,19 +150,46 @@ func (st *state) runSummaryScreen(out *os.File, model *tui.SummaryModel) (screen
 		}
 	}()
 
+	var info *tui.PackageInfoModel
 	draw := func(w, h int) error {
-		return scr.Draw(tui.RenderSummary(model, w, h, screenTheme(st.r.cfg.Color.Theme)))
+		var buf *tui.Buffer
+		if info != nil {
+			buf = tui.RenderPackageInfo(info, w, h, screenTheme(st.r.cfg.Color.Theme))
+		} else {
+			buf = renderSummaryFn(model, w, h, screenTheme(st.r.cfg.Color.Theme))
+		}
+		if screenDumpFn != nil {
+			screenDumpFn(buf)
+		}
+		return drawScreenFn(scr, buf)
 	}
-	w, h := scr.Size()
-	if err := draw(w, h); err != nil {
+	fail := func(err error) (screenOutcome, int) {
 		// Restore before warning: on the alternate screen the line would be
-		// wiped when the guard leaves it.
+		// wiped when the guard leaves it. A failed render warns once and
+		// lets the text path finish the transaction.
 		scr.Close()
 		fmt.Fprintf(st.stderr, "xbpretty: full-screen interface failed (%v); showing the text summary\n", err)
 		return screenUnavailable, -1
 	}
+	w, h := scr.Size()
+	if err := draw(w, h); err != nil {
+		return fail(err)
+	}
 	if screenPanic() {
 		panic("injected full-screen panic")
+	}
+
+	quit := func() (screenOutcome, int) {
+		scr.Close()
+		return screenRefused, -1
+	}
+	redraw := func() (screenOutcome, int, bool) {
+		w, h := scr.Size()
+		if err := draw(w, h); err != nil {
+			outcome, code := fail(err)
+			return outcome, code, true
+		}
+		return screenUnavailable, -1, false
 	}
 
 	for {
@@ -144,12 +197,7 @@ func (st *state) runSummaryScreen(out *os.File, model *tui.SummaryModel) (screen
 		switch ev.Kind {
 		case tui.EventResize:
 			if err := draw(ev.Width, ev.Height); err != nil {
-				// FR-067: a failed render warns once and lets the text path
-				// finish the transaction with its own exit code. Restore
-				// first so the warning is visible.
-				scr.Close()
-				fmt.Fprintf(st.stderr, "xbpretty: full-screen interface failed (%v); showing the text summary\n", err)
-				return screenUnavailable, -1
+				return fail(err)
 			}
 		case tui.EventSignal:
 			scr.Close()
@@ -158,22 +206,135 @@ func (st *state) runSummaryScreen(out *os.File, model *tui.SummaryModel) (screen
 			}
 			return screenExited, exitRuntime
 		case tui.EventEOF:
-			scr.Close()
-			return screenRefused, -1
+			return quit()
 		case tui.EventKey:
-			switch {
-			case ev.Key.Type == term.KeyRune && (ev.Key.Rune == 'y' || ev.Key.Rune == 'Y'):
-				// TODO(#76): the remaining bindings (s package info, tabs,
-				// navigation) live behind this seam.
-				scr.Close()
-				return screenConfirmed, -1
-			case ev.Key.Type == term.KeyRune && strings.ContainsRune("qQnN", ev.Key.Rune),
-				ev.Key.Type == term.KeyEsc, ev.Key.Type == term.KeyCtrlC:
-				scr.Close()
-				return screenRefused, -1
+			if info != nil {
+				// The package-info view returns to the summary; it never
+				// confirms or refuses the transaction, and every other key
+				// is ignored.
+				changed := false
+				switch ev.Key.Type {
+				case term.KeyEsc:
+					info = nil
+					changed = true
+				case term.KeyRune:
+					if ev.Key.Rune == 'q' || ev.Key.Rune == 'Q' {
+						info = nil
+						changed = true
+					}
+				}
+				if !changed {
+					continue
+				}
+				if outcome, code, failed := redraw(); failed {
+					return outcome, code
+				}
+				continue
+			}
+			beforeActive, beforeSel := model.Active, model.Sel
+			handled := true
+			switch ev.Key.Type {
+			case term.KeyRune:
+				switch ev.Key.Rune {
+				case 'j':
+					model.MoveRow(1)
+				case 'k':
+					model.MoveRow(-1)
+				case 'h':
+					model.MoveTab(-1)
+				case 'l':
+					model.MoveTab(1)
+				case 's':
+					info = summaryPackageInfo(model)
+				case 'y', 'Y':
+					if policy.Confirm {
+						scr.Close()
+						return screenConfirmed, -1
+					}
+				case 'n', 'N':
+					if policy.Confirm {
+						return quit()
+					}
+				case 'q', 'Q':
+					return quit()
+				default:
+					handled = false
+				}
+			case term.KeyDown:
+				model.MoveRow(1)
+			case term.KeyUp:
+				model.MoveRow(-1)
+			case term.KeyLeft:
+				model.MoveTab(-1)
+			case term.KeyRight:
+				model.MoveTab(1)
+			case term.KeyHome:
+				model.SetSelection(0)
+			case term.KeyEnd:
+				model.SetSelection(model.RowCount() - 1)
+			case term.KeyPgUp:
+				model.MoveRow(-10)
+			case term.KeyPgDn:
+				model.MoveRow(10)
+			case term.KeyWheelUp:
+				model.MoveRow(-1)
+			case term.KeyWheelDown:
+				model.MoveRow(1)
+			case term.KeyEsc, term.KeyCtrlC:
+				return quit()
+			default:
+				// Enter is deliberately unbound (FR-068: changelog N/A).
+				handled = false
+			}
+			changed := model.Active != beforeActive || model.Sel != beforeSel
+			if info != nil {
+				changed = true
+			}
+			if !handled || !changed {
+				continue
+			}
+			if outcome, code, failed := redraw(); failed {
+				return outcome, code
 			}
 		}
 	}
+}
+
+// summaryPackageInfo builds the read-only package-info view for the selected
+// summary row. It uses only the model's data so the history detail (#77) can
+// reuse it without another xbps query.
+func summaryPackageInfo(model *tui.SummaryModel) *tui.PackageInfoModel {
+	row, ok := model.SelectedRow()
+	if !ok {
+		return nil
+	}
+	tab, _ := model.ActiveTab()
+	info := &tui.PackageInfoModel{
+		Title: model.Title,
+		Help:  []string{"(q) back to summary"},
+		Fields: []tui.InfoField{
+			{Label: "Package", Value: row.Name},
+			{Label: "Operation", Value: tab.Label},
+		},
+	}
+	add := func(label, value string) {
+		if value != "" {
+			info.Fields = append(info.Fields, tui.InfoField{Label: label, Value: value})
+		}
+	}
+	if row.Old != "" && row.Old != row.New {
+		add("Installed", row.Old)
+	}
+	if row.New != "" {
+		add("Available", row.New)
+	} else {
+		add("Version", row.Old)
+	}
+	if row.Reason != "" {
+		add("Reason", row.Reason)
+	}
+	add("Size", row.Size)
+	return info
 }
 
 // planToTui converts the grouping and lookups the text summary already needs

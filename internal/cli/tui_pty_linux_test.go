@@ -659,6 +659,11 @@ func TestS1GateMatrixPTY(t *testing.T) {
 			if !strings.Contains(out, "Total download size:") {
 				t.Errorf("the text fallback did not render the summary:\n%q", out)
 			}
+			// FR-067: a below-floor or excluded gate is an expected text
+			// mode, not a warning. Only a failed init/render warns.
+			if strings.Contains(r.stderr.String(), "full-screen interface") {
+				t.Errorf("the text fallback warned about the screen:\n%s", r.stderr.String())
+			}
 		})
 	}
 }

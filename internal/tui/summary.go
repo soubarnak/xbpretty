@@ -67,6 +67,34 @@ func (m *SummaryModel) MoveRow(d int) {
 	}
 }
 
+// RowCount is the active tab's row count (0 when there is no tab).
+func (m *SummaryModel) RowCount() int {
+	t := m.cur()
+	if t == nil {
+		return 0
+	}
+	return len(t.Rows)
+}
+
+// SelectedRow returns the active tab's selected row. It is the seam the
+// package-info view (#76) and the history detail (#77) consume.
+func (m *SummaryModel) SelectedRow() (PkgRow, bool) {
+	t := m.cur()
+	if t == nil || m.Sel < 0 || m.Sel >= len(t.Rows) {
+		return PkgRow{}, false
+	}
+	return t.Rows[m.Sel], true
+}
+
+// ActiveTab returns the active tab. The package-info view needs its label.
+func (m *SummaryModel) ActiveTab() (Tab, bool) {
+	t := m.cur()
+	if t == nil {
+		return Tab{}, false
+	}
+	return *t, true
+}
+
 // MoveTab moves the active tab by d, clamped, and resets the selection.
 func (m *SummaryModel) MoveTab(d int) {
 	n := len(m.Tabs)
