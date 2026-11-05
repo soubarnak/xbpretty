@@ -35,8 +35,11 @@ for arch in $archs; do
 	install -d "$root/usr/bin"
 	# shellcheck disable=SC2046 # goenv prints KEY=VALUE words on purpose
 	env $(goenv "$arch") GOOS=linux CGO_ENABLED=0 \
-		go build -C "$here" -trimpath -ldflags "-s -w -X $import_path/internal/cli.Version=$version" \
+		go build -C "$here" -trimpath -buildvcs=false -ldflags "-s -w -X $import_path/internal/cli.Version=$version" \
 		-o "$root/usr/bin/xbpretty" ./cmd/xbpretty
+	# Release gates that must fail on every architecture: static link and the
+	# 8,000,000-byte binary budget (FR-076, AC-060).
+	"$here/tools/release-gates.sh" binary "$root/usr/bin/xbpretty"
 	# The argv[0] aliases: one binary, six names (FR-001).
 	for alias in xbp xbp-install xbp-remove xbp-upgrade xbp-autoremove xbp-update; do
 		ln -s xbpretty "$root/usr/bin/$alias"
@@ -58,6 +61,11 @@ for arch in $archs; do
 	install -Dm644 "$here/docs/migration-rev6.md" "$root/usr/share/doc/xbpretty/migration-rev6.md"
 	install -Dm644 "$here/LICENSE" "$root/usr/share/licenses/xbpretty/LICENSE"
 
+	# The installed surface is exactly the template's: binary, six aliases,
+	# three completions, two manpages plus six man8 links, two docs and the
+	# licence, with no system configuration path (FR-060, AC-060).
+	"$here/tools/release-gates.sh" contents "$root"
+
 	pkg="xbpretty-${version}_${revision}"
 	rm -f "$repo/$pkg.$arch.xbps"
 	(cd "$repo" && xbps-create -A "$arch" -n "$pkg" \
@@ -65,5 +73,9 @@ for arch in $archs; do
 	    -D "xbps>=0.60.0" -l MIT -H https://github.com/soubarnak/xbpretty \
 	    -m "soubarnak <soubarna@live.in>" "$root")
 	XBPS_ARCH=$arch xbps-rindex -f -a "$repo/$pkg.$arch.xbps"
+	# The x86_64 package is the release's size canary (3,600,000 bytes).
+	if [ "$arch" = x86_64 ]; then
+		"$here/tools/release-gates.sh" package "$repo/$pkg.$arch.xbps"
+	fi
 	echo "built $repo/$pkg.$arch.xbps"
 done

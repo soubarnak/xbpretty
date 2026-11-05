@@ -4,14 +4,13 @@
 
 # xbpretty
 
-> **Rev 6 is approved.** The specification now targets full parity with nala
-> v0.18.2 and adds history/undo/redo, predownload, fetch, discovery with
-> machine output and the full-screen TUI. This README still describes the
-> shipped 0.3.x behaviour until those features land; the contract is
-> [`xbpretty-spec.md`](xbpretty-spec.md), with the matrix in
-> [`docs/parity/matrix.md`](docs/parity/matrix.md), the migration guide in
-> [`docs/migration-rev6.md`](docs/migration-rev6.md) and the decisions in
-> [`docs/adr/`](docs/adr/). The six alias names and the superset extensions
+> **Rev 6 ships as xbpretty 0.4.0.** The specification targets full parity
+> with nala v0.18.2 and adds history/undo/redo, predownload, fetch, discovery
+> with machine output and the full-screen TUI. This README is the 0.4.0 user
+> guide; the contract is [`xbpretty-spec.md`](xbpretty-spec.md), with the
+> matrix in [`docs/parity/matrix.md`](docs/parity/matrix.md), the migration
+> guide in [`docs/migration-rev6.md`](docs/migration-rev6.md) and the decisions
+> in [`docs/adr/`](docs/adr/). The six alias names and the superset extensions
 > are unchanged.
 
 A modern, friendly front end for [`xbps`](https://github.com/void-linux/xbps), the Void Linux package manager, inspired by [Nala](https://gitlab.com/volian/nala).
@@ -102,6 +101,15 @@ fa:d1:00:32:ce:b1:b9:fd:73:05:05:76:75:54:37:25
 ```
 
 Do not accept a different fingerprint. Subsequent updates arrive automatically through `sudo xbps-install -Su` or `sudo xbp upgrade`.
+
+### Migrating from rev 5
+
+Rev 6 (xbpretty 0.4.0) accepts the rev-5 flat config keys with a warning during
+the rev-6 window and never rewrites your config file. The key map, retired
+keys, behaviour changes, verification and rollback steps are in
+[`docs/migration-rev6.md`](docs/migration-rev6.md), with the canonical example
+in [`docs/config.toml.example`](docs/config.toml.example). Both install under
+`/usr/share/doc/xbpretty/`. Rev 7 (0.5.0) removes the rev-5 keys.
 
 ### From Source
 
@@ -230,12 +238,19 @@ For in-depth design decisions and specifications, consult the project documentat
 
 ## Releasing
 
-Releases are tag driven:
+Releases are tag driven. `srcpkgs/xbpretty/template` is the single version
+source; rev 6 is `0.4.0` and the tag is `xbpretty-v0.4.0`.
 
 1. Update `version=` in `srcpkgs/xbpretty/template`.
-2. Commit and push to `main`.
-3. Push a Git tag matching the version: `git tag xbpretty-vX.Y.Z && git push origin xbpretty-vX.Y.Z`.
-4. The GitHub Actions release workflow runs the test suite, builds multi-architecture packages using `tools/build-xbps.sh`, signs the repository, and creates the GitHub release with updated checksums.
+2. Refresh the mirror snapshot when it is older than 90 days: `make mirrors`.
+3. Commit and push to `main`.
+4. Push a Git tag matching the version: `git tag xbpretty-v0.4.0 && git push origin xbpretty-v0.4.0`.
+5. The GitHub Actions release workflow gates tests, vet, generated completions
+   and manpages, shell syntax and `mandoc`, then builds all nine architectures
+   with `tools/build-xbps.sh`, enforces the static-link, 8 MB binary and 3.6 MB
+   package budgets, checks the package contents and clean-root install, signs
+   each architecture, and creates the GitHub release from
+   `docs/release-notes-0.4.0.md` with the updated checksum.
 
 ---
 
