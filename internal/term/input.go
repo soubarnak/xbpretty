@@ -193,10 +193,13 @@ func (d *Decoder) nextByte(timeoutMS int) (byte, bool, error) {
 			if n == 1 {
 				return buf[0], true, nil
 			}
-			if err == nil {
-				continue
+			if n == 0 && err == nil {
+				// A readable tty that yields no byte is a hangup: the peer
+				// closed the pty. Treat it as EOF instead of polling forever
+				// (the decoder cannot otherwise observe a master close).
+				return 0, false, io.EOF
 			}
-			if isRetryableRead(err) {
+			if err == nil || isRetryableRead(err) {
 				continue
 			}
 			return 0, false, err
