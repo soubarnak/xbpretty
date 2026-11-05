@@ -126,7 +126,7 @@ func writeLayer(t *testing.T, root, body string) string {
 
 // dryRunArgs is the shortest command that loads config and prints a summary.
 func dryRunArgs(extra ...string) []string {
-	return append([]string{"install", "-n", "--no-sync"}, append(extra, "figlet")...)
+	return append([]string{"install", "--dry-run", "--no-sync"}, append(extra, "figlet")...)
 }
 
 func TestConfigRelativeXDGFallsBackToHome(t *testing.T) {
@@ -221,14 +221,14 @@ func TestConfigFlagReplacesBothLayers(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte("[Ui]\nunit = \"Decimal\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out, errs, code := runBinary(t, bin, env, "--config", cfgPath, "install", "-n", "--no-sync", "figlet")
+	out, errs, code := runBinary(t, bin, env, "--config", cfgPath, "install", "--dry-run", "--no-sync", "figlet")
 	if code != 0 {
 		t.Fatalf("exit = %d, --config did not replace both layers:\n%s", code, errs)
 	}
 	if !strings.Contains(out, "KB") {
 		t.Errorf("selected layer did not apply:\n%s", out)
 	}
-	_, dbg, code := runBinary(t, bin, env, "--debug", "--config", cfgPath, "install", "-n", "--no-sync", "figlet")
+	_, dbg, code := runBinary(t, bin, env, "--debug", "--config", cfgPath, "install", "--dry-run", "--no-sync", "figlet")
 	if code != 0 {
 		t.Fatalf("debug exit = %d\n%s", code, dbg)
 	}
@@ -376,7 +376,7 @@ func TestConfigTrustGateUnderRoot(t *testing.T) {
 
 	t.Run("root-owned file is trusted", func(t *testing.T) {
 		e := env.with("PATH", "/usr/bin:/bin")
-		out, errs, code := runBinary(t, bin, e, "--config", cfgPath, "install", "-n", "--no-sync", "figlet")
+		out, errs, code := runBinary(t, bin, e, "--config", cfgPath, "install", "--dry-run", "--no-sync", "figlet")
 		if code != 0 {
 			t.Fatalf("exit = %d, configured paths were not honoured:\n%s", code, errs)
 		}
@@ -397,7 +397,7 @@ func TestConfigTrustGateUnderRoot(t *testing.T) {
 		e := env.without("XBPRETTY_TEST_TRUST_UID").
 			with("PATH", stubDir+":/usr/bin:/bin").
 			with("XB_POISON_MARKER", marker)
-		out, errs, code := runBinary(t, bin, e, "--config", poisonCfg, "install", "-n", "--no-sync", "figlet")
+		out, errs, code := runBinary(t, bin, e, "--config", poisonCfg, "install", "--dry-run", "--no-sync", "figlet")
 		if code != 0 {
 			t.Fatalf("exit = %d, the run did not continue:\n%s", code, errs)
 		}
@@ -415,7 +415,7 @@ func TestConfigTrustGateUnderRoot(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(log), "-n") {
+		if !strings.Contains(string(log), "-n figlet") {
 			t.Errorf("the PATH stub never ran:\n%s", log)
 		}
 		if strings.Contains(string(log), "poison") {
@@ -429,7 +429,7 @@ func TestConfigTrustGateUnderRoot(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chmod(cfgPath, 0o644) })
 		e := env.without("XBPRETTY_TEST_TRUST_UID").with("PATH", stubDir+":/usr/bin:/bin")
-		_, errs, code := runBinary(t, bin, e, "--config", cfgPath, "install", "-n", "--no-sync", "figlet")
+		_, errs, code := runBinary(t, bin, e, "--config", cfgPath, "install", "--dry-run", "--no-sync", "figlet")
 		if code != 0 {
 			t.Fatalf("exit = %d\n%s", code, errs)
 		}
@@ -453,7 +453,7 @@ func TestConfigLegacyPathIsTrustGatedAfterAliasing(t *testing.T) {
 	env := cleanEnv(t, dir).
 		with("XBPRETTY_TEST_EUID", "0").
 		with("PATH", stubDir+":/usr/bin:/bin")
-	_, errs, code := runBinary(t, bin, env, "--config", cfgPath, "install", "-n", "--no-sync", "figlet")
+	_, errs, code := runBinary(t, bin, env, "--config", cfgPath, "install", "--dry-run", "--no-sync", "figlet")
 	if code != 0 {
 		t.Fatalf("exit = %d, the run did not continue:\n%s", code, errs)
 	}
@@ -490,7 +490,7 @@ func TestConfigSystemLayerIsNotAutomaticallyTrusted(t *testing.T) {
 		with("XBPRETTY_TEST_EUID", "0").
 		with("XBPRETTY_TEST_SYSTEM_CONFIG", sysPath).
 		with("PATH", stubDir+":/usr/bin:/bin")
-	out, errs, code := runBinary(t, bin, env, "install", "-n", "--no-sync", "figlet")
+	out, errs, code := runBinary(t, bin, env, "install", "--dry-run", "--no-sync", "figlet")
 	if code != 0 {
 		t.Fatalf("exit = %d, the run did not continue:\n%s", code, errs)
 	}
@@ -514,7 +514,7 @@ func TestConfigSymlinkIsJudgedOnItsTarget(t *testing.T) {
 		with("XBPRETTY_TEST_EUID", "0").
 		with("XBPRETTY_TEST_TRUST_UID", strconv.Itoa(os.Getuid())).
 		with("PATH", "/usr/bin:/bin")
-	_, errs, code := runBinary(t, bin, env, "--config", link, "install", "-n", "--no-sync", "figlet")
+	_, errs, code := runBinary(t, bin, env, "--config", link, "install", "--dry-run", "--no-sync", "figlet")
 	if code != 0 {
 		t.Fatalf("exit = %d, the target inode was not trusted:\n%s", code, errs)
 	}
@@ -542,7 +542,7 @@ func TestConfigSudoUserBinaryPathIsIgnored(t *testing.T) {
 		with("SUDO_USER", "someone").
 		with("PATH", stubDir+":/usr/bin:/bin").
 		with("XB_POISON_MARKER", marker)
-	out, errs, code := runBinary(t, bin, env, "install", "-n", "--no-sync", "figlet")
+	out, errs, code := runBinary(t, bin, env, "install", "--dry-run", "--no-sync", "figlet")
 	if code != 0 {
 		t.Fatalf("exit = %d, the run did not continue:\n%s", code, errs)
 	}
@@ -559,7 +559,7 @@ func TestConfigSudoUserBinaryPathIsIgnored(t *testing.T) {
 	if strings.Contains(string(log), "poison") {
 		t.Errorf("the user-owned binary ran as root:\n%s", log)
 	}
-	if !strings.Contains(string(log), "-n") {
+	if !strings.Contains(string(log), "-n figlet") {
 		t.Errorf("the PATH stub never ran:\n%s", log)
 	}
 	if !strings.Contains(out, "KB") {

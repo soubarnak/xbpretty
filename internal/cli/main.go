@@ -58,7 +58,8 @@ type state struct {
 	stdin       io.Reader
 	r           *runner
 	color       bool
-	sync        bool
+	autoUpdate  bool
+	showPkgs    bool
 	log         bool
 	boxStyle    string
 	progressBar bool
@@ -79,6 +80,9 @@ func Main(argv []string) int {
 // Run executes xbpretty with the specified arguments, standard input,
 // standard output, and standard error streams, returning the exit code.
 func Run(argv []string, in io.Reader, out, err io.Writer) int {
+	// FR-074: a closed stdout pipe must not kill the run before it can keep
+	// its transaction and exit code.
+	ignoreSIGPIPE()
 	if in == nil {
 		in = stdinFn()
 	}
@@ -105,7 +109,7 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		return exitUsage
 	}
 
-	st := &state{stdout: out, stderr: err, stdin: in}
+	st := &state{stdout: newResilientWriter(out), stderr: err, stdin: in}
 
 	// moo is hidden and never touches config or xbps.
 	if opts.command == "moo" {
@@ -156,7 +160,8 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 	st.simple = resolved.simple
 	st.full = resolved.full
 	st.historyDir = resolved.historyDir
-	st.sync = resolved.sync
+	st.autoUpdate = resolved.sync
+	st.showPkgs = resolved.showPkgs
 	st.log = resolved.log
 	st.color = wantColor(resolved.color, opts)
 	st.boxStyle = "rounded"
@@ -180,10 +185,6 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 	if opts.command == "log" {
 		return st.runLog(opts)
 	}
-	if resolveErr := cfg.Resolve(); resolveErr != nil {
-		fmt.Fprintf(err, "xbpretty: %v\n", resolveErr)
-		return exitRuntime
-	}
 	return st.dispatch(opts)
 }
 
@@ -202,12 +203,12 @@ func (st *state) dispatch(opts *options) int {
 	switch opts.command {
 	case "log":
 		return st.runLog(opts)
-	case "install", "remove", "upgrade", "autoremove", "update":
+	case "install", "remove", "purge", "autoremove", "autopurge", "upgrade", "update":
 		return st.runTransaction(opts.command, opts)
 	case "full-upgrade", "safe-upgrade":
 		// The upgrade family is an equivalence in FR-011.
 		return st.runTransaction("upgrade", opts)
-	case "purge", "autopurge", "download", "clean", "list", "search", "show",
+	case "download", "clean", "list", "search", "show",
 		"policy", "history", "undo", "redo", "fetch":
 		return st.runUnimplemented(opts.command, opts)
 	}

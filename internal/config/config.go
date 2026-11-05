@@ -215,14 +215,28 @@ func Invoker() (uid, gid int, ok bool) {
 // ErrNotInstalled is reported when a configured xbps binary cannot be found.
 var ErrNotInstalled = errors.New("xbps binary not found")
 
-// Resolve checks that every configured xbps binary exists and is executable,
-// returning a per-command error naming what is missing.
-//
-// Rev 6 requires existence to be checked only for the binaries the selected
-// command uses (FR-053); the shared command table that supplies command→binary
-// ownership belongs to #62.
-func (c Config) Resolve() error {
-	for _, path := range []string{c.Xbps.InstallPath, c.Xbps.RemovePath, c.Xbps.QueryPath} {
+// ResolveFor checks that only the configured binaries the selected command
+// uses exist and are executable (FR-053). The command table in internal/spec
+// names the programs; this method maps those names to the configured paths.
+// A duplicate is checked once, and an unknown name is ignored.
+func (c Config) ResolveFor(names ...string) error {
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		var path string
+		switch name {
+		case "install":
+			path = c.Xbps.InstallPath
+		case "remove":
+			path = c.Xbps.RemovePath
+		case "query":
+			path = c.Xbps.QueryPath
+		default:
+			continue
+		}
 		if _, err := exec.LookPath(path); err != nil {
 			return fmt.Errorf("%w: %s", ErrNotInstalled, path)
 		}

@@ -251,6 +251,43 @@ func (r *runner) streamDirect(name string, args ...string) (int, error) {
 	return code, nil
 }
 
+// streamStderr runs a diagnostic xbps step with both streams on stderr,
+// forwards SIGINT/SIGTERM to the child, and returns its exit code and the
+// merged output for the hint table. The index sync uses it so its output is
+// never durable stdout and an interrupt still reaches the child (FR-013,
+// FR-074).
+func (r *runner) streamStderr(name string, args ...string) (int, string, error) {
+	r.echo(name, args)
+	cmd := exec.Command(name, args...)
+	cmd.Env = r.env()
+	cmd.Stdin = r.stdinReader()
+	tee := &teeWriter{w: r.stderrWriter()}
+	cmd.Stdout = tee
+	cmd.Stderr = tee
+	if err := cmd.Start(); err != nil {
+		return 1, "", fmt.Errorf("starting %s: %w", name, err)
+	}
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigs)
+	go func() {
+		for s := range sigs {
+			if cmd.Process != nil {
+				_ = cmd.Process.Signal(s)
+			}
+		}
+	}()
+	err := cmd.Wait()
+	if err == nil {
+		return 0, tee.String(), nil
+	}
+	code, ok := exitCode(err)
+	if !ok {
+		return 1, tee.String(), fmt.Errorf("waiting for %s: %w", name, err)
+	}
+	return code, tee.String(), nil
+}
+
 // runner executes xbps commands, honouring the verbose flag and the
 // configured binary paths. It is declared in main.go with the rest of the
 // invocation state.

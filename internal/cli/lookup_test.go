@@ -78,7 +78,7 @@ func TestAC010UpgradeShowsOldVersion(t *testing.T) {
 	e.root = true
 	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
 	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
-	code, out, errs := e.run("xbpretty", "install", "xbps", "-n")
+	code, out, errs := e.run("xbpretty", "install", "xbps", "--dry-run")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
@@ -97,7 +97,7 @@ func TestAC010HeldPackageNameCoversHyphens(t *testing.T) {
 	e.root = true
 	e.set("XB_STUB_STDOUT", "base-files-0.146_1 update x86_64 https://repo-default.voidlinux.org/current 262427 62743\n")
 	e.set("XB_STUB_HOLD", "base-files-0.145_1\n")
-	code, out, errs := e.run("xbpretty", "upgrade", "-n")
+	code, out, errs := e.run("xbpretty", "upgrade", "--dry-run")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
