@@ -70,7 +70,7 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 
 	// FR-010: never block on a pipe.
 	stdinIsPipe := !isTTY(st.stdin)
-	autoAccept := opts.yes || st.r.cfg.Nala.AssumeYes
+	autoAccept := st.assumeYes
 	if stdinIsPipe && !autoAccept {
 		fmt.Fprintln(st.stderr, "xbpretty: stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed")
 		return exitRuntime

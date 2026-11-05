@@ -30,7 +30,7 @@ func advertisedSpellings() []string {
 		}
 	}
 	for _, f := range spec.Flags {
-		if f.Hidden || f.Refusal != "" || f.NoOp {
+		if f.Hidden || f.Refusal != "" {
 			continue
 		}
 		for _, s := range spec.FlagSpellings(f) {

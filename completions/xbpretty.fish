@@ -1,55 +1,112 @@
 # fish completion for xbpretty
-function __xbpretty_no_subcommand
+function __xbpretty_verb
     set -l cmd (commandline -opc)
+    switch $cmd[1]
+        case xbp-install
+            echo install
+            return
+        case xbp-remove
+            echo remove
+            return
+        case xbp-upgrade
+            echo upgrade
+            return
+        case xbp-autoremove
+            echo autoremove
+            return
+        case xbp-update
+            echo update
+            return
+    end
     for w in $cmd[2..-1]
         switch $w
             case install
-                return 1
+                echo install
+                return
             case remove
-                return 1
+                echo remove
+                return
             case purge
-                return 1
+                echo purge
+                return
             case autoremove
-                return 1
+                echo autoremove
+                return
             case autopurge
-                return 1
+                echo autopurge
+                return
             case upgrade
-                return 1
+                echo upgrade
+                return
             case full-upgrade
-                return 1
+                echo full-upgrade
+                return
             case safe-upgrade
-                return 1
+                echo safe-upgrade
+                return
             case update
-                return 1
+                echo update
+                return
             case download
-                return 1
+                echo download
+                return
             case clean
-                return 1
+                echo clean
+                return
             case list
-                return 1
+                echo list
+                return
             case search
-                return 1
+                echo search
+                return
             case show
-                return 1
+                echo show
+                return
             case policy
-                return 1
+                echo policy
+                return
             case history
-                return 1
+                echo history
+                return
             case undo
-                return 1
+                echo undo
+                return
             case redo
-                return 1
+                echo redo
+                return
             case fetch
-                return 1
+                echo fetch
+                return
             case completion
-                return 1
+                echo completion
+                return
             case link
-                return 1
+                echo link
+                return
             case log
-                return 1
+                echo log
+                return
+            case uninstall
+                echo remove
+                return
+            case dist-upgrade
+                echo full-upgrade
+                return
+            case info
+                echo show
+                return
+            case up
+                echo upgrade
+                return
+            case dist-up
+                echo upgrade
+                return
         end
     end
-    return 0
+end
+
+function __xbpretty_no_subcommand
+    test -z (__xbpretty_verb)
 end
 
 function __xbpretty_installed
@@ -75,12 +132,7 @@ function __xbpretty_history_ids
     printf '%s\n' last
 end
 
-function __xbpretty_log_names
-    string match -q -- '-*' (commandline -ct); and return 0
-    __xbpretty_installed
-end
-
-for __xbpretty_cmd in xbp xbp-install xbp-remove xbp-upgrade xbp-autoremove xbp-update
+for __xbpretty_cmd in xbpretty xbp xbp-install xbp-remove xbp-upgrade xbp-autoremove xbp-update
     complete -c $__xbpretty_cmd -f
     complete -c $__xbpretty_cmd -n '__xbpretty_no_subcommand' -a install -d 'install packages from repositories'
     complete -c $__xbpretty_cmd -n '__xbpretty_no_subcommand' -a remove -d 'remove installed packages'
@@ -106,8 +158,7 @@ for __xbpretty_cmd in xbp xbp-install xbp-remove xbp-upgrade xbp-autoremove xbp-
     complete -c $__xbpretty_cmd -n '__xbpretty_no_subcommand' -a log -d 'print the transaction log'
 
     complete -c $__xbpretty_cmd -l version -d 'print version'
-    complete -c $__xbpretty_cmd -s V -n 'not __fish_seen_subcommand_from list search' -d 'print version'
-    complete -c $__xbpretty_cmd -s V -n '__fish_seen_subcommand_from list search' -l virtual -d 'list virtual packages'
+    complete -c $__xbpretty_cmd -s V -n 'not contains (__xbpretty_verb) list search' -d 'print version'
     complete -c $__xbpretty_cmd -s h -l help -d 'print this help'
     complete -c $__xbpretty_cmd -s v -l verbose -d 'print every xbps command before running it'
     complete -c $__xbpretty_cmd -l debug -d 'dump the resolved configuration'
@@ -116,46 +167,50 @@ for __xbpretty_cmd in xbp xbp-install xbp-remove xbp-upgrade xbp-autoremove xbp-
     complete -c $__xbpretty_cmd -l no-color -d 'never emit ANSI colour'
     complete -c $__xbpretty_cmd -l tui -d 'force the full-screen interface'
     complete -c $__xbpretty_cmd -l no-tui -d 'disable the full-screen interface'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from list search' -s V -l virtual -d 'list virtual packages'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from fetch' -s c -l country -x -d 'restrict mirrors to a country or region (repeatable)'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade fetch' -l dry-run -d 'show the plan without changing anything'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -s y -l yes -d 'answer yes and skip the prompt'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l assume-yes
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -s n -l assume-no -d 'refuse at the prompt'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -s d -l download-only -d 'download the plans archives and stop'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l simple -d 'print the simple summary'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l update -d 'refresh the repository index first'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-update -d 'do not refresh the repository index'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-sync -d 'do not refresh the repository index'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l purge -d 'also remove configuration files'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l reinstall -d 'reinstall packages that are already installed'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l auto-remove -d 'force the implicit orphan removal'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l autoremove
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-auto-remove -d 'skip the implicit orphan removal'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-autoremove
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l full -d 'accepted no-op; xbps -u never removes packages'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-full -d 'accepted no-op; wins over --full'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l safe -d 'accepted no-op for nala compatibility'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from upgrade full-upgrade safe-upgrade' -l print-uris -d 'print the plans download URLs and stop'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-log -d 'do not append to the transaction log'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from list search show' -s a -l all-versions -d 'show every version of a package'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from list search' -s i -l installed -d 'show installed packages only'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from list search' -s u -l upgradable -d 'show upgradable packages only'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from list search' -l description -d 'print the long description under each row'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from list search' -l summary -d 'print the short summary under each row'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from list search show policy' -s m -l machine -d 'emit NDJSON schema 1'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from search' -s n -l names -d 'search names only'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from search' -l names-only
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from log' -l limit -x -d 'keep only the last N matching log entries'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from clean' -l lists -d 'delete cached repodata files'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from clean' -l fetch -d 'restore the repository configuration written by fetch'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from history' -l all -d 'with history clear: delete every entry'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from fetch' -l auto -x -d 'validate the N fastest mirrors (default 3)'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from fetch' -l https-only -d 'probe and write https mirrors only'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from fetch' -l non-free -d 'include the non-free repository paths'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) list search' -s V -l virtual -d 'list virtual packages'
+    complete -c $__xbpretty_cmd -n 'test (__xbpretty_verb) = fetch' -s c -l country -x -d 'restrict mirrors to a country or region (repeatable)'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade fetch' -l dry-run -d 'show the plan without changing anything'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -s y -l yes -d 'answer yes and skip the prompt'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l assume-yes
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -s n -l assume-no -d 'refuse at the prompt'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -s d -l download-only -d 'download the plans archives and stop'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l simple -d 'print the simple summary'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l update -d 'refresh the repository index first'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-update -d 'do not refresh the repository index'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-sync -d 'do not refresh the repository index'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l purge -d 'also remove configuration files'
+    complete -c $__xbpretty_cmd -n 'test (__xbpretty_verb) = install' -l reinstall -d 'reinstall packages that are already installed'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l auto-remove -d 'force the implicit orphan removal'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l autoremove
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-auto-remove -d 'skip the implicit orphan removal'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-autoremove
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l full -d 'accepted no-op; xbps -u never removes packages'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-full -d 'accepted no-op; wins over --full'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l safe -d 'accepted no-op for nala compatibility'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) upgrade full-upgrade safe-upgrade' -l print-uris -d 'print the plans download URLs and stop'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade update undo redo' -l no-log -d 'do not append to the transaction log'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-fix-broken
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-install-recommends
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-install-suggests
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) list search show' -s a -l all-versions -d 'show every version of a package'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) list search show' -s A -l all-arches -d 'accepted no-op; xbps covers all architectures'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) list search' -s i -l installed -d 'show installed packages only'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) list search' -s u -l upgradable -d 'show upgradable packages only'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) list search' -l description -d 'print the long description under each row'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) list search' -l summary -d 'print the short summary under each row'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) list search show policy' -s m -l machine -d 'emit NDJSON schema 1'
+    complete -c $__xbpretty_cmd -n 'test (__xbpretty_verb) = search' -s n -l names -d 'search names only'
+    complete -c $__xbpretty_cmd -n 'test (__xbpretty_verb) = search' -l names-only
+    complete -c $__xbpretty_cmd -n 'test (__xbpretty_verb) = log' -l limit -x -d 'keep only the last N matching log entries'
+    complete -c $__xbpretty_cmd -n 'test (__xbpretty_verb) = clean' -l lists -d 'delete cached repodata files'
+    complete -c $__xbpretty_cmd -n 'test (__xbpretty_verb) = clean' -l fetch -d 'restore the repository configuration written by fetch'
+    complete -c $__xbpretty_cmd -n 'test (__xbpretty_verb) = history' -l all -d 'with history clear: delete every entry'
+    complete -c $__xbpretty_cmd -n 'test (__xbpretty_verb) = fetch' -l auto -x -d 'validate the N fastest mirrors (default 3)'
+    complete -c $__xbpretty_cmd -n 'test (__xbpretty_verb) = fetch' -l https-only -d 'probe and write https mirrors only'
+    complete -c $__xbpretty_cmd -n 'test (__xbpretty_verb) = fetch' -l non-free -d 'include the non-free repository paths'
 
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install download show list search' -a '(__xbpretty_available)'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from remove purge policy log' -a '(__xbpretty_installed)'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from history undo redo' -a '(__xbpretty_history_ids)'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install download show list search' -a '(__xbpretty_available)'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) remove purge policy log' -a '(__xbpretty_installed)'
+    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) history undo redo' -a '(__xbpretty_history_ids)'
+    complete -c $__xbpretty_cmd -n 'test (__xbpretty_verb) = completion' -a 'bash zsh fish'
 end

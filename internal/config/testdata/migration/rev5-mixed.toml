@@ -1,0 +1,11 @@
+# Legacy and canonical keys in one file: the canonical key wins.
+assume_yes = true
+color = always
+box_style = ascii
+
+[Nala]
+assume_yes = false
+auto_remove = false
+
+[Color]
+mode = "Never"

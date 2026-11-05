@@ -1,0 +1,11 @@
+# A rev-5 flat configuration: every legacy key, both rev-5 value forms.
+assume_yes = "true"
+sync = false
+log = "false"
+xbps_install_path = xbps-install
+xbps_remove_path = "xbps-remove"
+xbps_query_path = xbps-query
+color = always
+verbose = false
+box_style = ascii
+progress_bar = true

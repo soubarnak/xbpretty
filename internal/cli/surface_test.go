@@ -182,6 +182,15 @@ func TestSurfaceGlobalFlagsBeforeAndAfterCommandAndConflicts(t *testing.T) {
 			t.Errorf("%v exit = %d, want 2\n%s", args, code, errs)
 		}
 	}
+	for _, args := range [][]string{
+		{"upgrade", "--print-uris", "--dry-run"},
+		{"upgrade", "--print-uris", "--download-only"},
+	} {
+		if code, _, errs := surfaceRun(t, bin, env, args...); code != 2 {
+			t.Errorf("%v exit = %d, want 2\n%s", args, code, errs)
+		}
+	}
+
 	// --no-full wins over --full without a conflict.
 	env2, probe := xbpsStubPath(t)
 	_ = probe
@@ -190,7 +199,7 @@ func TestSurfaceGlobalFlagsBeforeAndAfterCommandAndConflicts(t *testing.T) {
 	}
 
 	// -c is fetch's country; elsewhere it is the exact FR-059 hint.
-	for _, args := range [][]string{{"-c", "IN", "install", "figlet"}, {"install", "figlet", "-c", "IN"}, {"install", "figlet", "--country", "IN"}} {
+	for _, args := range [][]string{{"-c", "IN", "install", "figlet"}, {"install", "figlet", "-c", "IN"}, {"install", "figlet", "--country", "IN"}, {"--country", "IN", "fetch"}} {
 		code, _, errs := surfaceRun(t, bin, env, args...)
 		if code != 2 {
 			t.Errorf("%v exit = %d, want 2\n%s", args, code, errs)
@@ -439,6 +448,72 @@ func TestSurfaceArgv0SetIsClosed(t *testing.T) {
 	for _, name := range []string{"xbp-clean", "xbp-history", "xbp-fetch", "xbp-undo", "xbp-redo", "xbp-policy", "xbp-list", "xbp-log", "xbp-completion", "xbp-link", "xbp-purge", "xbp-moo"} {
 		if got, ok := commandFromArgv("/usr/bin/" + name); ok {
 			t.Errorf("commandFromArgv(%s) = %q, true; the set is closed", name, got)
+		}
+	}
+}
+
+func TestSurfaceArityCountsPackageWordsOnly(t *testing.T) {
+	bin, logPath, cfgDir := integrationEnv(t)
+	env := map[string]string{
+		"XDG_CONFIG_HOME": cfgDir,
+		"XDG_STATE_HOME":  filepath.Join(filepath.Dir(cfgDir), "state"),
+		"XB_STUB_LOG":     logPath,
+		"XB_STUB_STDOUT":  planFixture,
+		"NO_COLOR":        "1",
+	}
+	code, _, errs := surfaceRun(t, bin, env, "install", "--dry-run", "--", "-f")
+	if code != 1 || !strings.Contains(errs, "xbpretty: install needs at least one package") {
+		t.Errorf("install --dry-run -- -f = %d, %q; want the missing-package error", code, errs)
+	}
+	code, _, errs = surfaceRun(t, bin, env, "install", "--dry-run", "--", "-f", "figlet")
+	if code != 0 {
+		t.Errorf("install --dry-run -- -f figlet = %d, %q; want success", code, errs)
+	}
+}
+
+func TestSurfaceFlagScopingFixes(t *testing.T) {
+	bin, logPath, cfgDir := integrationEnv(t)
+	env := map[string]string{
+		"XDG_CONFIG_HOME": cfgDir,
+		"XDG_STATE_HOME":  filepath.Join(filepath.Dir(cfgDir), "state"),
+		"XB_STUB_LOG":     logPath,
+		"XB_STUB_STDOUT":  planFixture,
+		"NO_COLOR":        "1",
+	}
+	if code, _, _ := surfaceRun(t, bin, env, "upgrade", "--reinstall"); code != 2 {
+		t.Errorf("upgrade --reinstall exit = %d, want 2", code)
+	}
+	if code, _, errs := surfaceRun(t, bin, env, "install", "figlet", "--reinstall", "--dry-run"); code != 0 {
+		t.Errorf("install --reinstall = %d, %q; want success", code, errs)
+	}
+	if code, _, errs := surfaceRun(t, bin, env, "update", "--no-log"); code == 2 || strings.Contains(errs, "unknown flag") {
+		t.Errorf("update --no-log was a usage error: %d, %q", code, errs)
+	}
+	if code, _, errs := surfaceRun(t, bin, env, "undo", "--no-log"); code == 2 {
+		t.Errorf("undo --no-log was a usage error: %q", errs)
+	}
+}
+
+func TestSurfaceFetchCountryAndConfigInEveryOrder(t *testing.T) {
+	bin := buildBinary(t)
+	cfgDir, cfgPath := integrationConfig(t, "Never")
+	env := map[string]string{
+		"XDG_CONFIG_HOME": cfgDir,
+		"XDG_STATE_HOME":  filepath.Join(filepath.Dir(cfgDir), "state"),
+		"NO_COLOR":        "1",
+	}
+	args := [][]string{
+		{"fetch", "-c", "IN", "--config", cfgPath},
+		{"--config", cfgPath, "fetch", "-c", "IN"},
+		{"fetch", "--config", cfgPath, "-c", "IN"},
+	}
+	for _, argv := range args {
+		code, _, errs := surfaceRun(t, bin, env, argv...)
+		if code == 2 || strings.Contains(errs, "unknown flag") || strings.Contains(errs, "usage:") {
+			t.Errorf("%v did not parse: exit %d\n%s", argv, code, errs)
+		}
+		if !strings.Contains(errs, "xbpretty: fetch is not implemented in this build") {
+			t.Errorf("%v did not reach the fetch handler: exit %d\n%s", argv, code, errs)
 		}
 	}
 }

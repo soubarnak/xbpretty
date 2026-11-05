@@ -11,7 +11,17 @@ import (
 	"time"
 )
 
+// isolateSystemConfig points the system layer at an absent temp file so a
+// developer's real /etc/xbpretty/config.toml cannot change a unit test.
+func isolateSystemConfig(t *testing.T) {
+	t.Helper()
+	orig := systemConfigPath
+	systemConfigPath = filepath.Join(t.TempDir(), "system-absent.toml")
+	t.Cleanup(func() { systemConfigPath = orig })
+}
+
 func TestLoadMissingFileIsSilent(t *testing.T) {
+	isolateSystemConfig(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	cfg, err := Load()
 	if err != nil {
@@ -23,6 +33,7 @@ func TestLoadMissingFileIsSilent(t *testing.T) {
 }
 
 func TestLoadReadsFile(t *testing.T) {
+	isolateSystemConfig(t)
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	if err := os.MkdirAll(filepath.Join(dir, "xbpretty"), 0o755); err != nil {
@@ -47,6 +58,7 @@ func TestLoadReadsFile(t *testing.T) {
 // An existing default file that does not validate is a hard error, unlike a
 // missing one (FR-053).
 func TestLoadInvalidExistingFileIsHardError(t *testing.T) {
+	isolateSystemConfig(t)
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	if err := os.MkdirAll(filepath.Join(dir, "xbpretty"), 0o755); err != nil {
@@ -280,5 +292,79 @@ func TestTransactionLogPathReadsWithoutCreating(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(aliceHome, ".local")); err == nil {
 		t.Error("resolving the path created directories")
+	}
+}
+
+// TestSudoIgnoresXDGStateHome pins the second half of FR-054's invoking-user
+// rule: the state directory follows the passwd home, not XDG_STATE_HOME.
+func TestSudoIgnoresXDGStateHome(t *testing.T) {
+	origEuid, origLookup := euid, lookupUser
+	t.Cleanup(func() { euid, lookupUser = origEuid, origLookup })
+	aliceHome := t.TempDir()
+	euid = func() int { return 0 }
+	lookupUser = func(name string) (*user.User, error) {
+		return &user.User{Username: name, HomeDir: aliceHome}, nil
+	}
+	t.Setenv("SUDO_USER", "alice")
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	path, err := TransactionLogPath()
+	if err != nil {
+		t.Fatalf("TransactionLogPath: %v", err)
+	}
+	want := filepath.Join(aliceHome, ".local", "state", "xbpretty", "transactions.log")
+	if path != want {
+		t.Errorf("TransactionLogPath() = %q, want %q", path, want)
+	}
+	cfgPath, err := Path()
+	if err != nil {
+		t.Fatalf("Path: %v", err)
+	}
+	if wantCfg := filepath.Join(aliceHome, ".config", "xbpretty", "config.toml"); cfgPath != wantCfg {
+		t.Errorf("Path() = %q, want %q", cfgPath, wantCfg)
+	}
+}
+
+// TestRelativeXDGStateHomeFallsBack pins the XDG base-directory rule: a
+// relative path is not a usable state location.
+func TestRelativeXDGStateHomeFallsBack(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", "relative/state")
+	path, err := TransactionLogPath()
+	if err != nil {
+		t.Fatalf("TransactionLogPath: %v", err)
+	}
+	want := filepath.Join(home, ".local", "state", "xbpretty", "transactions.log")
+	if path != want {
+		t.Errorf("TransactionLogPath() = %q, want %q", path, want)
+	}
+}
+
+// TestSudoUserWinsOverDoasUser pins the precedence inside FR-054's invoking
+// user rule.
+func TestSudoUserWinsOverDoasUser(t *testing.T) {
+	origEuid, origLookup := euid, lookupUser
+	t.Cleanup(func() { euid, lookupUser = origEuid, origLookup })
+	sudoHome, doasHome := t.TempDir(), t.TempDir()
+	euid = func() int { return 0 }
+	lookupUser = func(name string) (*user.User, error) {
+		switch name {
+		case "sudo-user":
+			return &user.User{Username: name, HomeDir: sudoHome}, nil
+		case "doas-user":
+			return &user.User{Username: name, HomeDir: doasHome}, nil
+		}
+		return nil, fmt.Errorf("no such user %q", name)
+	}
+	t.Setenv("SUDO_USER", "sudo-user")
+	t.Setenv("DOAS_USER", "doas-user")
+	path, err := Path()
+	if err != nil {
+		t.Fatalf("Path: %v", err)
+	}
+	if want := filepath.Join(sudoHome, ".config", "xbpretty", "config.toml"); path != want {
+		t.Errorf("Path() = %q, want SUDO_USER home %q", path, want)
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"os/user"
@@ -39,63 +38,63 @@ func fileError(path, message string) *Error {
 	return &Error{Path: path, Message: message}
 }
 
-// Load reads the default user configuration layer and resolves it over the
-// built-in defaults. A missing file is not an error; an existing file that
-// does not validate is (FR-053). The system layer and --config selection are
-// later tickets; LoadFile is the seam they call.
+// Load reads the default layers (system, then user) and resolves them over the
+// built-in defaults. Missing default layers are silent; an existing invalid
+// layer is a hard error (FR-053, FR-054).
 func Load() (Config, error) {
-	path, err := Path()
+	res, err := LoadSelected("")
 	if err != nil {
 		return Defaults(), err
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return Defaults(), nil
-		}
-		return Defaults(), fileError(path, fmt.Sprintf("cannot read configuration file: %v", err))
-	}
-	defer f.Close()
-	return Parse(path, f)
+	return res.Config, nil
 }
 
-// LoadFile reads one explicit configuration file. Unlike the default layer a
+// LoadFile reads one explicit configuration file. Unlike a default layer a
 // missing or unreadable file is a hard error: this is the seam --config uses.
 func LoadFile(path string) (Config, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return Defaults(), fileError(path, fmt.Sprintf("cannot read configuration file: %v", err))
-	}
-	defer f.Close()
-	return Parse(path, f)
-}
-
-// Parse reads one TOML-subset configuration document and resolves the rev 6
-// schema over the defaults.
-func Parse(path string, r io.Reader) (Config, error) {
-	data, err := io.ReadAll(io.LimitReader(r, maxConfigBytes+1))
-	if err != nil {
-		return Defaults(), fileError(path, fmt.Sprintf("cannot read configuration file: %v", err))
-	}
-	doc, err := parseDocument(path, data, false)
+	res, err := LoadSelected(path)
 	if err != nil {
 		return Defaults(), err
 	}
-	cfg, err := resolve(doc)
+	return res.Config, nil
+}
+
+// Parse reads one TOML-subset configuration document and resolves it over the
+// built-in defaults. The ten rev-5 keys are understood, but their warnings are
+// discarded here: Parse is a single-document seam, not a layered run.
+func Parse(path string, r io.Reader) (Config, error) {
+	data, err := readConfigBytes(path, r)
+	if err != nil {
+		return Defaults(), err
+	}
+	doc, err := parseDocument(path, data)
+	if err != nil {
+		return Defaults(), err
+	}
+	partial, _, err := buildPartial(doc)
 	if err != nil {
 		if cfgErr, ok := err.(*Error); ok {
 			cfgErr.Path = path
 		}
 		return Defaults(), err
 	}
+	cfg := Defaults()
+	partial.mergeInto(&cfg)
 	return cfg, nil
 }
 
-// Path resolves the default user config file location, honouring
-// XDG_CONFIG_HOME and the sudo/doas calling-user lookup.
-//
-// #60 owns layered selection: the /etc layer, the absolute-XDG rule and
-// ignoring XDG when an invoking SUDO_USER/DOAS_USER is present.
+// readConfigBytes reads at most one mebibyte plus one byte so the parser can still
+// name an oversized file.
+func readConfigBytes(path string, r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxConfigBytes+1))
+	if err != nil {
+		return nil, fileError(path, fmt.Sprintf("cannot read configuration file: %v", err))
+	}
+	return data, nil
+}
+
+// Path resolves the default user config file location, honouring the absolute
+// XDG_CONFIG_HOME rule and the sudo/doas calling-user lookup (FR-054).
 func Path() (string, error) {
 	base, err := configHome()
 	if err != nil {
@@ -104,28 +103,62 @@ func Path() (string, error) {
 	return filepath.Join(base, "xbpretty", "config.toml"), nil
 }
 
+// configHome is the user layer's base directory. When an invoking sudo/doas
+// user is present that user's passwd home wins and XDG_CONFIG_HOME is ignored.
 func configHome() (string, error) {
-	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+	home, invoking, err := invokingUser()
+	if err != nil {
+		return "", err
+	}
+	if invoking {
+		return filepath.Join(home, ".config"), nil
+	}
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" && filepath.IsAbs(dir) {
 		return dir, nil
 	}
-	home, err := userHome()
+	home, err = os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(home, ".config"), nil
 }
 
-// userHome returns the home directory whose config applies to this run. When
-// xbpretty runs as root through sudo or doas, the calling user's config wins.
-func userHome() (string, error) {
+// invokerHomeOverride is empty in production. The build-tagged test hook sets
+// it so the sudo/doas home rule is testable without a second account.
+var invokerHomeOverride string
+
+// invokingUser returns the passwd home of the user behind sudo/doas when
+// xbpretty runs as root. ok is false for an ordinary run or plain root.
+func invokingUser() (home string, ok bool, err error) {
 	if euid() != 0 {
-		return os.UserHomeDir()
+		return "", false, nil
 	}
-	if name := os.Getenv("SUDO_USER"); name != "" {
-		return homeOfUser(name)
+	name := os.Getenv("SUDO_USER")
+	if name == "" {
+		name = os.Getenv("DOAS_USER")
 	}
-	if name := os.Getenv("DOAS_USER"); name != "" {
-		return homeOfUser(name)
+	if name == "" {
+		return "", false, nil
+	}
+	if invokerHomeOverride != "" {
+		return invokerHomeOverride, true, nil
+	}
+	dir, err := homeOfUser(name)
+	if err != nil {
+		return "", false, err
+	}
+	return dir, true, nil
+}
+
+// userHome returns the home directory whose config applies to this run. When
+// xbpretty runs as root through sudo or doas, the calling user's home wins.
+func userHome() (string, error) {
+	home, invoking, err := invokingUser()
+	if err != nil {
+		return "", err
+	}
+	if invoking {
+		return home, nil
 	}
 	return os.UserHomeDir()
 }
@@ -216,15 +249,22 @@ const transactionLogName = "transactions.log"
 
 // stateDirPath is where the state directory is, without creating it.
 func stateDirPath() (string, error) {
-	base := os.Getenv("XDG_STATE_HOME")
-	if base == "" {
-		home, err := userHome()
-		if err != nil {
-			return "", err
-		}
-		base = filepath.Join(home, ".local", "state")
+	home, invoking, err := invokingUser()
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(base, "xbpretty"), nil
+	if invoking {
+		return filepath.Join(home, ".local", "state", "xbpretty"), nil
+	}
+	base := os.Getenv("XDG_STATE_HOME")
+	if base != "" && filepath.IsAbs(base) {
+		return filepath.Join(base, "xbpretty"), nil
+	}
+	home, err = os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "state", "xbpretty"), nil
 }
 
 // TransactionLogPath is the path TransactionLog returns, for readers: it

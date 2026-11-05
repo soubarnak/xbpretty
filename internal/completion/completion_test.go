@@ -388,8 +388,7 @@ func TestRev6CompletionSurface(t *testing.T) {
 		"--allow-unauthenticated", "--fix-broken", "--target-release",
 		"--install-recommends", "--install-suggests", "--remove-essential",
 		"--remove-config", "--exclude", "--sources", "--debian", "--ubuntu",
-		"--devuan", "--no-fix-broken", "--no-install-recommends",
-		"--no-install-suggests",
+		"--devuan",
 	}
 	for _, shell := range []string{"bash", "zsh", "fish"} {
 		t.Run(shell, func(t *testing.T) {
@@ -424,6 +423,25 @@ func TestRev6CompletionSurface(t *testing.T) {
 			}
 			if strings.Contains(script, "moo") {
 				t.Errorf("%s script advertises the hidden moo command", shell)
+			}
+			if shell == "fish" {
+				if !strings.Contains(script, "for __xbpretty_cmd in xbpretty xbp ") {
+					t.Errorf("fish does not register the primary xbpretty name")
+				}
+				if !strings.Contains(script, "-l no-fix-broken") {
+					t.Errorf("fish does not offer the accepted no-op --no-fix-broken")
+				}
+			} else {
+				want := "complete -F _xbpretty xbpretty"
+				if shell == "zsh" {
+					want = "#compdef xbpretty"
+				}
+				if !strings.Contains(script, want) {
+					t.Errorf("%s does not bind the primary xbpretty name", shell)
+				}
+				if !strings.Contains(script, "--no-fix-broken") {
+					t.Errorf("%s does not offer the accepted no-op --no-fix-broken", shell)
+				}
 			}
 		})
 	}
@@ -495,6 +513,47 @@ func TestCompletionPerCommandFlagsAndHistory(t *testing.T) {
 					if offers(p, banned) {
 						t.Errorf("install offered N/A flag %q: %q", banned, p.offered)
 					}
+				}
+			})
+		})
+	}
+}
+
+// TestCompletionPrimaryNameAndAliasDispatch pins the review fixes: xbpretty
+// itself is registered, and an alias token resolves to its canonical command.
+func TestCompletionPrimaryNameAndAliasDispatch(t *testing.T) {
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		t.Run(shell, func(t *testing.T) {
+			if _, err := exec.LookPath(shell); err != nil {
+				t.Skipf("%s is not installed", shell)
+			}
+			t.Run("uninstall offers installed names", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "uninstall", "")
+				for _, name := range []string{"figlet", "htop"} {
+					if !offers(p, name) {
+						t.Errorf("uninstall did not resolve to remove: %q", p.offered)
+					}
+				}
+			})
+			t.Run("info searches available names", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "info", "fig")
+				if !offers(p, "figlet") {
+					t.Errorf("info did not resolve to show: %q", p.offered)
+				}
+			})
+			t.Run("dist-upgrade is the upgrade family", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "dist-upgrade", "-")
+				if !offers(p, "--print-uris") {
+					t.Errorf("dist-upgrade did not resolve to full-upgrade: %q", p.offered)
+				}
+			})
+			t.Run("fixed-verb alias completes packages without command words", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp-install", "fig")
+				if !offers(p, "figlet") {
+					t.Errorf("xbp-install did not complete an available name: %q", p.offered)
+				}
+				if offers(p, "install") || offers(p, "log") {
+					t.Errorf("xbp-install offered command words: %q", p.offered)
 				}
 			})
 		})

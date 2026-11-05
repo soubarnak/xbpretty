@@ -30,6 +30,39 @@ func visibleNames() []string {
 
 func aliasNames() []string { return spec.LinkNames() }
 
+// completionNames are the names a shell completion must be registered for:
+// the primary binary plus the six link names.
+func completionNames() []string {
+	return append([]string{"xbpretty"}, aliasNames()...)
+}
+
+// aliasPairs lists every command alias and its canonical command, documented
+// first. Detection uses the whole list; the command-word list uses only the
+// documented aliases.
+func aliasPairs() [][2]string {
+	var pairs [][2]string
+	for _, c := range spec.Commands {
+		for _, alias := range c.Aliases {
+			pairs = append(pairs, [2]string{alias, c.Name})
+		}
+	}
+	for _, c := range spec.Commands {
+		for _, alias := range c.UndocumentedAliases {
+			pairs = append(pairs, [2]string{alias, c.Name})
+		}
+	}
+	return pairs
+}
+
+// commandWords are the commands and documented aliases offered at the root.
+func commandWords() []string {
+	words := visibleNames()
+	for _, c := range spec.VisibleCommands() {
+		words = append(words, c.Aliases...)
+	}
+	return words
+}
+
 // wordsFor returns the advertised spellings for one command, optionally
 // dropping a spelling that collides with a command-specific meaning. The
 // fetch command does not accept the short -n for --dry-run, and list/search
@@ -45,7 +78,7 @@ func wordsFor(cmd string) []string {
 		out = append(out, s)
 	}
 	for _, f := range spec.FlagsFor(cmd) {
-		if f.Hidden || f.Refusal != "" || f.NoOp {
+		if f.Hidden || f.Refusal != "" {
 			continue
 		}
 		spellings := spec.FlagSpellings(f)
@@ -74,7 +107,7 @@ func rootWords() []string {
 		out = append(out, s)
 	}
 	for _, f := range spec.Flags {
-		if !f.Global || f.Hidden || f.Refusal != "" || f.NoOp {
+		if !f.Global || f.Hidden || f.Refusal != "" {
 			continue
 		}
 		for _, s := range spec.FlagSpellings(f) {
@@ -113,6 +146,18 @@ _xbpretty_history_ids() {
 `
 }
 
+// bashScanCase maps one word to a canonical command, or returns "".
+func bashScanCase() string {
+	var b strings.Builder
+	b.WriteString("        install|remove|purge|autoremove|autopurge|upgrade|full-upgrade|safe-upgrade|update|download|clean|list|search|show|policy|history|undo|redo|fetch|completion|link|log)\n")
+	b.WriteString("          sub=\"${COMP_WORDS[i]}\"; break ;;\n")
+	for _, pair := range aliasPairs() {
+		fmt.Fprintf(&b, "        %s)\n          sub=%s; break ;;\n", pair[0], pair[1])
+	}
+	b.WriteString("        --)\n          break ;;\n")
+	return b.String()
+}
+
 func bashScript() string {
 	var b strings.Builder
 	b.WriteString(`# bash completion for xbpretty
@@ -124,31 +169,13 @@ _xbpretty() {
 `)
 	b.WriteString(packageLists())
 	b.WriteString(`
-  local commands="` + quotedWords(visibleNames()) + `"
+  local commands="` + quotedWords(commandWords()) + `"
   local global_flags="` + quotedWords(rootWords()) + `"
-  local flags_install="` + quotedWords(wordsFor("install")) + `"
-  local flags_remove="` + quotedWords(wordsFor("remove")) + `"
-  local flags_purge="` + quotedWords(wordsFor("purge")) + `"
-  local flags_autoremove="` + quotedWords(wordsFor("autoremove")) + `"
-  local flags_autopurge="` + quotedWords(wordsFor("autopurge")) + `"
-  local flags_upgrade="` + quotedWords(wordsFor("upgrade")) + `"
-  local flags_full_upgrade="` + quotedWords(wordsFor("full-upgrade")) + `"
-  local flags_safe_upgrade="` + quotedWords(wordsFor("safe-upgrade")) + `"
-  local flags_update="` + quotedWords(wordsFor("update")) + `"
-  local flags_download="` + quotedWords(wordsFor("download")) + `"
-  local flags_clean="` + quotedWords(wordsFor("clean")) + `"
-  local flags_list="` + quotedWords(wordsFor("list")) + `"
-  local flags_search="` + quotedWords(wordsFor("search")) + `"
-  local flags_show="` + quotedWords(wordsFor("show")) + `"
-  local flags_policy="` + quotedWords(wordsFor("policy")) + `"
-  local flags_history="` + quotedWords(wordsFor("history")) + `"
-  local flags_undo="` + quotedWords(wordsFor("undo")) + `"
-  local flags_redo="` + quotedWords(wordsFor("redo")) + `"
-  local flags_fetch="` + quotedWords(wordsFor("fetch")) + `"
-  local flags_completion="` + quotedWords(wordsFor("completion")) + `"
-  local flags_link="` + quotedWords(wordsFor("link")) + `"
-  local flags_log="` + quotedWords(wordsFor("log")) + `"
-
+`)
+	for _, c := range spec.VisibleCommands() {
+		fmt.Fprintf(&b, "  local flags_%s=\"%s\"\n", strings.ReplaceAll(c.Name, "-", "_"), quotedWords(wordsFor(c.Name)))
+	}
+	b.WriteString(`
   local prog="${COMP_WORDS[0]##*/}"
   local sub="" i
   case "$prog" in
@@ -161,11 +188,7 @@ _xbpretty() {
   if [[ -z "$sub" ]]; then
     for (( i=1; i < COMP_CWORD; i++ )); do
       case "${COMP_WORDS[i]}" in
-        install|remove|purge|autoremove|autopurge|upgrade|full-upgrade|safe-upgrade|update|download|clean|list|search|show|policy|history|undo|redo|fetch|completion|link|log)
-          sub="${COMP_WORDS[i]}"; break ;;
-        --)
-          break ;;
-      esac
+` + bashScanCase() + `      esac
     done
   fi
 
@@ -203,14 +226,25 @@ _xbpretty() {
   esac
   return 0
 }
-complete -F _xbpretty ` + quotedWords(aliasNames()) + `
+complete -F _xbpretty ` + quotedWords(completionNames()) + `
 `)
+	return b.String()
+}
+
+func zshScanCase() string {
+	var b strings.Builder
+	b.WriteString("        install|remove|purge|autoremove|autopurge|upgrade|full-upgrade|safe-upgrade|update|download|clean|list|search|show|policy|history|undo|redo|fetch|completion|link|log)\n")
+	b.WriteString("          sub=\"${words[i]}\"; break ;;\n")
+	for _, pair := range aliasPairs() {
+		fmt.Fprintf(&b, "        %s)\n          sub=%s; break ;;\n", pair[0], pair[1])
+	}
+	b.WriteString("        --)\n          break ;;\n")
 	return b.String()
 }
 
 func zshScript() string {
 	var b strings.Builder
-	b.WriteString(`#compdef ` + quotedWords(aliasNames()) + `
+	b.WriteString(`#compdef ` + quotedWords(completionNames()) + `
 # zsh completion for xbpretty
 
 _xbpretty_installed() {
@@ -253,19 +287,20 @@ _xbpretty() {
 		fmt.Fprintf(&b, "  local -a %s\n  %s=(%s)\n", varName, varName, quotedWords(wordsFor(c.Name)))
 	}
 	b.WriteString(`
-  local sub=""
-  case "${words[1]}" in
-    install|remove|purge|autoremove|autopurge|upgrade|full-upgrade|safe-upgrade|update|download|clean|list|search|show|policy|history|undo|redo|fetch|completion|link|log)
-      sub="${words[1]}" ;;
+  local prog="${words[1]##*/}"
+  local sub="" i
+  case "$prog" in
+    xbp-install) sub=install ;;
+    xbp-remove) sub=remove ;;
+    xbp-upgrade) sub=upgrade ;;
+    xbp-autoremove) sub=autoremove ;;
+    xbp-update) sub=update ;;
   esac
   if [[ -z "$sub" ]]; then
-    case "${words[0]##*/}" in
-      xbp-install) sub=install ;;
-      xbp-remove) sub=remove ;;
-      xbp-upgrade) sub=upgrade ;;
-      xbp-autoremove) sub=autoremove ;;
-      xbp-update) sub=update ;;
-    esac
+    for (( i=2; i < CURRENT; i++ )); do
+      case "${words[i]}" in
+` + zshScanCase() + `      esac
+    done
   fi
 
   if [[ -z "$sub" ]]; then
@@ -306,22 +341,54 @@ _xbpretty "$@"
 	return b.String()
 }
 
-func fishScript() string {
+// fishVerbFunction derives the effective verb from either a fixed-verb link
+// name or the first command/alias token on the line.
+func fishVerbFunction() string {
 	var b strings.Builder
-	b.WriteString(`# fish completion for xbpretty
-function __xbpretty_no_subcommand
+	b.WriteString(`function __xbpretty_verb
     set -l cmd (commandline -opc)
+    switch $cmd[1]
+`)
+	for _, pair := range [][2]string{
+		{"xbp-install", "install"}, {"xbp-remove", "remove"}, {"xbp-upgrade", "upgrade"},
+		{"xbp-autoremove", "autoremove"}, {"xbp-update", "update"},
+	} {
+		fmt.Fprintf(&b, "        case %s\n            echo %s\n            return\n", pair[0], pair[1])
+	}
+	b.WriteString(`    end
     for w in $cmd[2..-1]
         switch $w
 `)
 	for _, name := range visibleNames() {
-		fmt.Fprintf(&b, "            case %s\n                return 1\n", name)
+		fmt.Fprintf(&b, "            case %s\n                echo %s\n                return\n", name, name)
+	}
+	for _, pair := range aliasPairs() {
+		fmt.Fprintf(&b, "            case %s\n                echo %s\n                return\n", pair[0], pair[1])
 	}
 	b.WriteString(`        end
     end
-    return 0
 end
 
+function __xbpretty_no_subcommand
+    test -z (__xbpretty_verb)
+end
+`)
+	return b.String()
+}
+
+func fishCondition(commands []string) string {
+	if len(commands) == 1 {
+		return "test (__xbpretty_verb) = " + commands[0]
+	}
+	return "contains (__xbpretty_verb) " + strings.Join(commands, " ")
+}
+
+func fishScript() string {
+	var b strings.Builder
+	b.WriteString(`# fish completion for xbpretty
+`)
+	b.WriteString(fishVerbFunction())
+	b.WriteString(`
 function __xbpretty_installed
     LC_ALL=C xbps-query -l 2>/dev/null | awk '{print $2}' | string replace -r -- '-[^-]*$' ''
 end
@@ -345,12 +412,7 @@ function __xbpretty_history_ids
     printf '%s\n' last
 end
 
-function __xbpretty_log_names
-    string match -q -- '-*' (commandline -ct); and return 0
-    __xbpretty_installed
-end
-
-for __xbpretty_cmd in ` + quotedWords(aliasNames()) + `
+for __xbpretty_cmd in ` + quotedWords(completionNames()) + `
     complete -c $__xbpretty_cmd -f
 `)
 	for _, c := range spec.VisibleCommands() {
@@ -358,29 +420,27 @@ for __xbpretty_cmd in ` + quotedWords(aliasNames()) + `
 	}
 	b.WriteString(`
     complete -c $__xbpretty_cmd -l version -d 'print version'
-    complete -c $__xbpretty_cmd -s V -n 'not __fish_seen_subcommand_from list search' -d 'print version'
-    complete -c $__xbpretty_cmd -s V -n '__fish_seen_subcommand_from list search' -l virtual -d 'list virtual packages'
+    complete -c $__xbpretty_cmd -s V -n 'not contains (__xbpretty_verb) list search' -d 'print version'
 `)
 	// Global flags are completed after a subcommand too.
 	for _, f := range spec.Flags {
-		if !f.Global || f.Hidden || f.Refusal != "" || f.NoOp || f.Long == "version" {
+		if !f.Global || f.Hidden || f.Refusal != "" || f.Long == "version" {
 			continue
 		}
 		writeFishFlag(&b, "$__xbpretty_cmd", f, "")
 	}
 	// Per-command flags, grouped by the commands that accept each one.
 	for _, f := range spec.Flags {
-		if f.Global || f.Hidden || f.Refusal != "" || f.NoOp {
+		if f.Global || f.Hidden || f.Refusal != "" {
 			continue
 		}
-		cond := "__fish_seen_subcommand_from " + strings.Join(f.Commands, " ")
-		writeFishFlag(&b, "$__xbpretty_cmd", f, cond)
+		writeFishFlag(&b, "$__xbpretty_cmd", f, fishCondition(f.Commands))
 	}
 	b.WriteString(`
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from install download show list search' -a '(__xbpretty_available)'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from remove purge policy log' -a '(__xbpretty_installed)'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from history undo redo' -a '(__xbpretty_history_ids)'
-    complete -c $__xbpretty_cmd -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
+    complete -c $__xbpretty_cmd -n '` + fishCondition([]string{"install", "download", "show", "list", "search"}) + `' -a '(__xbpretty_available)'
+    complete -c $__xbpretty_cmd -n '` + fishCondition([]string{"remove", "purge", "policy", "log"}) + `' -a '(__xbpretty_installed)'
+    complete -c $__xbpretty_cmd -n '` + fishCondition([]string{"history", "undo", "redo"}) + `' -a '(__xbpretty_history_ids)'
+    complete -c $__xbpretty_cmd -n '` + fishCondition([]string{"completion"}) + `' -a 'bash zsh fish'
 end
 `)
 	return b.String()

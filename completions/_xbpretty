@@ -1,4 +1,4 @@
-#compdef xbp xbp-install xbp-remove xbp-upgrade xbp-autoremove xbp-update
+#compdef xbpretty xbp xbp-install xbp-remove xbp-upgrade xbp-autoremove xbp-update
 # zsh completion for xbpretty
 
 _xbpretty_installed() {
@@ -54,41 +54,41 @@ _xbpretty() {
   local -a globalflags
   globalflags=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui)
   local -a f_install
-  f_install=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --reinstall --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --no-log)
+  f_install=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --reinstall --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --no-log --no-fix-broken --no-install-recommends --no-install-suggests)
   local -a f_remove
-  f_remove=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --reinstall --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --no-log)
+  f_remove=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --no-log --no-fix-broken --no-install-recommends --no-install-suggests)
   local -a f_purge
-  f_purge=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --reinstall --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --no-log)
+  f_purge=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --no-log --no-fix-broken --no-install-recommends --no-install-suggests)
   local -a f_autoremove
-  f_autoremove=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --reinstall --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --no-log)
+  f_autoremove=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --no-log --no-fix-broken --no-install-recommends --no-install-suggests)
   local -a f_autopurge
-  f_autopurge=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --reinstall --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --no-log)
+  f_autopurge=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --no-log --no-fix-broken --no-install-recommends --no-install-suggests)
   local -a f_upgrade
-  f_upgrade=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --reinstall --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --print-uris --no-log)
+  f_upgrade=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --print-uris --no-log --no-fix-broken --no-install-recommends --no-install-suggests)
   local -a f_full_upgrade
-  f_full_upgrade=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --reinstall --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --print-uris --no-log)
+  f_full_upgrade=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --print-uris --no-log --no-fix-broken --no-install-recommends --no-install-suggests)
   local -a f_safe_upgrade
-  f_safe_upgrade=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --reinstall --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --print-uris --no-log)
+  f_safe_upgrade=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --print-uris --no-log --no-fix-broken --no-install-recommends --no-install-suggests)
   local -a f_update
-  f_update=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui)
+  f_update=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --no-log)
   local -a f_download
   f_download=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui)
   local -a f_clean
   f_clean=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --lists --fetch)
   local -a f_list
-  f_list=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --virtual -a --all-versions -i --installed -u --upgradable --description --summary -m --machine)
+  f_list=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --virtual -a --all-versions -A --all-arches -i --installed -u --upgradable --description --summary -m --machine)
   local -a f_search
-  f_search=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --virtual -a --all-versions -i --installed -u --upgradable --description --summary -m --machine -n --names --names-only)
+  f_search=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --virtual -a --all-versions -A --all-arches -i --installed -u --upgradable --description --summary -m --machine -n --names --names-only)
   local -a f_show
-  f_show=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui -a --all-versions -m --machine)
+  f_show=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui -a --all-versions -A --all-arches -m --machine)
   local -a f_policy
   f_policy=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui -m --machine)
   local -a f_history
   f_history=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --all)
   local -a f_undo
-  f_undo=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui)
+  f_undo=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --no-log)
   local -a f_redo
-  f_redo=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui)
+  f_redo=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --no-log)
   local -a f_fetch
   f_fetch=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui -c --country --dry-run --auto --https-only --non-free)
   local -a f_completion
@@ -98,19 +98,34 @@ _xbpretty() {
   local -a f_log
   f_log=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --limit)
 
-  local sub=""
-  case "${words[1]}" in
-    install|remove|purge|autoremove|autopurge|upgrade|full-upgrade|safe-upgrade|update|download|clean|list|search|show|policy|history|undo|redo|fetch|completion|link|log)
-      sub="${words[1]}" ;;
+  local prog="${words[1]##*/}"
+  local sub="" i
+  case "$prog" in
+    xbp-install) sub=install ;;
+    xbp-remove) sub=remove ;;
+    xbp-upgrade) sub=upgrade ;;
+    xbp-autoremove) sub=autoremove ;;
+    xbp-update) sub=update ;;
   esac
   if [[ -z "$sub" ]]; then
-    case "${words[0]##*/}" in
-      xbp-install) sub=install ;;
-      xbp-remove) sub=remove ;;
-      xbp-upgrade) sub=upgrade ;;
-      xbp-autoremove) sub=autoremove ;;
-      xbp-update) sub=update ;;
-    esac
+    for (( i=2; i < CURRENT; i++ )); do
+      case "${words[i]}" in
+        install|remove|purge|autoremove|autopurge|upgrade|full-upgrade|safe-upgrade|update|download|clean|list|search|show|policy|history|undo|redo|fetch|completion|link|log)
+          sub="${words[i]}"; break ;;
+        uninstall)
+          sub=remove; break ;;
+        dist-upgrade)
+          sub=full-upgrade; break ;;
+        info)
+          sub=show; break ;;
+        up)
+          sub=upgrade; break ;;
+        dist-up)
+          sub=upgrade; break ;;
+        --)
+          break ;;
+      esac
+    done
   fi
 
   if [[ -z "$sub" ]]; then

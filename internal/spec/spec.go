@@ -46,14 +46,17 @@ type Flag struct {
 
 // Command is one canonical command.
 type Command struct {
-	Name      string
-	Aliases   []string
-	Summary   string
-	UsageArgs string // e.g. "PKG..." or "[DIR]"
-	Args      ArgMode
-	Group     string
-	Hidden    bool
-	Flags     []string // canonical flag long names accepted in addition to globals
+	Name    string
+	Aliases []string // documented aliases, shown in help
+	// UndocumentedAliases resolve like Aliases but are never printed in help
+	// (FR-002 keeps up/dist-up as undocumented extensions).
+	UndocumentedAliases []string
+	Summary             string
+	UsageArgs           string // e.g. "PKG..." or "[DIR]"
+	Args                ArgMode
+	Group               string
+	Hidden              bool
+	Flags               []string // canonical flag long names accepted in addition to globals
 }
 
 // Groups keep the help and completions in a stable, readable order.
@@ -85,7 +88,7 @@ var Commands = []Command{
 		Flags: commandFlags("autoremove")},
 	{Name: "autopurge", Summary: "remove orphaned packages and their configuration files", Group: GroupTransaction,
 		Flags: commandFlags("autopurge")},
-	{Name: "upgrade", Aliases: []string{"up", "dist-up"}, Summary: "upgrade all installed packages", Group: GroupTransaction,
+	{Name: "upgrade", UndocumentedAliases: []string{"up", "dist-up"}, Summary: "upgrade all installed packages", Group: GroupTransaction,
 		Flags: commandFlags("upgrade")},
 	{Name: "full-upgrade", Aliases: []string{"dist-upgrade"}, Summary: "upgrade all installed packages (same as upgrade)", Group: GroupTransaction,
 		Flags: commandFlags("full-upgrade")},
@@ -118,12 +121,15 @@ var Commands = []Command{
 func commandFlags(name string) []string {
 	common := []string{
 		"dry-run", "yes", "assume-no", "download-only", "simple", "update", "no-update", "no-sync",
-		"purge", "reinstall", "auto-remove", "no-auto-remove",
+		"purge", "auto-remove", "no-auto-remove",
 		"full", "no-full", "safe", "no-log",
 		"box-style", "progress-bar", "no-progress", "no-progress-bar",
 		"allow-unauthenticated", "option", "fix-broken", "target-release",
 		"install-recommends", "install-suggests", "remove-essential", "remove-config",
 		"exclude", "no-fix-broken", "no-install-recommends", "no-install-suggests",
+	}
+	if name == "install" {
+		common = append(common, "reinstall")
 	}
 	for _, upgrade := range upgradeNames() {
 		if name == upgrade {
@@ -159,14 +165,14 @@ var Flags = []Flag{
 	{Long: "no-update", Kind: BoolFlag, Summary: "do not refresh the repository index", Commands: transactionNames()},
 	{Long: "no-sync", Kind: BoolFlag, Summary: "do not refresh the repository index", Commands: transactionNames()},
 	{Long: "purge", Kind: BoolFlag, Summary: "also remove configuration files", Commands: transactionNames()},
-	{Long: "reinstall", Kind: BoolFlag, Summary: "reinstall packages that are already installed", Commands: transactionNames()},
+	{Long: "reinstall", Kind: BoolFlag, Summary: "reinstall packages that are already installed", Commands: []string{"install"}},
 	{Long: "auto-remove", Aliases: []string{"autoremove"}, Kind: BoolFlag, Summary: "force the implicit orphan removal", Commands: transactionNames()},
 	{Long: "no-auto-remove", Aliases: []string{"no-autoremove"}, Kind: BoolFlag, Summary: "skip the implicit orphan removal", Commands: transactionNames()},
 	{Long: "full", Kind: BoolFlag, Summary: "accepted no-op; xbps -u never removes packages", Commands: transactionNames()},
 	{Long: "no-full", Kind: BoolFlag, Summary: "accepted no-op; wins over --full", Commands: transactionNames()},
 	{Long: "safe", Kind: BoolFlag, Summary: "accepted no-op for nala compatibility", Commands: transactionNames()},
 	{Long: "print-uris", Kind: BoolFlag, Summary: "print the plan's download URLs and stop", Commands: upgradeNames()},
-	{Long: "no-log", Kind: BoolFlag, Summary: "do not append to the transaction log", Commands: transactionNames()},
+	{Long: "no-log", Kind: BoolFlag, Summary: "do not append to the transaction log", Commands: append(transactionNames(), "update", "undo", "redo")},
 	// Superset flags kept from earlier revisions.
 	{Long: "box-style", Kind: ValueFlag, ValueName: "STYLE", Values: []string{"rounded", "classic", "ascii"}, Summary: "summary border style", Hidden: true, Commands: transactionNames()},
 	{Long: "progress-bar", Kind: OptionalValueFlag, ValueName: "BOOL", Summary: "force the progress widget on or off", Hidden: true, Commands: transactionNames()},
@@ -232,6 +238,11 @@ func LookupCommand(name string) (string, bool) {
 			return c.Name, true
 		}
 		for _, alias := range c.Aliases {
+			if alias == name {
+				return c.Name, true
+			}
+		}
+		for _, alias := range c.UndocumentedAliases {
 			if alias == name {
 				return c.Name, true
 			}
@@ -392,10 +403,10 @@ func Usage() string {
 	}
 	b.WriteString("\nCommand flags:\n")
 	for _, f := range Flags {
-		if f.Global || f.Hidden || f.Refusal != "" || f.NoOp {
+		if f.Global || f.Hidden || f.Refusal != "" {
 			continue
 		}
-		fmt.Fprintf(&b, "  %-28s %s (%s)\n", spelling(f), f.Summary, strings.Join(f.Commands, ", "))
+		fmt.Fprintf(&b, "  %-28s %s (%s)\n", flagUsage(f), f.Summary, strings.Join(f.Commands, ", "))
 	}
 	b.WriteString("\nArguments after -- are passed to xbps unchanged, in both the dry run and\n")
 	b.WriteString("the real run, e.g. xbpretty install -- -f pkg.\n")
@@ -403,6 +414,12 @@ func Usage() string {
 }
 
 func writeFlagLine(b *strings.Builder, f Flag) {
+	fmt.Fprintf(b, "  %-28s %s\n", flagUsage(f), f.Summary)
+}
+
+// flagUsage renders one flag with its value placeholder, shared by the global
+// and command flag sections.
+func flagUsage(f Flag) string {
 	line := spelling(f)
 	if f.Kind != BoolFlag {
 		line += " " + f.ValueName
@@ -410,7 +427,7 @@ func writeFlagLine(b *strings.Builder, f Flag) {
 			line += " (" + strings.Join(f.Values, "|") + ")"
 		}
 	}
-	fmt.Fprintf(b, "  %-28s %s\n", line, f.Summary)
+	return line
 }
 
 func spelling(f Flag) string {

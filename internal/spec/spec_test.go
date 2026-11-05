@@ -191,8 +191,12 @@ func TestRefusalTableIsExact(t *testing.T) {
 		if f.Refusal != tail {
 			t.Errorf("%s refusal = %q, want %q", name, f.Refusal, tail)
 		}
-		if !hasFlag(FlagsFor("fetch"), name) && name != "sources" {
-			// sources is checked through fetch like the other fetch refusals
+		owner := "install"
+		if name == "sources" || name == "debian" || name == "ubuntu" || name == "devuan" {
+			owner = "fetch"
+		}
+		if !hasFlag(FlagsFor(owner), name) {
+			t.Errorf("%s does not accept the refusal flag %q", owner, name)
 		}
 	}
 }
@@ -219,7 +223,8 @@ func TestUsageIsGeneratedAndHidesMoo(t *testing.T) {
 	if strings.Contains(text, "moo") {
 		t.Error("usage advertises the hidden moo command")
 	}
-	for _, want := range []string{"--help", "--version", "--color", "--config", "--tui", "--no-tui"} {
+	for _, want := range []string{"--help", "--version", "--color", "--config", "--tui", "--no-tui",
+		"--country COUNTRY", "--limit N", "--auto N", "--no-fix-broken", "--all-arches"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("usage does not mention %q", want)
 		}
@@ -252,5 +257,40 @@ func TestDryRunIsLongOnlyAndAssumeNoTakesTheShortN(t *testing.T) {
 	}
 	if hasFlag(FlagsFor("fetch"), "assume-no") {
 		t.Error("fetch accepts --assume-no")
+	}
+}
+
+func TestUndocumentedAliasesResolveButStayOutOfHelp(t *testing.T) {
+	for _, alias := range []string{"up", "dist-up"} {
+		got, ok := ResolveCommand(alias)
+		if !ok || got != "upgrade" {
+			t.Errorf("ResolveCommand(%q) = %q, %v; want upgrade", alias, got, ok)
+		}
+	}
+	text := Usage()
+	if strings.Contains(text, "alias: up, dist-up") || strings.Contains(text, "alias: up") {
+		t.Errorf("help prints the undocumented aliases:\n%s", text)
+	}
+	for _, documented := range []string{"uninstall", "info", "dist-upgrade"} {
+		if !strings.Contains(text, documented) {
+			t.Errorf("help does not print the documented alias %q", documented)
+		}
+	}
+}
+
+func TestFlagScopingFixes(t *testing.T) {
+	if hasFlag(FlagsFor("remove"), "reinstall") {
+		t.Error("remove accepts --reinstall; FR-007 scopes it to install")
+	}
+	if hasFlag(FlagsFor("upgrade"), "reinstall") {
+		t.Error("upgrade accepts --reinstall; FR-007 scopes it to install")
+	}
+	if !hasFlag(FlagsFor("install"), "reinstall") {
+		t.Error("install does not accept --reinstall")
+	}
+	for _, cmd := range []string{"install", "update", "undo", "redo"} {
+		if !hasFlag(FlagsFor(cmd), "no-log") {
+			t.Errorf("%s does not accept --no-log", cmd)
+		}
 	}
 }

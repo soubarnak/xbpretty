@@ -14,9 +14,10 @@ type options struct {
 	// Transaction state kept from rev 5 and used by the transaction core.
 	dryRun      bool
 	yes         bool
-	assumeNo    bool // -n's rev 6 meaning; the dry run is --dry-run (FR-015)
+	assumeNo    bool // --assume-no; -n is its rev 6 short form
 	verbose     bool
 	noSync      bool
+	noUpdate    bool
 	noLog       bool
 	color       string // "", "auto", "always" or "never"
 	version     bool
@@ -30,46 +31,46 @@ type options struct {
 	limit       int  // --limit N for `log`; 0 means not given
 	boxStyle    string
 	progressBar *bool
-	configPath  string // --config FILE; empty means the default user layer
+	configPath  string // --config FILE; empty means the default layers
 
-	// Rev 6 globals.
-	debug      bool
-	noColor    bool
-	tuiSet     bool
-	tui        bool
-	noTui      bool
-	historyDir string
+	// Rev 6 globals and resolved settings inputs.
+	debug         bool
+	noColor       bool
+	update        bool
+	simple        bool
+	full          bool
+	noFull        bool
+	autoRemove    *bool // nil when neither flag was given
+	autoRemovePos bool
+	autoRemoveNeg bool
+	historyDir    string
 
 	// Command flags.
-	country      []string
-	downloadOnly bool
-	simple       bool
-	updateFlag   bool
-	purge        bool
-	reinstall    bool
-	autoRemove   bool
-	noAutoRemove bool
-	full         bool
-	noFull       bool
-	safe         bool
-	printURIs    bool
-	machine      bool
-	allVersions  bool
-	allArches    bool
-	installed    bool
-	upgradable   bool
-	virtual      bool
-	description  bool
-	summaryFlag  bool
-	namesOnly    bool
-	lists        bool
-	cleanFetch   bool
-	clearAll     bool
-	auto         int
-	httpsOnly    bool
-	nonFree      bool
-	refusals     []string
-	explicit     map[string]bool
+	country              []string
+	countrySpelling      string
+	countryBeforeCommand bool
+	downloadOnly         bool
+	purge                bool
+	reinstall            bool
+	safe                 bool
+	printURIs            bool
+	machine              bool
+	allVersions          bool
+	allArches            bool
+	installed            bool
+	upgradable           bool
+	virtual              bool
+	description          bool
+	summaryFlag          bool
+	namesOnly            bool
+	lists                bool
+	cleanFetch           bool
+	clearAll             bool
+	auto                 int
+	httpsOnly            bool
+	nonFree              bool
+	refusals             []string
+	explicit             map[string]bool
 }
 
 // usageError is a parser error with an optional second stderr line, used for
@@ -123,6 +124,7 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 			if err != nil {
 				return nil, err
 			}
+			occ.beforeCommand = !commandKnown
 			i = next
 			occurrences = append(occurrences, occ)
 		case len(arg) > 1 && arg[0] == '-':
@@ -215,7 +217,7 @@ func parseShortFlags(argv []string, i int, commandKnown bool) ([]occurrence, int
 			if c == 'c' && !commandKnown {
 				return nil, i, errCountryHint()
 			}
-			value := body[j+1:]
+			value := strings.TrimPrefix(body[j+1:], "=")
 			hasValue := value != ""
 			if !hasValue {
 				if i+1 >= len(argv) {
@@ -274,7 +276,7 @@ func globalShortOrFlag(c rune) bool {
 }
 
 // applyOccurrences validates each flag against the resolved command and folds
-// it into options, then enforces FR-003's conflict pairs.
+// it into options, then enforces FR-003's conflict pairs and the -c scope.
 func applyOccurrences(o *options, occurrences []occurrence) error {
 	for _, occ := range occurrences {
 		f, err := resolveOccurrence(o.command, occ)
@@ -288,7 +290,30 @@ func applyOccurrences(o *options, occurrences []occurrence) error {
 			return err
 		}
 	}
+	if err := o.checkCountry(); err != nil {
+		return err
+	}
 	return checkConflicts(o)
+}
+
+// checkCountry reserves -c/--country for fetch after the command: on any
+// other command, or before the command word, it is an unknown flag with the
+// FR-059 hint.
+func (o *options) checkCountry() error {
+	if len(o.country) == 0 {
+		return nil
+	}
+	if o.command != "fetch" || o.countryBeforeCommand {
+		msg := "unknown flag -c"
+		if o.countrySpelling == "country" {
+			msg = "unknown flag --country"
+		}
+		return &usageError{
+			msg:  msg,
+			hint: "-c is fetch's --country; config is --config",
+		}
+	}
+	return nil
 }
 
 // resolveOccurrence maps a short flag to its table entry for this command.
@@ -378,27 +403,23 @@ func applyFlag(o *options, f spec.Flag, occ occurrence) error {
 		o.explicit["color"] = true
 	case "no-color":
 		o.noColor = true
-		o.explicit["no-color"] = true
+		o.explicit["no_color"] = true
 	case "tui":
-		o.tuiSet = true
-		o.tui = true
 		o.explicit["tui"] = true
 	case "no-tui":
-		o.tuiSet = true
-		o.noTui = true
-		o.explicit["no-tui"] = true
+		o.explicit["no_tui"] = true
 	case "history-dir":
 		if occ.value == "" {
 			return fmt.Errorf("--history-dir needs a directory")
 		}
 		o.historyDir = occ.value
-		o.explicit["history-dir"] = true
+		o.explicit["history_dir"] = true
 	case "dry-run":
 		o.dryRun = true
 		o.explicit["dry-run"] = true
 	case "assume-no":
 		o.assumeNo = true
-		o.explicit["assume-no"] = true
+		o.explicit["assume_no"] = true
 		// Compatibility until the transaction core (#62) implements the
 		// refusal: rev 5 callers used -n for the dry run, so -n still selects
 		// the plan while rev 6's meaning is recorded for #62.
@@ -413,17 +434,17 @@ func applyFlag(o *options, f spec.Flag, occ occurrence) error {
 		o.simple = true
 		o.explicit["simple"] = true
 	case "update":
-		o.updateFlag = true
+		o.update = true
 		o.noSync = false
 		o.explicit["update"] = true
 		o.explicit["sync"] = true
 	case "no-update":
+		o.noUpdate = true
 		o.noSync = true
-		o.explicit["no-update"] = true
 		o.explicit["sync"] = true
 	case "no-sync":
+		o.noUpdate = true
 		o.noSync = true
-		o.explicit["no-sync"] = true
 		o.explicit["sync"] = true
 	case "purge":
 		o.purge = true
@@ -432,20 +453,25 @@ func applyFlag(o *options, f spec.Flag, occ occurrence) error {
 		o.reinstall = true
 		o.explicit["reinstall"] = true
 	case "auto-remove":
-		o.autoRemove = true
-		o.explicit["auto-remove"] = true
+		val := true
+		o.autoRemove = &val
+		o.autoRemovePos = true
+		o.explicit["auto_remove"] = true
 	case "no-auto-remove":
-		o.noAutoRemove = true
-		o.explicit["no-auto-remove"] = true
+		val := false
+		o.autoRemove = &val
+		o.autoRemoveNeg = true
+		o.explicit["auto_remove"] = true
 	case "full":
 		o.full = true
 		o.explicit["full"] = true
 	case "no-full":
 		o.noFull = true
-		o.explicit["no-full"] = true
+		o.explicit["no_full"] = true
 	case "safe":
 		o.safe = true
-		o.explicit["safe"] = true
+		o.full = true
+		o.explicit["full"] = true
 	case "print-uris":
 		o.printURIs = true
 		o.explicit["print-uris"] = true
@@ -481,7 +507,12 @@ func applyFlag(o *options, f spec.Flag, occ occurrence) error {
 			return fmt.Errorf("-c/--country needs a value")
 		}
 		o.country = append(o.country, occ.value)
-		o.explicit["country"] = true
+		if occ.short == 'c' {
+			o.countrySpelling = "c"
+		} else {
+			o.countrySpelling = "country"
+		}
+		o.countryBeforeCommand = occ.beforeCommand
 	case "all-versions":
 		o.allVersions = true
 		o.explicit["all-versions"] = true
@@ -545,8 +576,6 @@ func applyFlag(o *options, f spec.Flag, occ occurrence) error {
 	case "no-fix-broken", "no-install-recommends", "no-install-suggests":
 		o.explicit[f.Long] = true
 	}
-	// Refusal flags only need to be recorded; ensure the parser still accepts
-	// a value they carry.
 	return nil
 }
 
@@ -562,22 +591,23 @@ func validateConfigPath(value string) error {
 
 // checkConflicts enforces FR-003's conflict pairs.
 func checkConflicts(o *options) error {
-	pairs := []struct {
-		a, b string
-		msg  string
-	}{
-		{"color", "no-color", "--color and --no-color cannot be used together"},
-		{"tui", "no-tui", "--tui and --no-tui cannot be used together"},
-		{"yes", "assume-no", "--yes and --assume-no cannot be used together"},
-		{"auto-remove", "no-auto-remove", "--auto-remove and --no-auto-remove cannot be used together"},
+	if o.noColor && o.explicit["color"] {
+		return fmt.Errorf("--color and --no-color are mutually exclusive")
 	}
-	for _, p := range pairs {
-		if o.explicit[p.a] && o.explicit[p.b] {
-			return fmt.Errorf("%s", p.msg)
-		}
+	if o.explicit["tui"] && o.explicit["no_tui"] {
+		return fmt.Errorf("--tui and --no-tui are mutually exclusive")
 	}
-	if o.explicit["update"] && (o.explicit["no-update"] || o.explicit["no-sync"]) {
-		return fmt.Errorf("--update and --no-update/--no-sync cannot be used together")
+	if o.yes && o.assumeNo {
+		return fmt.Errorf("-y and --assume-no are mutually exclusive")
+	}
+	if o.update && o.noUpdate {
+		return fmt.Errorf("--update and --no-update/--no-sync are mutually exclusive")
+	}
+	if o.autoRemovePos && o.autoRemoveNeg {
+		return fmt.Errorf("--auto-remove and --no-auto-remove are mutually exclusive")
+	}
+	if o.printURIs && (o.dryRun || o.downloadOnly) {
+		return fmt.Errorf("--print-uris cannot be combined with --dry-run or --download-only")
 	}
 	return nil
 }
