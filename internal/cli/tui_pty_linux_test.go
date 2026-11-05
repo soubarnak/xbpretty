@@ -46,6 +46,8 @@ func tuiOldQuery(t *testing.T, dir string) string {
 	script := `#!/bin/sh
 case "$*" in
   *"-H"*) exit 0 ;;
+  *"-l"*) exit 0 ;;
+  *"-m"*) exit 0 ;;
   *pkgver,installed_size*)
     case "$*" in
       *libfoo*) printf 'libfoo-1.2_1\n'; exit 0 ;;
@@ -103,6 +105,7 @@ func tuiScreenEnvMode(t *testing.T, dir, query, mode, color string) map[string]s
 		"XB_STUB_STDERR":          "",
 		"XB_STUB_HOLD":            "",
 		"XB_STUB_OLD":             "",
+		"XB_STUB_REMOVE_STDOUT":   "",
 		"XBPRETTY_TEST_EUID":      "0",
 		"XBPRETTY_TEST_TRUST_UID": strconv.Itoa(os.Getuid()),
 		"TERM":                    "xterm-256color",

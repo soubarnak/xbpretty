@@ -74,7 +74,7 @@ const (
 
 // maybeRunSummaryScreen opens S1 when every gate and the entry floor pass. It
 // returns the outcome; the caller keeps the text path when it is unavailable.
-func (st *state) maybeRunSummaryScreen(opts *options, rows []xbps.Row) (screenOutcome, int) {
+func (st *state) maybeRunSummaryScreen(opts *options, cmd string, rows []xbps.Row) (screenOutcome, int) {
 	if !summaryScreenAllowed(st.gateFor(opts, rows)) {
 		return screenUnavailable, -1
 	}
@@ -87,7 +87,7 @@ func (st *state) maybeRunSummaryScreen(opts *options, rows []xbps.Row) (screenOu
 	if w, h, err := term.Size(out); err != nil || w < 60 || h < 18 {
 		return screenUnavailable, -1
 	}
-	return st.runSummaryScreen(out, st.planToTui(rows))
+	return st.runSummaryScreen(out, st.planToTui(cmd, rows))
 }
 
 // runSummaryScreen owns the S1 loop: enter, draw, key/resize/signal handling,
@@ -167,12 +167,8 @@ func (st *state) refuseScreen() {
 
 // planToTui converts the grouping and lookups the text summary already needs
 // into the S1 model. #77 reuses the renderer with History = true.
-func (st *state) planToTui(rows []xbps.Row) *tui.SummaryModel {
-	command := ""
-	if st.opts != nil {
-		command = st.opts.command
-	}
-	return tuiModelFromSummary(st.planToSummary(rows), command, st.unit)
+func (st *state) planToTui(cmd string, rows []xbps.Row) *tui.SummaryModel {
+	return tuiModelFromSummary(st.planToSummary(cmd, rows), cmd, st.unit)
 }
 
 // tuiModelFromSummary is the testable conversion; planToTui is the state-bound

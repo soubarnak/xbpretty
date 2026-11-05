@@ -18,6 +18,7 @@ import (
 func TestAC005InstallArgvAndReinstallGuard(t *testing.T) {
 	t.Run("plain install", func(t *testing.T) {
 		e := newEnv(t)
+		e.disableAutoRemove()
 		e.root = true
 		e.tty = true
 		e.setAnswers("\n")
@@ -32,6 +33,7 @@ func TestAC005InstallArgvAndReinstallGuard(t *testing.T) {
 
 	t.Run("reinstall adds -f", func(t *testing.T) {
 		e := newEnv(t)
+		e.disableAutoRemove()
 		e.root = true
 		e.tty = true
 		e.setAnswers("\n")
@@ -119,6 +121,7 @@ func TestAC006RemoveFiltersAndPurgeArgv(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			e := newEnv(t)
+			e.disableAutoRemove()
 			e.root = true
 			e.tty = true
 			e.setAnswers("\n")
@@ -630,6 +633,7 @@ func TestAC010PromptOverAPTY(t *testing.T) {
 	for _, answer := range proceed {
 		t.Run(fmt.Sprintf("proceed %q", answer), func(t *testing.T) {
 			e := newEnv(t)
+			e.disableAutoRemove()
 			e.root = true
 			code, _, errs := ptyAnswers(t, e, answer, []string{"xbpretty", "install", "figlet"}...)
 			if code != 0 {
@@ -648,6 +652,7 @@ func TestAC010PromptOverAPTY(t *testing.T) {
 	for _, answer := range refuse {
 		t.Run(fmt.Sprintf("refuse %q", answer), func(t *testing.T) {
 			e := newEnv(t)
+			e.disableAutoRemove()
 			e.root = true
 			code, _, errs := ptyAnswers(t, e, answer, []string{"xbpretty", "install", "figlet"}...)
 			if code != 1 {
@@ -666,6 +671,7 @@ func TestAC010PromptOverAPTY(t *testing.T) {
 
 	t.Run("invalid answer is not re-prompted", func(t *testing.T) {
 		e := newEnv(t)
+		e.disableAutoRemove()
 		e.root = true
 		code, _, errs := ptyAnswers(t, e, "x\n", []string{"xbpretty", "install", "figlet"}...)
 		if code != 1 {

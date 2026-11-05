@@ -12,7 +12,10 @@ import (
 	"github.com/soubarnak/xbpretty/internal/xbps"
 )
 
-// execute streams one xbps command live (FR-014) and handles its outcome.
+// execute streams one xbps command live (FR-014) and handles its outcome. It
+// applies no post-success side effects: the driver's commit step
+// (executePhases/completeTransaction) runs them once the whole command, which
+// may be several phases, has succeeded.
 func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 	var totalDl int64
 	for _, row := range rows {
@@ -46,14 +49,6 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 	}
 	stderr := st.r.lastStderr
 	if code == 0 {
-		// FR-013: every real execution that exits 0 is logged, and `update`
-		// is one of them even though it produces no rows of its own.
-		if st.log {
-			st.writeLog(cmd, args, rows)
-		}
-		if hint := rebootHint(rows); hint != "" {
-			fmt.Fprintf(st.stderr, "hint: %s\n", hint)
-		}
 		return exitOK
 	}
 
@@ -76,6 +71,41 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 		st.revdepsHint(optsArgs(rows))
 	}
 	return code
+}
+
+// xbpsPhase is one child invocation of a command. A replay has two phases
+// (restore, then remove); every other command has one.
+type xbpsPhase struct {
+	bin  string
+	args []string
+	rows []xbps.Row
+}
+
+// executePhases runs a command's xbps work in order and applies the
+// post-success side effects exactly once, after every phase exits 0. A replay
+// must never publish a history entry between its restore and removal phases
+// (FR-031, FR-033).
+func (st *state) executePhases(cmd string, logArgs []string, allRows []xbps.Row, phases ...xbpsPhase) int {
+	for _, phase := range phases {
+		if code := st.execute(cmd, phase.bin, phase.args, phase.rows...); code != 0 {
+			return code
+		}
+	}
+	st.completeTransaction(cmd, logArgs, allRows)
+	return exitOK
+}
+
+// completeTransaction is the one post-success step: history first, then the
+// line log, then the reboot hint (FR-031). It runs only when the whole
+// command succeeded.
+func (st *state) completeTransaction(cmd string, logArgs []string, rows []xbps.Row) {
+	st.finishHistory()
+	if st.log {
+		st.writeLog(cmd, logArgs, rows)
+	}
+	if hint := rebootHint(rows); hint != "" {
+		fmt.Fprintf(st.stderr, "hint: %s\n", hint)
+	}
 }
 
 // optsArgs returns the package names targeted by a remove plan.
