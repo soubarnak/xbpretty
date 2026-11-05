@@ -1,0 +1,6 @@
+INSERT  Last completed: libfoo-1.3_1.x86_64.xbps
+INSERT  Last completed: libbar-0.9_3.x86_64.xbps
+INSERT  Last completed: libbaz-2.0_2.x86_64.xbps
+INSERT  Last completed: glibc-2.41_1.x86_64.xbps
+INSERT  Last completed: figlet-2.2.5_6.x86_64.xbps
+INSERT  Last completed: cowsay-3.8.4_1.x86_64.xbps

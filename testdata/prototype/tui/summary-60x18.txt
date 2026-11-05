@@ -1,0 +1,18 @@
+┏━━━━━━━━━━━━━━━━━━━━  xbpretty Undo  ━━━━━━━━━━━━━━━━━━━━━┓
+┃ Remove AutoRemove Install Upgrade Held                   ┃
+┃ ━━━━━━                                                   ┃
+┃ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┏━┓ ┃
+┃ ┃      Package:          Version:         Size:     ┃┃█┃ ┃
+┃ ┃❯     nano               9.2_1           3 MiB     ┃┃ ┃ ┃
+┃ ┃      curl              8.17.0_1         2 MiB     ┃┃ ┃ ┃
+┃ ┃                                                   ┃┃ ┃ ┃
+┃ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━┛ ┃
+┃ Remove:             2 Pkgs  (↑) move up | (↓) move down  ┃
+┃ AutoRemove:         1 Pkgs  (→) next tab | (←) previous  ┃
+┃ Install:            2 Pkgs              tab              ┃
+┃ Upgrade:            1 Pkgs (s) package info | (q) quit | ┃
+┃ Held:               1 Pkgs       (y) start upgrade       ┃
+┃                                                          ┃
+┃ Total download size:12 MiB                               ┃
+┃ Disk space to free:  2 MiB                               ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
