@@ -227,8 +227,7 @@ func printUsageError(err io.Writer, parseErr error) {
 	usage(err)
 }
 
-// dispatch routes a parsed command to its implementation. Commands whose
-// owning ticket has not landed yet go to the single runUnimplemented seam.
+// dispatch routes a parsed command to its implementation.
 func (st *state) dispatch(opts *options) int {
 	switch opts.command {
 	case "log":
@@ -320,6 +319,10 @@ func validateInvocation(opts *options, err io.Writer) (int, bool) {
 			return exitUsage, true
 		}
 	case "history":
+		if opts.clearAll && opts.subcommand != "clear" {
+			fmt.Fprintln(err, "xbpretty: --all is only for history clear")
+			return exitUsage, true
+		}
 		if opts.subcommand == "" || opts.subcommand == "info" || opts.subcommand == "show" {
 			if len(args) > 1 {
 				fmt.Fprintln(err, "xbpretty: history takes no package arguments")
@@ -345,6 +348,12 @@ func validateInvocation(opts *options, err io.Writer) (int, bool) {
 			}
 		}
 	case "undo", "redo":
+		if opts.dashDash {
+			// Replays build their own pinned argv; a passthrough has no place
+			// in it (FR-033, FR-035).
+			fmt.Fprintf(err, "xbpretty: %s takes no arguments and no -- passthrough\n", opts.command)
+			return exitUsage, true
+		}
 		if len(args) > 1 {
 			fmt.Fprintf(err, "xbpretty: %s takes at most one entry id or 'last'\n", opts.command)
 			return exitUsage, true

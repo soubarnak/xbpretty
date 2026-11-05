@@ -349,7 +349,7 @@ func resolveOccurrence(command string, occ occurrence) (spec.Flag, error) {
 		case command == "fetch":
 			// FR-046: fetch has --dry-run but not the short -n.
 			return spec.Flag{}, fmt.Errorf("unknown flag -n")
-		case spec.IsTransaction(command):
+		case spec.Accepts(command, "assume-no"):
 			f, _ := spec.LookupFlag("assume-no")
 			return f, nil
 		default:

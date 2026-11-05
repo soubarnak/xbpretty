@@ -2,7 +2,7 @@ package cli
 
 import (
 	"encoding/json"
-	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -209,6 +209,13 @@ func TestAC026UndoInstallRemovesForcedAndWritesOneReplayEntry(t *testing.T) {
 	if len(linesInLog) != 1 || !strings.Contains(linesInLog[0], " undo figlet-2.2.5_6") {
 		t.Errorf("line log = %q, want one undo line naming the removed pkgver", raw)
 	}
+	replayRaw, err := os.ReadFile(filepath.Join(store, "2.json"))
+	if err != nil {
+		t.Fatalf("reading the replay entry: %v", err)
+	}
+	if strings.Contains(string(replayRaw), "config_files_only") {
+		t.Errorf("a replay recorded config_files_only:\n%s", replayRaw)
+	}
 }
 
 // TestUndoUpgradeRestoresExactOldVersionFromCache pins FR-033/FR-034: an
@@ -328,8 +335,10 @@ func TestAC027PreflightFailsClosedBeforeAnyMutation(t *testing.T) {
 	}
 	lines := readCommandLog(t, dir)
 	for _, line := range lines {
-		if strings.HasPrefix(line, "xbps-install -y") || strings.HasPrefix(line, "xbps-remove -y") {
-			t.Errorf("a mutating child ran before the failed preflight: %q", line)
+		// Before any mutation only the read-only snapshot and repository
+		// lookups may run; anything else means the preflight was not closed.
+		if !strings.HasPrefix(line, "xbps-query ") {
+			t.Errorf("a non-read-only child ran before the failed preflight: %q", line)
 		}
 	}
 	if got := entryFileCount(t, store); got != 1 {
@@ -893,9 +902,6 @@ func TestReplayProgressCountsAsOneEntryPerReplay(t *testing.T) {
 	}
 }
 
-// keep fmt imported for helpers added by future slices.
-var _ = fmt.Sprintf
-
 // TestRedoMapsRemoveAndPurge pins FR-035's redo mapping for the remove-family
 // operations: Remove uninstalls plainly, Purge uninstalls with -f.
 func TestRedoMapsRemoveAndPurge(t *testing.T) {
@@ -996,5 +1002,272 @@ func TestAlreadyEqualReplayLeavesTheAutomaticBitAlone(t *testing.T) {
 	}
 	if lines := readCommandLog(t, dir); commandIndex(lines, "xbps-pkgdb") >= 0 {
 		t.Errorf("an already-equal replay changed the automatic bit:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// TestAC027OneLinePerUnrestorablePackage pins the per-package half of the
+// fail-closed message.
+func TestAC027OneLinePerUnrestorablePackage(t *testing.T) {
+	bin := taggedBinary(t)
+	dir := t.TempDir()
+	store := historyDirOf(dir)
+	writeReplayEntry(t, store, history.Entry{
+		Command: []string{"install", "figlet", "nano", "-y"},
+		Packages: []history.Transition{
+			replayTransition(history.OpUpgrade, "figlet", "2.2.5_6", "2.2.6_1"),
+			replayTransition(history.OpUpgrade, "nano", "8.0_1", "8.1_1"),
+		},
+	})
+	env := replayEnv(t, dir,
+		"uu figlet-2.2.6_1 figlet\nuu nano-8.1_1 nano\n", "").
+		with("XB_STUB_REPO_MISSING", "figlet-2.2.5_6 nano-8.0_1")
+
+	_, errs, code := runBinary(t, bin, env, "undo", "1", "-y")
+	if code != 1 {
+		t.Fatalf("undo exit = %d, want 1\n%s", code, errs)
+	}
+	want := "xbpretty: undo cannot restore figlet-2.2.5_6.x86_64: not in /var/cache/xbps and no configured repository serves that version\n" +
+		"xbpretty: undo cannot restore nano-8.0_1.x86_64: not in /var/cache/xbps and no configured repository serves that version\n"
+	if errs != want {
+		t.Errorf("stderr = %q, want one line per package %q", errs, want)
+	}
+	for _, line := range readCommandLog(t, dir) {
+		if !strings.HasPrefix(line, "xbps-query ") {
+			t.Errorf("a non-read-only child ran before the failed preflight: %q", line)
+		}
+	}
+}
+
+// TestReplayRejectsMaliciousEntryMetadata pins the privileged-path guard: a
+// crafted name cannot escape the cache or be read as an xbps flag, and the
+// refusal happens before any child runs.
+func TestReplayRejectsMaliciousEntryMetadata(t *testing.T) {
+	bin := taggedBinary(t)
+	for _, name := range []string{"../evil", "-f", ".hidden"} {
+		t.Run(strings.ReplaceAll(name, "/", "_"), func(t *testing.T) {
+			dir := t.TempDir()
+			store := historyDirOf(dir)
+			if err := os.MkdirAll(store, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			entry := map[string]any{
+				"schema_version":    1,
+				"id":                1,
+				"started_at":        "2026-11-05T10:00:00Z",
+				"finished_at":       "2026-11-05T10:00:01Z",
+				"status":            "Applied",
+				"requested_by":      "tester (0)",
+				"command":           []string{"install", name},
+				"requested_targets": []string{name},
+				"implicit":          false,
+				"replay_of":         nil,
+				"replay_kind":       nil,
+				"packages": []any{map[string]any{
+					"name": name, "arch": "x86_64",
+					"repository": "file:///repo", "size": 1, "installed_size": 1,
+					"operation": "Install",
+					"before":    nil,
+					"after":     map[string]any{"version": "1.0_1", "auto_installed": false, "hold": false, "repolock": false},
+				}},
+			}
+			raw, err := json.Marshal(entry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(store, "1.json"), raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			env := replayEnv(t, dir, "uu pkg-1.0_1 pkg\n", "")
+			_, errs, code := runBinary(t, bin, env, "undo", "1", "-y")
+			if code != 1 {
+				t.Fatalf("undo exit = %d, want 1\n%s", code, errs)
+			}
+			if !strings.Contains(errs, "invalid name") {
+				t.Errorf("missing the fail-closed metadata line:\n%s", errs)
+			}
+			if lines := readCommandLog(t, dir); len(lines) != 0 {
+				t.Errorf("a crafted entry ran a child:\n%s", strings.Join(lines, "\n"))
+			}
+			if out, _, code := runBinary(t, bin, env.readOnlyEnv(), "history"); code != 1 || !strings.Contains(out+errs, "invalid name") {
+				t.Errorf("history did not fail closed on the crafted entry: %d %q", code, out)
+			}
+		})
+	}
+}
+
+// TestReplayRindexRetriesWithForce pins FR-034's -f retry when the index
+// already has the entry.
+func TestReplayRindexRetriesWithForce(t *testing.T) {
+	bin := taggedBinary(t)
+	dir := t.TempDir()
+	writeReplayEntry(t, historyDirOf(dir), history.Entry{
+		Command:  []string{"install", "figlet", "-y"},
+		Packages: []history.Transition{replayTransition(history.OpUpgrade, "figlet", "2.2.5_6", "2.2.6_1")},
+	})
+	seedCacheArchive(t, dir, "figlet-2.2.5_6.x86_64.xbps")
+	env := replayEnv(t, dir, "uu figlet-2.2.6_1 figlet\n", "uu figlet-2.2.5_6 figlet\n").
+		with("XB_STUB_RINDEX_FAIL_ONCE_MARK", filepath.Join(dir, "rindex-failed-once"))
+
+	out, errs, code := runBinary(t, bin, env, "undo", "1", "-y")
+	if code != 0 {
+		t.Fatalf("undo exit = %d\nstdout:\n%s\nstderr:\n%s", code, out, errs)
+	}
+	lines := readCommandLog(t, dir)
+	if got := countCommands(lines, "xbps-rindex -a "); got != 1 {
+		t.Errorf("unforced rindex attempts = %d, want 1", got)
+	}
+	if got := countCommands(lines, "xbps-rindex -f -a "); got != 1 {
+		t.Errorf("forced rindex attempts = %d, want 1; commands:\n%s", got, strings.Join(lines, "\n"))
+	}
+}
+
+// TestReplayCleansTheReplayRepoAfterChildFailure pins FR-034's cleanup on
+// every exit path, including a failed restore child.
+func TestReplayCleansTheReplayRepoAfterChildFailure(t *testing.T) {
+	bin := taggedBinary(t)
+	dir := t.TempDir()
+	writeReplayEntry(t, historyDirOf(dir), history.Entry{
+		Command:  []string{"install", "figlet", "-y"},
+		Packages: []history.Transition{replayTransition(history.OpUpgrade, "figlet", "2.2.5_6", "2.2.6_1")},
+	})
+	seedCacheArchive(t, dir, "figlet-2.2.5_6.x86_64.xbps")
+	env := replayEnv(t, dir, "uu figlet-2.2.6_1 figlet\n", "uu figlet-2.2.5_6 figlet\n").
+		with("XB_STUB_RUN_EXIT", "9")
+
+	out, errs, code := runBinary(t, bin, env, "undo", "1", "-y")
+	if code != 9 {
+		t.Fatalf("undo exit = %d, want 9\nstdout:\n%s\nstderr:\n%s", code, out, errs)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(dir, "replay-tmp", "xbpretty-replay-*")); len(matches) != 0 {
+		t.Errorf("replay repositories survived a failed child: %v", matches)
+	}
+}
+
+// TestRedoConfigureHeldOnlyIsRefused pins the no-replayable-row rule for redo
+// as well as undo.
+func TestRedoConfigureHeldOnlyIsRefused(t *testing.T) {
+	bin := taggedBinary(t)
+	dir := t.TempDir()
+	writeReplayEntry(t, historyDirOf(dir), history.Entry{
+		Command: []string{"install", "figlet"},
+		Packages: []history.Transition{
+			replayTransition(history.OpConfigure, "figlet", "2.2.5_6", "2.2.5_6"),
+			replayTransition(history.OpHeld, "nano", "", ""),
+		},
+	})
+	env := replayEnv(t, dir, "uu figlet-2.2.5_6 figlet\n", "")
+	_, errs, code := runBinary(t, bin, env, "redo", "1", "-y")
+	if code != 1 || !strings.Contains(errs, "xbpretty: history entry 1 has no package changes to replay") {
+		t.Errorf("redo no-row = %d, stderr %q", code, errs)
+	}
+}
+
+// TestClearAllCorruptStoreIsTheEscapeHatch pins FR-029: clear --all does not
+// need to parse entries, so a corrupt store can still be cleared.
+func TestClearAllCorruptStoreIsTheEscapeHatch(t *testing.T) {
+	bin := taggedBinary(t)
+	dir := t.TempDir()
+	store := historyDirOf(dir)
+	if err := os.MkdirAll(store, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "1.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := historyRunEnv(t, dir)
+	out, errs, code := runBinary(t, bin, env, "history", "clear", "--all")
+	if code != 0 || out != "Cleared 1 history entry.\n" {
+		t.Errorf("clear --all corrupt = %d, stdout %q, stderr %q", code, out, errs)
+	}
+	if _, err := os.Stat(filepath.Join(store, "1.json")); !os.IsNotExist(err) {
+		t.Errorf("corrupt entry survived clear --all: %v", err)
+	}
+}
+
+// TestClearLastOnEmptyStore pins the empty-store last selector.
+func TestClearLastOnEmptyStore(t *testing.T) {
+	bin := taggedBinary(t)
+	dir := t.TempDir()
+	env := historyRunEnv(t, dir)
+	_, errs, code := runBinary(t, bin, env, "history", "clear", "last")
+	if code != 1 || errs != "xbpretty: history is empty\n" {
+		t.Errorf("clear last empty = %d, stderr %q", code, errs)
+	}
+}
+
+// TestNonRootClearAllHint pins the root hint for the --all form.
+func TestNonRootClearAllHint(t *testing.T) {
+	bin := taggedBinary(t)
+	dir := t.TempDir()
+	writeReplayEntry(t, historyDirOf(dir), history.Entry{
+		Command:  []string{"install", "figlet", "-y"},
+		Packages: []history.Transition{replayTransition(history.OpInstall, "figlet", "", "2.2.5_6")},
+	})
+	env := historyRunEnv(t, dir).readOnlyEnv()
+	_, errs, code := runBinary(t, bin, env, "history", "clear", "--all")
+	if code != 1 || !strings.Contains(errs, "hint: rerun as root:") || !strings.Contains(errs, "--all") {
+		t.Errorf("non-root clear --all = %d, stderr %q", code, errs)
+	}
+}
+
+// TestReplayCommandValidation pins the replay invocation rules: -n refuses,
+// -- passthrough is a usage error, and an explicitly empty selector is not
+// silently treated as 'last'.
+func TestReplayCommandValidation(t *testing.T) {
+	bin := taggedBinary(t)
+	dir := t.TempDir()
+	writeReplayEntry(t, historyDirOf(dir), history.Entry{
+		Command:  []string{"install", "figlet", "-y"},
+		Packages: []history.Transition{replayTransition(history.OpInstall, "figlet", "", "2.2.5_6")},
+	})
+	env := replayEnv(t, dir, "uu figlet-2.2.5_6 figlet\n", "")
+
+	_, errs, code := runBinary(t, bin, env, "undo", "1", "-n")
+	if code != 1 || !strings.Contains(errs, "xbpretty: user refused confirmation") {
+		t.Errorf("undo -n = %d, stderr %q; want the refusal", code, errs)
+	}
+	_, errs, code = runBinary(t, bin, env, "undo", "1", "--", "-f")
+	if code != 2 || !strings.Contains(errs, "no -- passthrough") {
+		t.Errorf("undo -- passthrough = %d, stderr %q; want usage error 2", code, errs)
+	}
+	_, _, code = runBinary(t, bin, env, "undo", "")
+	if code != 2 {
+		t.Errorf(`undo "" exit = %d, want 2`, code)
+	}
+}
+
+// TestAllIsOnlyForHistoryClear pins the flag scope.
+func TestAllIsOnlyForHistoryClear(t *testing.T) {
+	bin := taggedBinary(t)
+	dir := t.TempDir()
+	env := historyRunEnv(t, dir).readOnlyEnv()
+	_, errs, code := runBinary(t, bin, env, "history", "--all")
+	if code != 2 || !strings.Contains(errs, "--all is only for history clear") {
+		t.Errorf("history --all = %d, stderr %q", code, errs)
+	}
+}
+
+// TestReplayClampsHistorySourcedSizes pins the arithmetic guard: JSON sizes
+// cannot overflow the progress totals or summary arithmetic.
+func TestReplayClampsHistorySourcedSizes(t *testing.T) {
+	entry := history.Entry{
+		Packages: []history.Transition{{
+			Name: "figlet", Arch: "x86_64", Repository: replayRepoURL,
+			Size: ^uint64(0), InstalledSize: ^uint64(0),
+			Operation: history.OpInstall,
+			After:     pkgState("2.2.5_6", false),
+		}},
+	}
+	st := &state{stderr: io.Discard}
+	plan, err := st.buildReplayPlan(entry, "redo", map[string]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.restores) != 1 {
+		t.Fatalf("restores = %d, want 1", len(plan.restores))
+	}
+	if plan.restores[0].size != maxReplaySize || plan.restores[0].installedSize != maxReplaySize {
+		t.Errorf("sizes = %d/%d, want both clamped to %d",
+			plan.restores[0].size, plan.restores[0].installedSize, maxReplaySize)
 	}
 }

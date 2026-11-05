@@ -331,8 +331,7 @@ func (st *state) compareVersions(before, after string) int {
 	return -1
 }
 
-// runHistory is FR-032's read surface: list, or one entry's detail. Clear and
-// the replay verbs belong to #70.
+// runHistory is FR-032's read surface: list, or one entry's detail.
 func (st *state) runHistory(opts *options) int {
 	if opts.subcommand == "info" || opts.subcommand == "show" {
 		return st.runHistoryDetail(opts.args[0])
@@ -534,14 +533,18 @@ func (st *state) runHistoryClear(opts *options) int {
 	store := history.New(st.historyDir)
 	if opts.clearAll {
 		count, err := store.Clear()
+		// A partial clear still reports what it deleted before the error, so
+		// the operator can see the store's actual state.
+		if count > 0 {
+			if count == 1 {
+				fmt.Fprintln(st.stdout, "Cleared 1 history entry.")
+			} else {
+				fmt.Fprintf(st.stdout, "Cleared %d history entries.\n", count)
+			}
+		}
 		if err != nil {
 			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
 			return exitRuntime
-		}
-		if count == 1 {
-			fmt.Fprintln(st.stdout, "Cleared 1 history entry.")
-		} else {
-			fmt.Fprintf(st.stdout, "Cleared %d history entries.\n", count)
 		}
 		return exitOK
 	}

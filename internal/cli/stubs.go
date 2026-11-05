@@ -5,14 +5,6 @@ import (
 	"io"
 )
 
-// runUnimplemented is the one seam for commands whose owning ticket has not
-// landed yet. It deliberately prints a clear notice instead of pretending to
-// work; the owning ticket replaces the dispatch call, never this function.
-func (st *state) runUnimplemented(cmd string, opts *options) int {
-	fmt.Fprintf(st.stderr, "xbpretty: %s is not implemented in this build\n", cmd)
-	return exitRuntime
-}
-
 // runMoo implements the hidden easter egg (FR-002, FR-075). It never loads
 // config and never runs a child.
 func runMoo(out io.Writer, opts *options) int {

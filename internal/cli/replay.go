@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/soubarnak/xbpretty/internal/download"
 	"github.com/soubarnak/xbpretty/internal/history"
 	"github.com/soubarnak/xbpretty/internal/xbps"
 )
@@ -28,6 +29,10 @@ const (
 	// cacheDirDisplay is FR-033's literal cache path in the fail-closed
 	// message, even when a test hook points the cache elsewhere.
 	cacheDirDisplay = "/var/cache/xbps"
+	// maxReplaySize caps a history-sourced size before it reaches progress
+	// and summary arithmetic. One tebibyte is far beyond any real package and
+	// keeps the int64 totals in execute/summary from overflowing.
+	maxReplaySize = uint64(1) << 40
 )
 
 // replayTmpBase is where cache-only replay repositories live. The
@@ -45,6 +50,9 @@ type replayTarget struct {
 	size          uint64
 	installedSize uint64
 	cacheHit      bool
+	// archive is the validated cache/replay-repository filename, built once
+	// by download.Filename so preflight and preparation cannot disagree.
+	archive string
 	// action is the summary/plan action: install or update for a restore,
 	// remove for a removal.
 	action string
@@ -143,6 +151,11 @@ func (st *state) runReplay(cmd string, opts *options) int {
 	if code >= 0 {
 		return code
 	}
+	// Validate every entry-derived name before any child runs: the replay
+	// turns these fields into privileged cache paths and xbps argv.
+	if code := st.validateReplayEntry(entry); code >= 0 {
+		return code
+	}
 	current, err := st.installedVersions()
 	if err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
@@ -156,6 +169,9 @@ func (st *state) runReplay(cmd string, opts *options) int {
 	if plan.empty() {
 		fmt.Fprintln(st.stdout, "Nothing to do.")
 		return exitNothingToDo
+	}
+	if code := st.prepareReplayArchives(&plan); code >= 0 {
+		return code
 	}
 	if code := st.preflightReplay(&plan, cmd); code >= 0 {
 		return code
@@ -179,8 +195,23 @@ func (st *state) runReplay(cmd string, opts *options) int {
 		}
 	}
 	rows := plan.rows()
-	if code := st.renderSummary(cmd, rows); code >= 0 {
+	summaryCmd := replaySummaryCommand(plan, cmd)
+	// FR-067: Tui mode may replace the replay's stdout with the S1 summary.
+	// The title stays Undo/Redo; only the remove section's label follows the
+	// forced operation the entry will record.
+	confirmedByScreen := false
+	switch outcome, code := st.maybeRunSummaryScreenTitled(opts, summaryCmd, cmd, rows); outcome {
+	case screenConfirmed:
+		confirmedByScreen = true
+	case screenRefused:
+		return st.refuse()
+	case screenExited:
 		return code
+	}
+	if !confirmedByScreen {
+		if code := st.renderSummary(summaryCmd, rows); code >= 0 {
+			return code
+		}
 	}
 	// FR-015: an explicit refusal stops before the root and non-TTY checks.
 	if opts.assumeNo {
@@ -192,16 +223,20 @@ func (st *state) runReplay(cmd string, opts *options) int {
 		st.privHint(cmd, opts)
 		return exitRuntime
 	}
-	if !st.assumeYes && !isTTY(st.stdin) {
+	if !st.assumeYes && !confirmedByScreen && !isTTY(st.stdin) {
 		fmt.Fprintln(st.stderr, "xbpretty: stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed")
 		return exitRuntime
 	}
-	if !st.assumeYes {
+	if !st.assumeYes && !confirmedByScreen {
 		result := st.prompt()
 		if !result.proceed {
 			return result.code
 		}
 	}
+
+	// FR-034: sweep stale replay repositories once per replay, after the
+	// root/prompt checks, whether or not this plan needs one.
+	sweepReplayRepos(replayTmpBase)
 
 	// FR-036: a replay's repository-served restores fill the cache through
 	// the same predownload path as any real transaction (#72's seam).
@@ -276,6 +311,10 @@ func (st *state) resolveReplayEntry(cmd string, opts *options) (history.Entry, i
 	selector := ""
 	if len(opts.args) > 0 {
 		selector = opts.args[0]
+		if selector == "" {
+			fmt.Fprintf(st.stderr, "xbpretty: invalid history selector %q; use an integer id or 'last'\n", selector)
+			return history.Entry{}, exitUsage
+		}
 	}
 	if cmd == "redo" && selector == "" {
 		newest, present, err := store.Last()
@@ -418,7 +457,7 @@ func (st *state) buildReplayPlan(entry history.Entry, cmd string, current map[st
 				// itself takes only names.
 				version:       currentVersion,
 				forceRemove:   forceRemove,
-				installedSize: transition.InstalledSize,
+				installedSize: clampReplaySize(transition.InstalledSize),
 				action:        xbps.ActionRemove,
 			})
 			continue
@@ -437,8 +476,8 @@ func (st *state) buildReplayPlan(entry history.Entry, cmd string, current map[st
 			repository:    transition.Repository,
 			version:       targetVersion,
 			state:         targetState,
-			size:          transition.Size,
-			installedSize: transition.InstalledSize,
+			size:          clampReplaySize(transition.Size),
+			installedSize: clampReplaySize(transition.InstalledSize),
 			action:        action,
 		})
 	}
@@ -464,6 +503,76 @@ func presentVersion(present bool, version string) string {
 	return version
 }
 
+// replaySummaryCommand selects the remove-family summary label. A forced
+// removal is recorded as Purge (FR-030's -f rule), so the summary says Purge
+// too; the screen title stays Undo/Redo.
+func replaySummaryCommand(plan replayPlan, cmd string) string {
+	if plan.forceRemoval() {
+		return "purge"
+	}
+	return cmd
+}
+
+// clampReplaySize keeps a JSON-sourced uint64 inside the range the progress
+// and summary arithmetic can add without overflowing.
+func clampReplaySize(value uint64) uint64 {
+	if value > maxReplaySize {
+		return maxReplaySize
+	}
+	return value
+}
+
+// validateReplayEntry rejects entry-derived metadata that would escape the
+// cache/replay-repository directory or be read as an xbps flag. It runs
+// before any child, so a crafted entry fails closed with one line and exit 1.
+func (st *state) validateReplayEntry(entry history.Entry) int {
+	invalid := 0
+	for _, transition := range entry.Packages {
+		if !history.ValidPackageName(transition.Name) ||
+			(transition.Arch != "" && !history.ValidPackageField(transition.Arch)) ||
+			!validReplayVersion(transition.Before) ||
+			!validReplayVersion(transition.After) {
+			fmt.Fprintf(st.stderr, "xbpretty: history entry %d has invalid package metadata for %q; replay cannot continue\n", entry.ID, transition.Name)
+			invalid++
+		}
+	}
+	if invalid > 0 {
+		return exitRuntime
+	}
+	return -1
+}
+
+// validReplayVersion accepts a nil version (absent) or a safe non-empty one.
+func validReplayVersion(state *history.PackageState) bool {
+	if state == nil || state.Version == nil {
+		return true
+	}
+	return *state.Version != "" && history.ValidPackageField(*state.Version)
+}
+
+// prepareReplayArchives builds every restore's archive filename once through
+// download.Filename. preflight and prepareReplayRepo then share one validated
+// value instead of re-deriving a path from untrusted fields.
+func (st *state) prepareReplayArchives(plan *replayPlan) int {
+	for i := range plan.restores {
+		target := &plan.restores[i]
+		if target.name == "" || target.arch == "" || target.version == "" ||
+			!history.ValidPackageName(target.name) ||
+			!history.ValidPackageField(target.arch) ||
+			!history.ValidPackageField(target.version) {
+			fmt.Fprintf(st.stderr, "xbpretty: replay target %q has invalid package metadata; replay cannot continue\n", target.name)
+			return exitRuntime
+		}
+		archive, err := download.Filename(target.name+"-"+target.version, target.arch)
+		if err != nil {
+			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			return exitRuntime
+		}
+		target.archive = archive
+	}
+	return -1
+}
+
 // preflightReplay proves every restore archive is available before any
 // mutating child (FR-033). The cache is checked first; an absent archive asks
 // the configured repositories for the exact version. Every unrestorable
@@ -473,8 +582,7 @@ func (st *state) preflightReplay(plan *replayPlan, cmd string) int {
 	failures := make([]string, 0)
 	for i := range plan.restores {
 		target := &plan.restores[i]
-		archive := target.name + "-" + target.version + "." + target.arch + ".xbps"
-		if info, err := os.Stat(filepath.Join(cacheDir, archive)); err == nil && info.Mode().IsRegular() {
+		if info, err := os.Stat(filepath.Join(cacheDir, target.archive)); err == nil && info.Mode().IsRegular() {
 			target.cacheHit = true
 			continue
 		}
@@ -538,7 +646,6 @@ func (r *replayRepo) Cleanup() {
 // sweep, MkdirTemp, link/copy every archive preserving its filename, then
 // xbps-rindex it. It returns before any mutating xbps child.
 func (st *state) prepareReplayRepo(plan replayPlan) (*replayRepo, int) {
-	sweepReplayRepos(replayTmpBase)
 	dir, err := os.MkdirTemp(replayTmpBase, replayTmpPrefix)
 	if err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: cannot create the replay repository: %v\n", err)
@@ -558,7 +665,7 @@ func (st *state) prepareReplayRepo(plan replayPlan) (*replayRepo, int) {
 		if !target.cacheHit {
 			continue
 		}
-		archive := target.name + "-" + target.version + "." + target.arch + ".xbps"
+		archive := target.archive
 		if seen[archive] {
 			continue
 		}
@@ -589,10 +696,23 @@ func (st *state) prepareReplayRepo(plan replayPlan) (*replayRepo, int) {
 			return fail("xbpretty: cannot index the replay repository: %v", err)
 		}
 		if forced.exitCode != 0 {
-			return fail("xbpretty: cannot index the replay repository: xbps-rindex exited %d", forced.exitCode)
+			return fail("xbpretty: cannot index the replay repository: xbps-rindex exited %d: %s",
+				forced.exitCode, commandDetail(forced))
 		}
 	}
 	return repo, -1
+}
+
+// commandDetail is the trimmed child stderr (else stdout) a failed helper
+// command reports.
+func commandDetail(res result) string {
+	if detail := strings.TrimSpace(res.stderr); detail != "" {
+		return detail
+	}
+	if detail := strings.TrimSpace(res.stdout); detail != "" {
+		return detail
+	}
+	return "no output"
 }
 
 // linkOrCopy hard-links src to dst, falling back to a copy across devices.
