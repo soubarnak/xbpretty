@@ -113,17 +113,22 @@ func IsFTPRepository(repository string) bool {
 	return strings.HasPrefix(repository, "ftp://")
 }
 
-// IsDownloadRow reports whether a plan row belongs to FR-036's download set:
-// a downloading action on an http(s) repository with a reported download size,
-// or a download action whose size xbps did not report. hold, remove and
-// configure are excluded even when their size fields are non-zero.
-func IsDownloadRow(row xbps.Row) bool {
-	switch row.Action {
+// isDownloadingAction reports whether a plan action is one that fetches an
+// archive. hold, remove and configure are excluded even when their size
+// fields are non-zero.
+func isDownloadingAction(action string) bool {
+	switch action {
 	case xbps.ActionInstall, xbps.ActionUpdate, xbps.ActionReinstall, ActionDownload:
-	default:
-		return false
+		return true
 	}
-	if !IsRemoteRepository(row.Repo) {
+	return false
+}
+
+// IsDownloadRow reports whether a plan row belongs to FR-036's predownload
+// set: a downloading action on an http(s) repository with a reported download
+// size, or a download action whose size xbps did not report.
+func IsDownloadRow(row xbps.Row) bool {
+	if !isDownloadingAction(row.Action) || !IsRemoteRepository(row.Repo) {
 		return false
 	}
 	if row.DownloadSize > 0 {
@@ -132,7 +137,9 @@ func IsDownloadRow(row xbps.Row) bool {
 	return row.Action == ActionDownload && !row.HasDownload
 }
 
-// DownloadRows filters a plan to FR-036's download set, preserving plan order.
+// DownloadRows filters a plan to FR-036's predownload set, preserving plan
+// order. Local, file:// and ftp:// rows are excluded; #72 gets their counts
+// from TargetsFromRows so it can print the FR-037 exceptions.
 func DownloadRows(rows []xbps.Row) []xbps.Row {
 	out := make([]xbps.Row, 0, len(rows))
 	for _, row := range rows {
@@ -141,4 +148,51 @@ func DownloadRows(rows []xbps.Row) []xbps.Row {
 		}
 	}
 	return out
+}
+
+// PlannedDownloadRows is the --print-uris row set (FR-028): every plan row
+// with a downloading action, hold excluded, with no repository-scheme or size
+// filter. FR-028 calls these "the plan's downloading actions" and defines the
+// URL purely as <repository>/<pkgver>.<architecture>.xbps, so a local file:
+// repository or an unreported size still yields one object. This is
+// deliberately wider than FR-036's predownload set above; do not fold the two
+// predicates together.
+func PlannedDownloadRows(rows []xbps.Row) []xbps.Row {
+	out := make([]xbps.Row, 0, len(rows))
+	for _, row := range rows {
+		if isDownloadingAction(row.Action) {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// TargetsFromRows builds FR-036 predownload targets from plan rows and the
+// bulk filename-sha256 map. It returns how many ftp:// and local/other rows
+// were excluded so #72 can print the FR-037 warnings. ftp:// rows never reach
+// the engine, so its `xbp download`-specific error text cannot leak into the
+// predownload path.
+func TargetsFromRows(rows []xbps.Row, hashes map[HashKey]string) (targets []Target, excludedFTP, excludedLocal int, err error) {
+	for _, row := range rows {
+		if !isDownloadingAction(row.Action) {
+			continue
+		}
+		if IsFTPRepository(row.Repo) {
+			excludedFTP++
+			continue
+		}
+		if !IsRemoteRepository(row.Repo) {
+			excludedLocal++
+			continue
+		}
+		if row.DownloadSize == 0 && !(row.Action == ActionDownload && !row.HasDownload) {
+			continue
+		}
+		target, err := TargetFromRow(row, hashes[HashKeyFor(row.Repo, row.Pkgver())])
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		targets = append(targets, target)
+	}
+	return targets, excludedFTP, excludedLocal, nil
 }

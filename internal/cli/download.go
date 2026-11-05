@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/soubarnak/xbpretty/internal/download"
 )
@@ -39,6 +41,7 @@ func (st *state) runDownload(opts *options) int {
 
 	var targets []download.Target
 	var missing []string
+	failedNames := false
 	for _, name := range names {
 		res, err := st.r.run(st.r.cfg.Xbps.QueryPath, "-R", "-S", name,
 			"-p", "pkgver,repository,architecture,filename-sha256")
@@ -47,9 +50,15 @@ func (st *state) runDownload(opts *options) int {
 			return exitRuntime
 		}
 		if res.exitCode != 0 {
-			missing = append(missing, name)
-			fmt.Fprintf(st.stderr, "xbpretty: %s: not found in any configured repository\n", name)
-			continue
+			// FR-039's not-found case is xbps's silent exit 2. Any other
+			// failure is the child's, and its stderr and code pass through.
+			if res.exitCode == 2 && strings.TrimSpace(res.stderr) == "" {
+				missing = append(missing, name)
+				fmt.Fprintf(st.stderr, "xbpretty: %s: not found in any configured repository\n", name)
+				continue
+			}
+			fmt.Fprint(st.stderr, res.stderr)
+			return res.exitCode
 		}
 		resolved, err := download.ParseResolved(res.stdout)
 		if err != nil {
@@ -59,11 +68,13 @@ func (st *state) runDownload(opts *options) int {
 		// FR-037: no metadata hash means the cwd copy would be unverifiable.
 		if !resolved.HasHash {
 			fmt.Fprintf(st.stderr, "xbpretty: %s: repository metadata has no SHA-256; refusing to write an unverifiable package\n", resolved.Pkgver)
-			return exitRuntime
+			failedNames = true
+			continue
 		}
 		if download.IsFTPRepository(resolved.Repository) {
 			fmt.Fprintf(st.stderr, "xbpretty: %s: ftp:// repositories are not supported by xbp download\n", resolved.Pkgver)
-			return exitRuntime
+			failedNames = true
+			continue
 		}
 		target, err := download.NewTarget(name, resolved.Pkgver, resolved.Repository, resolved.Arch, resolved.SHA256, 0)
 		if err != nil {
@@ -71,6 +82,9 @@ func (st *state) runDownload(opts *options) int {
 			return exitRuntime
 		}
 		targets = append(targets, target)
+	}
+	if len(targets) == 0 {
+		return st.finishDownload(missing, failedNames, nil)
 	}
 
 	cwd, err := os.Getwd()
@@ -81,7 +95,6 @@ func (st *state) runDownload(opts *options) int {
 	engineOpts := download.Options{
 		DestDir:     cwd,
 		Mode:        download.ModeDownload,
-		UserAgent:   "xbpretty/" + Version,
 		Concurrency: 1,
 	}
 	if st.r.verbose {
@@ -90,10 +103,24 @@ func (st *state) runDownload(opts *options) int {
 		}
 	}
 	engine := download.New(engineOpts)
+
+	// FR-074/FR-041: Ctrl-C cancels the engine, which removes `.part`, then
+	// the run reports the interruption and exits 130.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	written := make([]download.Result, 0, len(targets))
 	for _, target := range targets {
-		result := engine.FetchOne(context.Background(), target)
+		if ctx.Err() != nil {
+			fmt.Fprintln(st.stderr, "xbpretty: interrupted")
+			return exitInterrupted
+		}
+		result := engine.FetchOne(ctx, target)
 		if result.Err != nil {
+			if ctx.Err() != nil {
+				fmt.Fprintln(st.stderr, "xbpretty: interrupted")
+				return exitInterrupted
+			}
 			// FR-038: an explicit download aborts on the first exhausted or
 			// mismatching file and keeps everything already verified.
 			fmt.Fprintf(st.stderr, "xbpretty: %v\n", result.Err)
@@ -101,14 +128,19 @@ func (st *state) runDownload(opts *options) int {
 		}
 		written = append(written, result)
 	}
+	return st.finishDownload(missing, failedNames, written)
+}
 
-	// FR-039: missing names do not stop the others, but they do stop the
-	// success block and change the exit code.
+// finishDownload prints the success block only for a complete run. Missing
+// names and refused names both suppress it; missing names add FR-039's
+// summary line.
+func (st *state) finishDownload(missing []string, failedNames bool, written []download.Result) int {
 	if len(missing) > 0 {
 		fmt.Fprintln(st.stderr, "xbpretty: Some packages were not found.")
+	}
+	if failedNames || len(missing) > 0 {
 		return exitRuntime
 	}
-
 	fmt.Fprintln(st.stdout, "Downloads Complete:")
 	for _, result := range written {
 		name := result.Target.Filename

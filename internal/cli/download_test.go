@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // archiveServer is a local repository serving one archive and its signature.
@@ -380,5 +382,230 @@ func TestDownloadFetchesMissingSignatureForReusedArchive(t *testing.T) {
 	}
 	if got, _ := os.ReadFile("figlet-2.2.5_6.x86_64.xbps.sig2"); string(got) != string(sig) {
 		t.Errorf("signature = %q, want %q", got, sig)
+	}
+}
+
+// TestDownloadResolutionFailureForwardsStderrAndCode pins the FR-073 rule for
+// the per-name query: a non-2 failure is the child's, stderr and code intact.
+func TestDownloadResolutionFailureForwardsStderrAndCode(t *testing.T) {
+	e := newEnv(t)
+	t.Chdir(t.TempDir())
+	e.set("XB_STUB_REPOS", "https://repo.example/current\n")
+	e.set("XB_STUB_RESOLVE_EXIT", "1")
+	e.set("XB_STUB_RESOLVE_STDERR", "ERROR: repository metadata is corrupt\n")
+	code, out, errs := e.run("xbpretty", "download", "figlet")
+	if code != 1 {
+		t.Errorf("exit = %d, want the child's 1", code)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q", out)
+	}
+	if errs != "ERROR: repository metadata is corrupt\n" {
+		t.Errorf("stderr = %q, want the child's stderr verbatim", errs)
+	}
+}
+
+// TestDownloadFTPNameDoesNotBlockTheRest pins multi-name behaviour: an ftp
+// refusal fails that name, the others still download, and the run exits 1
+// without the success block.
+func TestDownloadFTPNameDoesNotBlockTheRest(t *testing.T) {
+	body := []byte("figlet archive")
+	server := newArchiveServer(t, body, []byte("sig"))
+	e := newEnv(t)
+	t.Chdir(t.TempDir())
+	e.set("XB_STUB_REPOS", server.srv.URL+"/current\n")
+	e.set("XB_STUB_RESOLVE_FIGLET", strings.Join([]string{
+		"figlet-2.2.5_6", server.srv.URL + "/current", "x86_64", sha256Of(body),
+	}, "\n"))
+	e.set("XB_STUB_RESOLVE_WGET", strings.Join([]string{
+		"wget-1.25.0_1", "ftp://ftp.example/current", "x86_64", sha256Of([]byte("wget")),
+	}, "\n"))
+
+	code, out, errs := e.run("xbpretty", "download", "figlet", "wget")
+	if code != 1 {
+		t.Errorf("exit = %d, want 1", code)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want no block with a failed name", out)
+	}
+	if !strings.Contains(errs, "xbpretty: wget-1.25.0_1: ftp:// repositories are not supported by xbp download\n") {
+		t.Errorf("stderr missing the ftp failure:\n%s", errs)
+	}
+	if got, _ := os.ReadFile("figlet-2.2.5_6.x86_64.xbps"); string(got) != string(body) {
+		t.Errorf("the other package was not downloaded: %q", got)
+	}
+}
+
+// TestDownloadHashlessNameDoesNotBlockTheRest pins the same continuation for
+// an unverifiable package.
+func TestDownloadHashlessNameDoesNotBlockTheRest(t *testing.T) {
+	body := []byte("figlet archive")
+	server := newArchiveServer(t, body, []byte("sig"))
+	e := newEnv(t)
+	t.Chdir(t.TempDir())
+	e.set("XB_STUB_REPOS", server.srv.URL+"/current\n")
+	e.set("XB_STUB_RESOLVE_FIGLET", strings.Join([]string{
+		"figlet-2.2.5_6", server.srv.URL + "/current", "x86_64", sha256Of(body),
+	}, "\n"))
+	e.set("XB_STUB_RESOLVE_WGET", strings.Join([]string{
+		"wget-1.25.0_1", "https://repo.example/current", "x86_64",
+	}, "\n"))
+
+	code, out, errs := e.run("xbpretty", "download", "figlet", "wget")
+	if code != 1 {
+		t.Errorf("exit = %d, want 1", code)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want no block with a failed name", out)
+	}
+	if !strings.Contains(errs, "xbpretty: wget-1.25.0_1: repository metadata has no SHA-256; refusing to write an unverifiable package\n") {
+		t.Errorf("stderr missing the hash-less failure:\n%s", errs)
+	}
+	if got, _ := os.ReadFile("figlet-2.2.5_6.x86_64.xbps"); string(got) != string(body) {
+		t.Errorf("the other package was not downloaded: %q", got)
+	}
+}
+
+// TestDownloadFailureMessages pins the CLI's per-file messages and exit codes.
+func TestDownloadFailureMessages(t *testing.T) {
+	body := []byte("archive bytes")
+
+	t.Run("missing signature", func(t *testing.T) {
+		server := newArchiveServer(t, body, nil)
+		e := newEnv(t)
+		t.Chdir(t.TempDir())
+		downloadFixture(t, e, server.srv.URL+"/current", "figlet-2.2.5_6", "x86_64", sha256Of(body))
+		code, out, errs := e.run("xbpretty", "download", "figlet")
+		if code != 1 || out != "" {
+			t.Errorf("exit = %d, stdout = %q", code, out)
+		}
+		want := "xbpretty: figlet-2.2.5_6.x86_64.xbps.sig2: 404 Not Found; the repository no longer serves the signature\n"
+		if errs != want {
+			t.Errorf("stderr = %q, want %q", errs, want)
+		}
+	})
+
+	t.Run("hash mismatch", func(t *testing.T) {
+		tampered := []byte("tampered bytes")
+		server := newArchiveServer(t, tampered, []byte("sig"))
+		e := newEnv(t)
+		t.Chdir(t.TempDir())
+		downloadFixture(t, e, server.srv.URL+"/current", "figlet-2.2.5_6", "x86_64", sha256Of(body))
+		code, out, errs := e.run("xbpretty", "download", "figlet")
+		if code != 1 || out != "" {
+			t.Errorf("exit = %d, stdout = %q", code, out)
+		}
+		want := "xbpretty: figlet-2.2.5_6.x86_64.xbps: SHA-256 mismatch: expected " + sha256Of(body) +
+			", got " + sha256Of(tampered) + "\n"
+		if errs != want {
+			t.Errorf("stderr = %q, want %q", errs, want)
+		}
+		if _, err := os.Stat("figlet-2.2.5_6.x86_64.xbps"); !os.IsNotExist(err) {
+			t.Error("the mismatching archive was written")
+		}
+		if _, err := os.Stat("figlet-2.2.5_6.x86_64.xbps.part"); !os.IsNotExist(err) {
+			t.Error(".part survived")
+		}
+	})
+
+	t.Run("archive 404", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, ".sig2") {
+				_, _ = w.Write([]byte("sig"))
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer srv.Close()
+		e := newEnv(t)
+		t.Chdir(t.TempDir())
+		e.set("XB_STUB_REPOS", srv.URL+"/current\n")
+		e.set("XB_STUB_RESOLVE", strings.Join([]string{"figlet-2.2.5_6", srv.URL + "/current", "x86_64", sha256Of(body)}, "\n"))
+		code, _, errs := e.run("xbpretty", "download", "figlet")
+		if code != 1 {
+			t.Errorf("exit = %d, want 1", code)
+		}
+		want := "xbpretty: figlet-2.2.5_6.x86_64.xbps: 404 Not Found\n"
+		if errs != want {
+			t.Errorf("stderr = %q, want %q", errs, want)
+		}
+	})
+}
+
+// TestDownloadSignalCancelsAndExits130 drives the built binary with a stalled
+// archive transfer, sends Ctrl-C and asserts the FR-041 cleanup contract.
+func TestDownloadSignalCancelsAndExits130(t *testing.T) {
+	body := []byte("archive")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".sig2") {
+			_, _ = w.Write([]byte("sig"))
+			return
+		}
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	bin := buildBinary(t)
+	cfgDir, _ := integrationConfig(t, "Never")
+	work := t.TempDir()
+	cmd := exec.Command(bin, "download", "figlet")
+	cmd.Dir = work
+	cmd.Env = envWith(map[string]string{
+		"XDG_CONFIG_HOME": cfgDir,
+		"XDG_STATE_HOME":  filepath.Join(t.TempDir(), "state"),
+		"XB_STUB_LOG":     filepath.Join(t.TempDir(), "commands.log"),
+		"XB_STUB_REPOS":   srv.URL + "/current\n",
+		"XB_STUB_RESOLVE": strings.Join([]string{"figlet-2.2.5_6", srv.URL + "/current", "x86_64", sha256Of(body)}, "\n"),
+		"NO_COLOR":        "1",
+	})
+	var out, errs strings.Builder
+	cmd.Stdout, cmd.Stderr = &out, &errs
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	part := filepath.Join(work, "figlet-2.2.5_6.x86_64.xbps.part")
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(part); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			t.Fatalf("the transfer never created .part\nstderr:\n%s", errs.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else if err != nil {
+			t.Fatalf("wait: %v", err)
+		}
+		if code != 130 {
+			t.Errorf("exit = %d, want 130", code)
+		}
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("the process did not exit after SIGINT")
+	}
+	if !strings.Contains(errs.String(), "xbpretty: interrupted") {
+		t.Errorf("stderr missing the interruption line:\n%s", errs.String())
+	}
+	if out.String() != "" {
+		t.Errorf("stdout = %q", out.String())
+	}
+	if _, err := os.Stat(part); !os.IsNotExist(err) {
+		t.Error(".part survived SIGINT")
 	}
 }

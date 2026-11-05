@@ -137,3 +137,55 @@ func TestPrintURIsStopsAtTheUpgradeFamily(t *testing.T) {
 		}
 	}
 }
+
+// TestPrintURIsIncludesLocalAndZeroSizeRows pins the FR-028 decision: every
+// downloading action prints an object, including a local file: repository
+// and an unreported/zero plan size; hold and remove rows stay out.
+func TestPrintURIsIncludesLocalAndZeroSizeRows(t *testing.T) {
+	e := newEnv(t)
+	e.root = false
+	e.set("XB_STUB_STDOUT", strings.Join([]string{
+		"remote-1.0_1 update x86_64 https://repo-default.voidlinux.org/current 1000 500",
+		"local-1.0_1 install x86_64 /srv/repo 1000 0",
+		"zero-1.0_1 reinstall noarch https://repo-default.voidlinux.org/current 1000 0",
+		"held-1.0_1 hold x86_64 https://repo-default.voidlinux.org/current 1000 100",
+		"removed-1.0_1 remove x86_64 https://repo-default.voidlinux.org/current 1000 100",
+	}, "\n"))
+	e.set("XB_STUB_HASHES", "")
+
+	code, out, errs := e.run("xbpretty", "upgrade", "--print-uris")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("stdout has %d objects, want 3:\n%s", len(lines), out)
+	}
+	objects := make([]map[string]any, 0, len(lines))
+	for _, line := range lines {
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			t.Fatalf("not JSON: %v\n%s", err, line)
+		}
+		objects = append(objects, obj)
+	}
+	if objects[0]["package"] != "remote" {
+		t.Errorf("first object = %v", objects[0])
+	}
+	local := objects[1]
+	if local["package"] != "local" {
+		t.Errorf("local object = %v", local)
+	}
+	if local["url"] != "/srv/repo/local-1.0_1.x86_64.xbps" {
+		t.Errorf("local url = %v", local["url"])
+	}
+	if local["signature_url"] != "/srv/repo/local-1.0_1.x86_64.xbps.sig2" {
+		t.Errorf("local signature_url = %v", local["signature_url"])
+	}
+	if local["size"] != float64(0) {
+		t.Errorf("local size = %v, want 0", local["size"])
+	}
+	if objects[2]["package"] != "zero" || objects[2]["size"] != float64(0) || objects[2]["sha256"] != nil {
+		t.Errorf("zero-size object = %v", objects[2])
+	}
+}

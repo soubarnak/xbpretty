@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -459,8 +460,9 @@ func TestFetchLocalRepositoryCopies(t *testing.T) {
 	}
 	dest3 := t.TempDir()
 	results = newTestEngine(dest3, ModeDownload).Fetch(context.Background(), []Target{bad})
-	if results[0].Err == nil || !strings.Contains(results[0].Err.Error(), "SHA-256 mismatch") {
-		t.Fatalf("local mismatch = %v", results[0].Err)
+	wantErr := bad.Filename + ": SHA-256 mismatch: expected " + sha256Hex([]byte("other")) + ", got " + sha256Hex(archive)
+	if results[0].Err == nil || results[0].Err.Error() != wantErr {
+		t.Fatalf("local mismatch = %v, want exactly %q", results[0].Err, wantErr)
 	}
 	if _, err := os.Stat(filepath.Join(dest3, target.Filename)); !os.IsNotExist(err) {
 		t.Error("the mismatching local archive was published")
@@ -700,7 +702,9 @@ func TestFetchReusedArchiveFetchesMissingSignature(t *testing.T) {
 // TestFetchStopsAfterTenRedirects pins FR-038's redirect budget: a redirect
 // loop is final, not retried four times.
 func TestFetchStopsAfterTenRedirects(t *testing.T) {
+	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
 		http.Redirect(w, r, r.URL.Path, http.StatusFound)
 	}))
 	defer srv.Close()
@@ -717,7 +721,440 @@ func TestFetchStopsAfterTenRedirects(t *testing.T) {
 	if results[0].Err == nil || !strings.Contains(results[0].Err.Error(), "stopped after 10 redirects") {
 		t.Fatalf("redirect loop error = %v", results[0].Err)
 	}
+	// One initial request plus ten followed redirects, then the budget stops
+	// the eleventh hop.
+	if got := requests.Load(); got != int32(MaxRedirects+1) {
+		t.Errorf("requests = %d, want %d (initial + ten redirects)", got, MaxRedirects+1)
+	}
 	if attempts.Load() != 1 {
 		t.Errorf("attempts = %d, want 1 (a redirect budget is not retried)", attempts.Load())
+	}
+}
+
+// bumpMax stores v when it is larger, without a mutex.
+func bumpMax(max *atomic.Int32, v int32) {
+	for {
+		old := max.Load()
+		if v <= old || max.CompareAndSwap(old, v) {
+			return
+		}
+	}
+}
+
+// TestFetchConcurrencyIsPerHostNotGlobal pins FR-038: three transfers per
+// URL host:port and no global cap, so two hosts run three each at once.
+func TestFetchConcurrencyIsPerHostNotGlobal(t *testing.T) {
+	var sharedActive, sharedMax atomic.Int32
+	type host struct {
+		active, max atomic.Int32
+	}
+	newHost := func() (*httptest.Server, *host) {
+		h := &host{}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			current := h.active.Add(1)
+			bumpMax(&h.max, current)
+			bumpMax(&sharedMax, sharedActive.Add(1))
+			defer func() {
+				h.active.Add(-1)
+				sharedActive.Add(-1)
+			}()
+			time.Sleep(20 * time.Millisecond)
+			_, _ = w.Write([]byte("body"))
+		}))
+		t.Cleanup(srv.Close)
+		return srv, h
+	}
+	srvA, hostA := newHost()
+	srvB, hostB := newHost()
+
+	var targets []Target
+	for hostIndex, srv := range []*httptest.Server{srvA, srvB} {
+		for i := 0; i < 6; i++ {
+			index := hostIndex*10 + i
+			target, err := NewTarget(fmt.Sprintf("pkg%d", index), fmt.Sprintf("pkg%d-1.0_1", index),
+				srv.URL+"/current", "x86_64", "", 4)
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets = append(targets, target)
+		}
+	}
+	results := New(Options{DestDir: t.TempDir(), Mode: ModeDownload, Attempts: 1}).Fetch(context.Background(), targets)
+	for _, result := range results {
+		if result.Err != nil {
+			t.Fatalf("Fetch: %v", result.Err)
+		}
+	}
+	if got := hostA.max.Load(); got != 3 {
+		t.Errorf("host A max concurrent = %d, want 3", got)
+	}
+	if got := hostB.max.Load(); got != 3 {
+		t.Errorf("host B max concurrent = %d, want 3", got)
+	}
+	if got := sharedMax.Load(); got < 4 {
+		t.Errorf("global max concurrent = %d, want > 3 (per-host, not global)", got)
+	}
+}
+
+// TestFetchIdleBodyWatchdogRetries pins the 120 s idle-body watchdog's retry
+// class; the test dials it down.
+func TestFetchIdleBodyWatchdogRetries(t *testing.T) {
+	var archiveHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".sig2") {
+			_, _ = w.Write([]byte("sig"))
+			return
+		}
+		archiveHits.Add(1)
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	target, err := NewTarget("figlet", "figlet-2.2.5_6", srv.URL+"/current", "x86_64",
+		sha256Hex([]byte("archive")), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := New(Options{
+		DestDir:       t.TempDir(),
+		Mode:          ModeDownload,
+		Attempts:      2,
+		DialTimeout:   2 * time.Second,
+		HeaderTimeout: 5 * time.Second,
+		IdleTimeout:   50 * time.Millisecond,
+	})
+	start := time.Now()
+	results := engine.Fetch(context.Background(), []Target{target})
+	if results[0].Err == nil {
+		t.Fatal("a stalled body was accepted")
+	}
+	if got := archiveHits.Load(); got != 2 {
+		t.Errorf("archive attempts = %d, want 2", got)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("watchdog took %v", elapsed)
+	}
+	if _, err := os.Stat(filepath.Join(engine.opts.DestDir, target.Filename+".part")); !os.IsNotExist(err) {
+		t.Error(".part survived the idle timeout")
+	}
+}
+
+// TestFetchTruncatedBodyRetries pins EOF/unexpected-EOF retry and recovery.
+func TestFetchTruncatedBodyRetries(t *testing.T) {
+	archive := []byte("the whole archive")
+	var archiveHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".sig2") {
+			_, _ = w.Write([]byte("sig"))
+			return
+		}
+		if archiveHits.Add(1) == 1 {
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("trunc"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(archive)
+	}))
+	defer srv.Close()
+	target, err := NewTarget("figlet", "figlet-2.2.5_6", srv.URL+"/current", "x86_64",
+		sha256Hex(archive), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := New(Options{DestDir: t.TempDir(), Mode: ModeDownload, Attempts: 4})
+	results := engine.Fetch(context.Background(), []Target{target})
+	if results[0].Err != nil {
+		t.Fatalf("Fetch after a truncated body: %v", results[0].Err)
+	}
+	if got := archiveHits.Load(); got != 2 {
+		t.Errorf("archive attempts = %d, want 2 (one truncation, one success)", got)
+	}
+}
+
+// TestFetchRejectsOversizedBodies pins the body cap that stops a hostile
+// server filling the disk before the hash check.
+func TestFetchRejectsOversizedBodies(t *testing.T) {
+	archive := []byte("0123456789")
+	t.Run("declared Content-Length", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, ".sig2") {
+				_, _ = w.Write([]byte("sig"))
+				return
+			}
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(make([]byte, 100))
+		}))
+		defer srv.Close()
+		target := targetFor(t, srv.URL+"/current", archive, sha256Hex(archive))
+		results := New(Options{DestDir: t.TempDir(), Mode: ModeDownload}).Fetch(context.Background(), []Target{target})
+		if results[0].Err == nil || !strings.Contains(results[0].Err.Error(), "exceeds the 10-byte limit") {
+			t.Fatalf("error = %v", results[0].Err)
+		}
+		if _, err := os.Stat(filepath.Join(results[0].Target.Filename)); !os.IsNotExist(err) {
+			t.Error("an oversized body was published")
+		}
+	})
+	t.Run("chunked overrun", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, ".sig2") {
+				_, _ = w.Write([]byte("sig"))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			_, _ = w.Write(make([]byte, 100))
+		}))
+		defer srv.Close()
+		target := targetFor(t, srv.URL+"/current", archive, sha256Hex(archive))
+		dir := t.TempDir()
+		results := New(Options{DestDir: dir, Mode: ModeDownload}).Fetch(context.Background(), []Target{target})
+		if results[0].Err == nil || !strings.Contains(results[0].Err.Error(), "exceeded the 10-byte limit") {
+			t.Fatalf("error = %v", results[0].Err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, target.Filename)); !os.IsNotExist(err) {
+			t.Error("an oversized chunked body was published")
+		}
+	})
+}
+
+// TestFetchDoesNotFollowPlantedSymlinks pins the `.part` hardening: a symlink
+// at the part or destination path is replaced, never followed.
+func TestFetchDoesNotFollowPlantedSymlinks(t *testing.T) {
+	f := newFixture(t)
+	archive := []byte("archive bytes")
+	f.serveBody(map[string][]byte{
+		"figlet-2.2.5_6.x86_64.xbps":      archive,
+		"figlet-2.2.5_6.x86_64.xbps.sig2": []byte("sig"),
+	})
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("must not change"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := targetFor(t, f.srv.URL+"/current", archive, sha256Hex(archive))
+	if err := os.Symlink(victim, filepath.Join(dir, target.Filename)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(dir, target.Filename+".part")); err != nil {
+		t.Fatal(err)
+	}
+	results := newTestEngine(dir, ModeDownload).Fetch(context.Background(), []Target{target})
+	if results[0].Err != nil {
+		t.Fatalf("Fetch: %v", results[0].Err)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "must not change" {
+		t.Errorf("a planted symlink was followed: victim = %q", got)
+	}
+	info, err := os.Lstat(filepath.Join(dir, target.Filename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Errorf("destination is still a symlink: %v", info.Mode())
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, target.Filename)); string(got) != string(archive) {
+		t.Errorf("archive = %q", got)
+	}
+}
+
+// TestFetchDownloadModeKeepsOldArchiveOnFailedRefetch pins the download-mode
+// difference: the old cwd file survives a failed refetch and only a verified
+// atomic rename replaces it.
+func TestFetchDownloadModeKeepsOldArchiveOnFailedRefetch(t *testing.T) {
+	f := newFixture(t)
+	archive := []byte("new archive")
+	f.mu.Lock()
+	f.handler = func(w http.ResponseWriter, r *http.Request) bool {
+		if strings.HasSuffix(r.URL.Path, ".sig2") {
+			_, _ = w.Write([]byte("sig"))
+			return true
+		}
+		http.Error(w, "down", http.StatusInternalServerError)
+		return true
+	}
+	f.mu.Unlock()
+	dir := t.TempDir()
+	target := targetFor(t, f.srv.URL+"/current", archive, sha256Hex(archive))
+	writeFile(t, dir, target.Filename, []byte("old but valid archive"))
+	results := newTestEngine(dir, ModeDownload).Fetch(context.Background(), []Target{target})
+	if results[0].Err == nil {
+		t.Fatal("a failed refetch was reported as success")
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, target.Filename)); string(got) != "old but valid archive" {
+		t.Errorf("the old archive was destroyed: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, target.Filename+".part")); !os.IsNotExist(err) {
+		t.Error(".part survived")
+	}
+}
+
+// TestFetchCacheModePermissions pins FR-038's 0644 root:root cache files.
+func TestFetchCacheModePermissions(t *testing.T) {
+	f := newFixture(t)
+	archive := []byte("cache archive")
+	f.serveBody(map[string][]byte{
+		"figlet-2.2.5_6.x86_64.xbps":      archive,
+		"figlet-2.2.5_6.x86_64.xbps.sig2": []byte("sig"),
+	})
+	dir := t.TempDir()
+	target := targetFor(t, f.srv.URL+"/current", archive, sha256Hex(archive))
+	results := newTestEngine(dir, ModeCache).Fetch(context.Background(), []Target{target})
+	if results[0].Err != nil {
+		t.Fatalf("Fetch: %v", results[0].Err)
+	}
+	info, err := os.Stat(filepath.Join(dir, target.Filename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("mode = %o, want 644", info.Mode().Perm())
+	}
+	if os.Geteuid() == 0 {
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Fatalf("no Stat_t: %T", info.Sys())
+		}
+		if stat.Uid != 0 || stat.Gid != 0 {
+			t.Errorf("owner = %d:%d, want 0:0", stat.Uid, stat.Gid)
+		}
+	}
+}
+
+// TestFetchCancelRemovesPart pins Ctrl-C cleanup at the engine seam.
+func TestFetchCancelRemovesPart(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".sig2") {
+			_, _ = w.Write([]byte("sig"))
+			return
+		}
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	target, err := NewTarget("figlet", "figlet-2.2.5_6", srv.URL+"/current", "x86_64",
+		sha256Hex([]byte("archive")), 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := New(Options{DestDir: dir, Mode: ModeDownload})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	result := engine.FetchOne(ctx, target)
+	if result.Err == nil {
+		t.Fatal("a canceled transfer reported success")
+	}
+	if _, err := os.Stat(filepath.Join(dir, target.Filename+".part")); !os.IsNotExist(err) {
+		t.Error(".part survived cancellation")
+	}
+	if _, err := os.Stat(filepath.Join(dir, target.Filename)); !os.IsNotExist(err) {
+		t.Error("a partial archive was published")
+	}
+}
+
+// TestFetchEmitsProgressEvents pins the FR-041 event stream #72 consumes.
+func TestFetchEmitsProgressEvents(t *testing.T) {
+	f := newFixture(t)
+	archive := []byte("archive bytes")
+	var archiveHits atomic.Int32
+	f.mu.Lock()
+	f.handler = func(w http.ResponseWriter, r *http.Request) bool {
+		if strings.HasSuffix(r.URL.Path, ".sig2") {
+			_, _ = w.Write([]byte("sig"))
+			return true
+		}
+		if archiveHits.Add(1) == 1 {
+			http.Error(w, "later", http.StatusServiceUnavailable)
+			return true
+		}
+		_, _ = w.Write(archive)
+		return true
+	}
+	f.mu.Unlock()
+	target := targetFor(t, f.srv.URL+"/current", archive, sha256Hex(archive))
+	var mu sync.Mutex
+	seen := map[EventKind]int{}
+	engine := New(Options{
+		DestDir: t.TempDir(),
+		Mode:    ModeDownload,
+		OnEvent: func(ev Event) {
+			mu.Lock()
+			seen[ev.Kind]++
+			mu.Unlock()
+		},
+	})
+	results := engine.Fetch(context.Background(), []Target{target})
+	if results[0].Err != nil {
+		t.Fatalf("Fetch: %v", results[0].Err)
+	}
+	for _, kind := range []EventKind{EventStart, EventFileStart, EventFileTick, EventFileDone, EventRetry, EventFinished} {
+		if seen[kind] == 0 {
+			t.Errorf("event %q was not emitted: %v", kind, seen)
+		}
+	}
+}
+
+// TestFetchEmitsCacheHit pins the cache-hit event.
+func TestFetchEmitsCacheHit(t *testing.T) {
+	f := newFixture(t)
+	archive := []byte("cached")
+	sig := []byte("sig")
+	f.serveBody(map[string][]byte{
+		"figlet-2.2.5_6.x86_64.xbps":      archive,
+		"figlet-2.2.5_6.x86_64.xbps.sig2": sig,
+	})
+	dir := t.TempDir()
+	target := targetFor(t, f.srv.URL+"/current", archive, sha256Hex(archive))
+	writeFile(t, dir, target.Filename, archive)
+	writeFile(t, dir, target.Filename+".sig2", sig)
+	var sawCacheHit atomic.Bool
+	engine := New(Options{
+		DestDir: dir,
+		Mode:    ModeCache,
+		OnEvent: func(ev Event) {
+			if ev.Kind == EventCacheHit {
+				sawCacheHit.Store(true)
+			}
+		},
+	})
+	results := engine.Fetch(context.Background(), []Target{target})
+	if results[0].Err != nil {
+		t.Fatalf("Fetch: %v", results[0].Err)
+	}
+	if !sawCacheHit.Load() {
+		t.Error("no cache-hit event")
+	}
+}
+
+// TestFetchDefaultUserAgent pins xbpretty/<version> as the default UA.
+func TestFetchDefaultUserAgent(t *testing.T) {
+	old := Version
+	Version = "9.9.9"
+	defer func() { Version = old }()
+	var got atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.UserAgent())
+		_, _ = w.Write([]byte("body"))
+	}))
+	defer srv.Close()
+	target := targetFor(t, srv.URL+"/current", []byte("body"), "")
+	results := New(Options{DestDir: t.TempDir(), Mode: ModeDownload}).Fetch(context.Background(), []Target{target})
+	if results[0].Err != nil {
+		t.Fatalf("Fetch: %v", results[0].Err)
+	}
+	if ua, _ := got.Load().(string); ua != "xbpretty/9.9.9" {
+		t.Errorf("User-Agent = %q, want xbpretty/9.9.9", ua)
 	}
 }

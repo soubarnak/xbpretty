@@ -58,7 +58,11 @@ case "$*" in
     case " ${XB_STUB_MISSING:-} " in
       *" $3 "*) exit 2 ;;
     esac
-    printf '%s' "${XB_STUB_RESOLVE:-}"
+    # A per-name fixture (XB_STUB_RESOLVE_FIGLET) overrides the shared one.
+    safe=$(printf '%s' "$3" | tr 'a-z' 'A-Z' | tr -c 'A-Z0-9' '_')
+    per_name=$(printenv "XB_STUB_RESOLVE_$safe" 2>/dev/null || true)
+    printf '%s' "${per_name:-${XB_STUB_RESOLVE:-}}"
+    printf '%s' "${XB_STUB_RESOLVE_STDERR:-}" >&2
     exit "${XB_STUB_RESOLVE_EXIT:-0}" ;;
   *"-R -S "*)
     printf '%s' "${XB_STUB_SHOW_REPO:-}"

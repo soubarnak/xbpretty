@@ -20,6 +20,7 @@ const (
 	exitRuntime     = 1
 	exitUsage       = 2
 	exitNothingToDo = 0
+	exitInterrupted = 130
 )
 
 // isTerminalFn reports whether a file is a terminal. Tests replace it to

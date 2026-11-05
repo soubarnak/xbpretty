@@ -21,14 +21,16 @@ type printURIObject struct {
 
 // runPrintURIs implements FR-028: one object per planned download on stdout,
 // then stop. It runs no sync, no summary, no prompt, no download and no
-// transaction, and needs no root.
+// transaction, and needs no root. The row set is PlannedDownloadRows: every
+// downloading action, hold excluded, including local and zero-size rows, as
+// FR-028 defines a URL for any repository form.
 func (st *state) runPrintURIs(cmd string, opts *options) int {
 	rows, code := st.planTransaction(cmd, opts, nil)
 	if code >= 0 {
 		return code
 	}
 	hashes := st.bulkFilenameSHA256()
-	for _, row := range download.DownloadRows(rows) {
+	for _, row := range download.PlannedDownloadRows(rows) {
 		url, err := download.ArchiveURL(row.Repo, row.Pkgver(), row.Arch)
 		if err != nil {
 			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)

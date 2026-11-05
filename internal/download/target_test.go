@@ -151,3 +151,54 @@ func TestTargetFromRowCarriesPlanMetadata(t *testing.T) {
 		t.Errorf("target = %+v", target)
 	}
 }
+
+// TestPlannedDownloadRowsIsWiderThanPredownload pins FR-028's decision: every
+// downloading action yields a --print-uris object, including local and
+// zero-size rows; hold/remove/configure do not.
+func TestPlannedDownloadRowsIsWiderThanPredownload(t *testing.T) {
+	rows := []xbps.Row{
+		{Name: "remote", Version: "1.0_1", Action: xbps.ActionUpdate, Arch: "x86_64", Repo: "https://repo/current", DownloadSize: 100, HasDownload: true},
+		{Name: "local", Version: "1.0_1", Action: xbps.ActionInstall, Arch: "x86_64", Repo: "/srv/repo", DownloadSize: 0, HasDownload: true},
+		{Name: "zero", Version: "1.0_1", Action: xbps.ActionReinstall, Arch: "noarch", Repo: "https://repo/current", DownloadSize: 0, HasDownload: true},
+		{Name: "held", Version: "1.0_1", Action: xbps.ActionHold, Arch: "x86_64", Repo: "https://repo/current", DownloadSize: 100, HasDownload: true},
+		{Name: "removed", Version: "1.0_1", Action: xbps.ActionRemove, Arch: "x86_64", Repo: "https://repo/current", DownloadSize: 100, HasDownload: true},
+	}
+	var names []string
+	for _, row := range PlannedDownloadRows(rows) {
+		names = append(names, row.Name)
+	}
+	want := []string{"remote", "local", "zero"}
+	if !reflect.DeepEqual(names, want) {
+		t.Errorf("PlannedDownloadRows = %v, want %v", names, want)
+	}
+	localURL, err := ArchiveURL("/srv/repo", "local-1.0_1", "x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if localURL != "/srv/repo/local-1.0_1.x86_64.xbps" {
+		t.Errorf("local url = %q", localURL)
+	}
+}
+
+// TestTargetsFromRowsFiltersFTPAndLocal pins #72's pre-target filter: ftp and
+// local rows never reach the cache-mode engine, and their counts are returned
+// for the FR-037 warnings.
+func TestTargetsFromRowsFiltersFTPAndLocal(t *testing.T) {
+	rows := []xbps.Row{
+		{Name: "good", Version: "1.0_1", Action: xbps.ActionUpdate, Arch: "x86_64", Repo: "https://repo/current", DownloadSize: 100, HasDownload: true},
+		{Name: "ftp", Version: "1.0_1", Action: xbps.ActionInstall, Arch: "x86_64", Repo: "ftp://ftp.example/current", DownloadSize: 100, HasDownload: true},
+		{Name: "local", Version: "1.0_1", Action: xbps.ActionInstall, Arch: "x86_64", Repo: "/srv/repo", DownloadSize: 100, HasDownload: true},
+		{Name: "held", Version: "1.0_1", Action: xbps.ActionHold, Arch: "x86_64", Repo: "https://repo/current", DownloadSize: 100, HasDownload: true},
+	}
+	hashes := map[HashKey]string{HashKeyFor("https://repo/current", "good-1.0_1"): "abc"}
+	targets, ftp, local, err := TargetsFromRows(rows, hashes)
+	if err != nil {
+		t.Fatalf("TargetsFromRows: %v", err)
+	}
+	if len(targets) != 1 || targets[0].Pkgver != "good-1.0_1" || targets[0].SHA256 != "abc" {
+		t.Errorf("targets = %+v", targets)
+	}
+	if ftp != 1 || local != 1 {
+		t.Errorf("exclusions = ftp %d, local %d, want 1/1", ftp, local)
+	}
+}
