@@ -523,3 +523,71 @@ func writeHistoryTable(w io.Writer, headers []string, rows [][]string) {
 		writeRow(row)
 	}
 }
+
+// runHistoryClear implements FR-035's clear surface: one entry by id/last, or
+// every numeric entry with --all. Both forms are root-only.
+func (st *state) runHistoryClear(opts *options) int {
+	if euidFn() != 0 {
+		st.clearRootHint(opts)
+		return exitRuntime
+	}
+	store := history.New(st.historyDir)
+	if opts.clearAll {
+		count, err := store.Clear()
+		if err != nil {
+			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			return exitRuntime
+		}
+		if count == 1 {
+			fmt.Fprintln(st.stdout, "Cleared 1 history entry.")
+		} else {
+			fmt.Fprintf(st.stdout, "Cleared %d history entries.\n", count)
+		}
+		return exitOK
+	}
+
+	selector := opts.args[0]
+	id, last, ok := parseHistorySelector(selector)
+	if !ok {
+		fmt.Fprintf(st.stderr, "xbpretty: invalid history selector %q; use an integer id or 'last'\n", selector)
+		return exitUsage
+	}
+	if last {
+		entry, present, err := store.Last()
+		if err != nil {
+			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			return exitRuntime
+		}
+		if !present {
+			fmt.Fprintln(st.stderr, "xbpretty: history is empty")
+			return exitRuntime
+		}
+		id = entry.ID
+	}
+	if err := store.Delete(id); err != nil {
+		if errors.Is(err, history.ErrNotFound) {
+			fmt.Fprintf(st.stderr, "xbpretty: history entry %d not found\n", id)
+			return exitRuntime
+		}
+		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		return exitRuntime
+	}
+	fmt.Fprintf(st.stdout, "Cleared history entry %d.\n", id)
+	return exitOK
+}
+
+// clearRootHint prints the root hint for clear without inventing a package
+// list: the selector or --all is part of the refused invocation.
+func (st *state) clearRootHint(opts *options) {
+	elevate := "sudo"
+	if _, err := os.Stat("/usr/bin/doas"); err == nil {
+		elevate = "doas"
+	}
+	line := "xbp history clear"
+	if opts.clearAll {
+		line += " --all"
+	} else if len(opts.args) > 0 {
+		line += " " + opts.args[0]
+	}
+	fmt.Fprintf(st.stderr, "hint: rerun as root: %s %s\n", elevate, line)
+}

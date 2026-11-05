@@ -12,6 +12,20 @@ if [ -n "${XB_STUB_ENV_LOG:-}" ]; then
   printf 'LC_ALL=%s\n' "${LC_ALL:-}" >> "$XB_STUB_ENV_LOG"
 fi
 case "$*" in
+  "-R -p pkgver "*)
+    # A replay preflights its exact recorded version: the cache is checked
+    # first, then this repository lookup. XB_STUB_REPO_MISSING names the
+    # pkgvers no configured repository serves.
+    pkgver="${4}"
+    case " ${XB_STUB_REPO_MISSING:-} " in
+      *" $pkgver "*) exit 2 ;;
+    esac
+    if [ -n "${XB_STUB_REPO_PKGVER:-}" ]; then
+      printf '%s\n' "$XB_STUB_REPO_PKGVER"
+    else
+      printf '%s\n' "$pkgver"
+    fi
+    exit "${XB_STUB_REPO_EXIT:-0}" ;;
   *"--list-repolock-pkgs"*)
     if after_state; then printf '%s' "${XB_STUB_REPOLOCK_AFTER-${XB_STUB_REPOLOCK:-}}"; else printf '%s' "${XB_STUB_REPOLOCK:-}"; fi
     exit 0 ;;

@@ -126,10 +126,26 @@ type xbpsPhase struct {
 // must never publish a history entry between its restore and removal phases
 // (FR-031, FR-033).
 func (st *state) executePhases(cmd string, logArgs []string, allRows []xbps.Row, phases ...xbpsPhase) int {
-	for _, phase := range phases {
+	return st.executePhasesAfter(cmd, logArgs, allRows, "", nil, phases...)
+}
+
+// executePhasesAfter is executePhases with the replay extensions: partial is
+// printed when a phase after the first fails (FR-033's partial phase-2
+// message), and after runs once every phase exited 0, before the single
+// commit point. after is where a replay restores the recorded
+// automatic-install bit (FR-034), so the new entry records the final state.
+// #70 extends the #69 commit point here rather than writing history itself.
+func (st *state) executePhasesAfter(cmd string, logArgs []string, allRows []xbps.Row, partial string, after func(), phases ...xbpsPhase) int {
+	for i, phase := range phases {
 		if code := st.execute(cmd, phase.bin, phase.args, phase.rows...); code != 0 {
+			if i > 0 && partial != "" {
+				fmt.Fprintf(st.stderr, "xbpretty: %s\n", partial)
+			}
 			return code
 		}
+	}
+	if after != nil {
+		after()
 	}
 	st.completeTransaction(cmd, logArgs, allRows)
 	return exitOK

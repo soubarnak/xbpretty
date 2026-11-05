@@ -1,0 +1,6 @@
+#!/bin/sh
+# Stub xbps-rindex: records how it was called. The replay repository recipe
+# needs it to index the cache-only archives; XB_STUB_RINDEX_EXIT lets a test
+# exercise the failure path.
+printf '%s %s\n' "${0##*/}" "$*" >> "${XB_STUB_LOG:-/dev/null}"
+exit "${XB_STUB_RINDEX_EXIT:-0}"

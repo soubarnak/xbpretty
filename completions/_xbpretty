@@ -86,9 +86,9 @@ _xbpretty() {
   local -a f_history
   f_history=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --all)
   local -a f_undo
-  f_undo=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --no-log)
+  f_undo=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui -y --yes --assume-yes -n --assume-no --no-log)
   local -a f_redo
-  f_redo=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --no-log)
+  f_redo=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui -y --yes --assume-yes -n --assume-no --no-log)
   local -a f_fetch
   f_fetch=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui -c --country --dry-run --auto --https-only --non-free)
   local -a f_completion

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Stub xbps-pkgdb: records how it was called. A replay restores the recorded
+# automatic-install bit with -m auto|manual; XB_STUB_PKGDB_EXIT exercises the
+# best-effort warning path.
+printf '%s %s\n' "${0##*/}" "$*" >> "${XB_STUB_LOG:-/dev/null}"
+exit "${XB_STUB_PKGDB_EXIT:-0}"
