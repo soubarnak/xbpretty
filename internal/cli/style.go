@@ -7,7 +7,7 @@ import (
 )
 
 // progressRole is one of nala's nine PascalCase theme roles as the inline
-// progress surfaces use them (ADR-0012 decision 2).
+// progress surfaces use it (ADR-0012 decision 2).
 type progressRole int
 
 const (
@@ -22,30 +22,44 @@ const (
 	roleError
 )
 
-// roleSGR is the exact SGR prefix nala emits for each role under the default
-// theme (ADR-0012 decision 2). ProgressFilled and ProgressUnfilled share the
-// default palette's bright green and bright red.
-var roleSGR = map[progressRole]string{
-	rolePrimary:          "\x1b[1;92m",
-	roleSecondary:        "\x1b[1;94m",
-	roleHighlight:        "\x1b[1;39m",
-	roleRegular:          "\x1b[0;39m",
-	roleProgressFilled:   "\x1b[1;92m",
-	roleProgressUnfilled: "\x1b[1;91m",
-	roleNotice:           "\x1b[1;93m",
-	roleWarning:          "\x1b[1;93m",
-	roleError:            "\x1b[1;91m",
-}
-
 const ansiResetSeq = "\x1b[0m"
+
+// rolePrefix returns the role's SGR prefix from the resolved [Color.theme].
+// The zero Theme falls back to nala's default palette.
+func rolePrefix(theme summary.Theme, role progressRole) string {
+	if theme == (summary.Theme{}) {
+		theme = summary.DefaultTheme()
+	}
+	switch role {
+	case rolePrimary:
+		return theme.Primary
+	case roleSecondary:
+		return theme.Secondary
+	case roleHighlight:
+		return theme.Highlight
+	case roleRegular:
+		return theme.Regular
+	case roleProgressFilled:
+		return theme.ProgressFilled
+	case roleProgressUnfilled:
+		return theme.ProgressUnfilled
+	case roleNotice:
+		return theme.Notice
+	case roleWarning:
+		return theme.Warning
+	case roleError:
+		return theme.Error
+	}
+	return theme.Regular
+}
 
 // paintRole wraps s in the role's SGR prefix and a reset. With colour off it
 // returns s untouched, so a --no-color run emits no SGR bytes at all.
-func paintRole(color bool, role progressRole, s string) string {
+func paintRole(theme summary.Theme, color bool, role progressRole, s string) string {
 	if !color || s == "" {
 		return s
 	}
-	return roleSGR[role] + s + ansiResetSeq
+	return rolePrefix(theme, role) + s + ansiResetSeq
 }
 
 // roleWidth and padRole are the ANSI-aware width helpers the widget needs.

@@ -4,6 +4,8 @@ import (
 	"math"
 	"strconv"
 	"strings"
+
+	"github.com/soubarnak/xbpretty/internal/summary"
 )
 
 // progressKind selects one of FR-064's five fixed views.
@@ -95,8 +97,9 @@ func widgetFill(width int, ratio float64) int {
 	return n
 }
 
-// widgetWidth applies FR-064's width rule: min(columns, 80), with a floor so
-// the frame can still hold its own borders.
+// widgetWidth applies FR-064's width rule: min(columns, 80). The 8-column
+// floor is an extension: below it the frame cannot hold its own borders, and
+// the renderer drops the Progress label so the divider stays rectangular.
 func widgetWidth(columns int) int {
 	if columns <= 0 {
 		columns = 80
@@ -124,15 +127,20 @@ func halfLabelWidth(rows []progressInfo) int {
 
 // renderInfoCell is " " + "{label}:" + (labelWidth - len(label) + 2) spaces +
 // value, label Primary and value Regular.
-func renderInfoCell(color bool, row progressInfo, labelWidth int) string {
+func renderInfoCell(theme summary.Theme, color bool, row progressInfo, labelWidth int) string {
 	gap := labelWidth - len(row.label) + 2
-	return " " + paintRole(color, rolePrimary, row.label+":") + repeatRole(" ", gap) +
-		paintRole(color, roleRegular, row.value)
+	return " " + paintRole(theme, color, rolePrimary, row.label+":") + repeatRole(" ", gap) +
+		paintRole(theme, color, roleRegular, row.value)
 }
 
 // renderProgressView lays one view out at columns columns and returns its
 // lines. Height comes from the view, never the content.
 func renderProgressView(v progressView, columns int, color bool) []string {
+	return renderProgressViewThemed(v, columns, color, summary.DefaultTheme())
+}
+
+// renderProgressViewThemed lays one view out with the resolved theme roles.
+func renderProgressViewThemed(v progressView, columns int, color bool, theme summary.Theme) []string {
 	width := widgetWidth(columns)
 	inner := width - 4
 	if inner < 0 {
@@ -149,9 +157,9 @@ func renderProgressView(v progressView, columns int, color bool) []string {
 	}
 	leftPad := pad / 2
 	rightPad := pad - leftPad
-	top := "╭" + paintRole(color, rolePrimary, repeatRole("─", leftPad)) +
-		paintRole(color, roleHighlight, title) +
-		paintRole(color, rolePrimary, repeatRole("─", rightPad)) + "╮"
+	top := "╭" + paintRole(theme, color, rolePrimary, repeatRole("─", leftPad)) +
+		paintRole(theme, color, roleHighlight, title) +
+		paintRole(theme, color, rolePrimary, repeatRole("─", rightPad)) + "╮"
 
 	// Message row: " " + "{Header}: " + text. The text falls back to an
 	// em dash when the stream has not named anything yet.
@@ -163,7 +171,7 @@ func renderProgressView(v progressView, columns int, color bool) []string {
 	if text == "" {
 		text = "—"
 	}
-	message := " " + paintRole(color, v.msgRole, header+": ") + paintRole(color, roleRegular, text)
+	message := " " + paintRole(theme, color, v.msgRole, header+": ") + paintRole(theme, color, roleRegular, text)
 	msgRow := "│ " + padRole(clipRole(message, inner), inner) + " │"
 
 	// Divider: full frame width, centred " Progress ", right " NN% ".
@@ -188,48 +196,42 @@ func renderProgressView(v progressView, columns int, color bool) []string {
 	x := 1
 	writeRuns := func(upto int, role progressRole, glyph string) {
 		if upto > x {
-			divider.WriteString(paintRole(color, role, repeatRole(glyph, upto-x)))
+			divider.WriteString(paintRole(theme, color, role, repeatRole(glyph, upto-x)))
 			x = upto
 		}
 	}
 	writeRuns(labelStart, rolePrimary, "─")
 	if label != "" {
-		divider.WriteString(paintRole(color, roleHighlight, label))
+		divider.WriteString(paintRole(theme, color, roleHighlight, label))
 		x += roleWidth(label)
 	}
 	writeRuns(pctStart, rolePrimary, "─")
-	divider.WriteString(paintRole(color, roleHighlight, percent))
+	divider.WriteString(paintRole(theme, color, roleHighlight, percent))
 	x += roleWidth(percent)
 	writeRuns(1+frameWidth, rolePrimary, "─")
 	divider.WriteString("┤")
 
 	// Bar row: W-4 glyphs, filled and unfilled differ by colour only.
 	filled := widgetFill(inner, v.ratio)
-	bar := paintRole(color, roleProgressFilled, repeatRole("━", filled)) +
-		paintRole(color, roleProgressUnfilled, repeatRole("━", inner-filled))
+	bar := paintRole(theme, color, roleProgressFilled, repeatRole("━", filled)) +
+		paintRole(theme, color, roleProgressUnfilled, repeatRole("━", inner-filled))
 	barRow := "│ " + bar + " │"
 
 	lines := []string{top, msgRow, divider.String(), barRow}
 	leftLabels := halfLabelWidth(v.left)
 	rightLabels := halfLabelWidth(v.right)
 	rows := v.height() - 5
-	if len(v.left) > rows {
-		rows = len(v.left)
-	}
-	if len(v.right) > rows {
-		rows = len(v.right)
-	}
 	for i := 0; i < rows; i++ {
 		var left, right string
 		if i < len(v.left) {
-			left = renderInfoCell(color, v.left[i], leftLabels)
+			left = renderInfoCell(theme, color, v.left[i], leftLabels)
 		}
 		if i < len(v.right) {
-			right = renderInfoCell(color, v.right[i], rightLabels)
+			right = renderInfoCell(theme, color, v.right[i], rightLabels)
 		}
 		content := padRole(left, half) + right
 		lines = append(lines, "│ "+padRole(clipRole(content, inner), inner)+" │")
 	}
-	lines = append(lines, "╰"+paintRole(color, rolePrimary, repeatRole("─", width-2))+"╯")
+	lines = append(lines, "╰"+paintRole(theme, color, rolePrimary, repeatRole("─", width-2))+"╯")
 	return lines
 }

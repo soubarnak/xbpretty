@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -103,19 +104,40 @@ func (st *state) runFetch(opts *options) int {
 	// view down, prints the interruption and exits 130 (FR-072).
 	var live *liveProgress
 	progress := mirrorScoreEvents
-	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	var (
+		sigMu     sync.Mutex
+		delivered os.Signal
+	)
+	go func() {
+		select {
+		case sig := <-sigCh:
+			sigMu.Lock()
+			delivered = sig
+			sigMu.Unlock()
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	if mode := st.mirrorLiveMode(opts); mode != liveOff {
 		model := newProgressModel("mirror", nil, nil)
-		live = newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode, model)
+		live = newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode, model, st.theme)
 		st.r.live = true
 		st.r.liveProgress = live
+		defer live.Finish()
+		// Seed the known total before the first frame so it never renders as
+		// an empty or every-mirror-done box.
+		live.Apply(true, func(m *progressModel) { m.mirrorTotal = len(mirrors) })
 		progress = func(event fetch.ProgressEvent) {
 			mirrorScoreEvents(event)
-			model.mirrorEvent(event.Finished, event.Done, event.Total, event.Elapsed)
-			live.Request(true)
+			live.Apply(true, func(m *progressModel) {
+				m.mirrorEvent(event.Finished, event.Done, event.Total, event.Elapsed)
+			})
 		}
-		live.Request(true)
 	}
 	report := fetch.ProbeAll(ctx, fetch.ProbeOptions{
 		Client:      client,
@@ -131,7 +153,13 @@ func (st *state) runFetch(opts *options) int {
 		st.r.liveProgress = nil
 	}
 	if ctx.Err() != nil {
+		sigMu.Lock()
+		interruptedBy := delivered
+		sigMu.Unlock()
 		fmt.Fprintln(st.stderr, "xbpretty: interrupted")
+		if interruptedBy == syscall.SIGTERM {
+			return 128 + int(syscall.SIGTERM)
+		}
 		return exitInterrupted
 	}
 	if len(report.Failures) > 0 {

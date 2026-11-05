@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/soubarnak/xbpretty/internal/summary"
 	"github.com/soubarnak/xbpretty/internal/xbps"
 )
 
@@ -269,7 +270,7 @@ func TestPlainLineFilters(t *testing.T) {
 func TestLiveCoalescing(t *testing.T) {
 	var out bytes.Buffer
 	model := newProgressModel("install", downloadPlan(), nil)
-	live := newLiveProgress(&out, false, 80, liveWidgetMode, model)
+	live := newLiveProgress(&out, false, 80, liveWidgetMode, model, summary.DefaultTheme())
 	now := time.Unix(0, 0)
 	var pending func()
 	var waits []time.Duration
@@ -322,7 +323,7 @@ func TestLiveCoalescing(t *testing.T) {
 func TestPlainLiveRedrawsInPlaceWithoutColour(t *testing.T) {
 	var out bytes.Buffer
 	model := newProgressModel("install", downloadPlan(), nil)
-	live := newLiveProgress(&out, true, 80, livePlainMode, model) // colour requested, plain must ignore it
+	live := newLiveProgress(&out, true, 80, livePlainMode, model, summary.DefaultTheme()) // colour requested, plain must ignore it
 	live.Request(true)
 	model.downloadTick(DownloadTick{Filename: "alpha-1_1.x86_64.xbps", FilePercent: 50})
 	live.Request(true)

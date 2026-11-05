@@ -22,6 +22,9 @@ case "$*" in
   *"-X"*)
     printf '%s' "${XB_STUB_REVDEPS:-}"
     exit 0 ;;
+  *"-R -s  -p filename-sha256"*)
+    printf '%s' "${XB_STUB_HASHES:-}"
+    exit 0 ;;
   *"-R -s  -p architecture"*)
     printf '%s' "${XB_STUB_ARCH:-}"
     exit 0 ;;
@@ -49,6 +52,18 @@ case "$*" in
   *"--repository"*"-S "*)
     printf '%s' "${XB_STUB_SHOW_REPO:-}"
     exit "${XB_STUB_SHOW_REPO_EXIT:-0}" ;;
+  *"-R -S "*"-p pkgver,repository,architecture,filename-sha256"*)
+    # FR-037's per-name resolution: the name is $3; XB_STUB_MISSING lists the
+    # names no repository knows.
+    case " ${XB_STUB_MISSING:-} " in
+      *" $3 "*) exit 2 ;;
+    esac
+    # A per-name fixture (XB_STUB_RESOLVE_FIGLET) overrides the shared one.
+    safe=$(printf '%s' "$3" | tr 'a-z' 'A-Z' | tr -c 'A-Z0-9' '_')
+    per_name=$(printenv "XB_STUB_RESOLVE_$safe" 2>/dev/null || true)
+    printf '%s' "${per_name:-${XB_STUB_RESOLVE:-}}"
+    printf '%s' "${XB_STUB_RESOLVE_STDERR:-}" >&2
+    exit "${XB_STUB_RESOLVE_EXIT:-0}" ;;
   *"-R -S "*)
     printf '%s' "${XB_STUB_SHOW_REPO:-}"
     exit "${XB_STUB_SHOW_REPO_EXIT:-0}" ;;

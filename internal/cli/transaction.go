@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -115,29 +116,30 @@ func (st *state) wantsSync(cmd string, opts *options) bool {
 // xbps's own code and a hint; xbps exits 0 when every fetch fails, so an exit
 // of 0 continues to the dry run (FR-013). It returns -1 when the policy allows
 // the caller to continue.
-func (st *state) syncStep() int {
+func (st *state) syncStep() (int, hints.Output, error) {
 	// The update command owns the inline Updating Package Lists view
-	// (FR-064, FR-071); every other sync call leaves it off.
-	var code int
-	var output hints.Output
-	var err error
+	// (FR-064, FR-071); every other sync call leaves it off. The caller is
+	// responsible for tearing a live view down before printing the captured
+	// streams and the hint.
 	if st.r.live && st.r.liveProgress != nil {
-		code, err = st.r.stream(st.r.cfg.Xbps.InstallPath, "-S")
-		output = hints.Output{Stdout: st.r.lastStdout, Stderr: st.r.lastStderr}
-	} else {
-		code, output, err = st.r.streamStderr(st.r.cfg.Xbps.InstallPath, "-S")
+		code, err := st.r.stream(st.r.cfg.Xbps.InstallPath, "-S")
+		output := hints.Output{Stdout: st.r.lastStdout, Stderr: st.r.lastStderr}
+		if err != nil {
+			return exitRuntime, output, err
+		}
+		if code != 0 {
+			return code, output, nil
+		}
+		return -1, output, nil
 	}
+	code, output, err := st.r.streamStderr(st.r.cfg.Xbps.InstallPath, "-S")
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
-		return exitRuntime
+		return exitRuntime, output, err
 	}
 	if code != 0 {
-		if h := hints.Lookup(code, output); h != nil {
-			fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
-		}
-		return code
+		return code, output, nil
 	}
-	return -1
+	return -1, output, nil
 }
 
 // runTransaction drives one command from the plan through the prompt to the
@@ -165,6 +167,20 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		return exitRuntime
 	}
 
+	// FR-028: --print-uris stops before the sync step, any summary, prompt or
+	// download. It only needs the config and the plan, and never needs root.
+	if opts.printURIs {
+		return st.runPrintURIs(cmd, opts)
+	}
+
+	// The invocation-level guards below deliberately run before the index
+	// step. A command that is already going to refuse (a missing --reinstall
+	// target, or a remove whose every target is absent) must not refresh the
+	// index first: the refusal would be obscured by network work and by a
+	// stale-index warning that changes nothing. FR-014 puts the sync step
+	// before the dry run, not before these checks, and the dry run still
+	// starts only after the sync.
+
 	// FR-007: --reinstall is guarded before the dry run.
 	if cmd == "install" && opts.reinstall {
 		if code := st.reinstallGuard(opts); code >= 0 {
@@ -189,8 +205,18 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	if syncWanted {
 		if euidFn() != 0 {
 			fmt.Fprintln(st.stderr, "warning: not running as root, so the repository index was not refreshed; it may be stale")
-		} else if code := st.syncStep(); code >= 0 {
-			return code
+		} else {
+			code, output, err := st.syncStep()
+			if err != nil {
+				fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+				return exitRuntime
+			}
+			if code >= 0 {
+				if h := hints.Lookup(code, output); h != nil {
+					fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
+				}
+				return code
+			}
 		}
 	}
 
@@ -280,20 +306,52 @@ func commandBinaries(cmd string) []string {
 // renderSummary draws the read-only summary for a non-empty plan.
 func (st *state) renderSummary(rows []xbps.Row) int {
 	sum := st.planToSummary(rows)
-	isPlain := !isTTY(st.stdout)
-	termWidth := terminalWidth(st.stdout)
+	if st.opts != nil {
+		sum.Command = st.opts.command
+		if purgeRequested(st.opts.command, st.opts) {
+			switch st.opts.command {
+			case "remove":
+				sum.Command = "purge"
+			case "autoremove":
+				sum.Command = "autopurge"
+			}
+		}
+	}
+	stdoutTTY := isTTY(st.stdout)
+	// FR-062: the rule width is the stdout terminal width, else a positive
+	// COLUMNS, else 80, and it is used even when piped. Table expansion is a
+	// separate decision: full width on a TTY, natural widths when piped.
+	width := 0
+	if stdoutTTY {
+		width = terminalWidth(st.stdout)
+	}
+	if width <= 0 {
+		width = columnsFromEnv()
+	}
+	if width <= 0 {
+		width = 80
+	}
 	if err := (summary.Renderer{
-		Color:       st.color,
-		Plain:       isPlain,
-		Width:       termWidth,
-		BoxStyle:    st.boxStyle,
-		ProgressBar: st.progressBar,
-		Unit:        st.unit,
+		Color:  st.color,
+		Simple: st.simple,
+		Width:  width,
+		Piped:  !stdoutTTY,
+		Unit:   st.unit,
+		Theme:  st.theme,
 	}).Render(st.stdout, sum); err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
 		return exitRuntime
 	}
 	return -1
+}
+
+// columnsFromEnv reads COLUMNS, ignoring missing or malformed values.
+func columnsFromEnv() int {
+	n, err := strconv.Atoi(os.Getenv("COLUMNS"))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 // allHeld reports whether every row of the plan is a hold row.
@@ -404,20 +462,34 @@ func (st *state) runUpdate(opts *options) int {
 	// update never nests a sync: this is its one index step, whatever the
 	// --update/--no-update flags say.
 	live := st.beginUpdateLive()
-	if code := st.syncStep(); code >= 0 {
-		st.endLive(live)
-		// The live view swallowed the sync's output; a failed sync prints
-		// it now, before the hint path returns.
-		if code != 0 {
+	if live != nil {
+		defer st.endLive(live)
+	}
+	code, output, syncErr := st.syncStep()
+	// Clear the live surface before any captured output or hint is printed;
+	// otherwise the teardown would erase the diagnostic.
+	st.endLive(live)
+	if syncErr != nil {
+		if live != nil {
 			fmt.Fprint(st.stderr, st.r.lastStdout)
 			fmt.Fprint(st.stderr, st.r.lastStderr)
 		}
+		fmt.Fprintf(st.stderr, "xbpretty: %v\n", syncErr)
+		return exitRuntime
+	}
+	if code >= 0 {
+		if live != nil {
+			fmt.Fprint(st.stderr, st.r.lastStdout)
+			fmt.Fprint(st.stderr, st.r.lastStderr)
+		}
+		if h := hints.Lookup(code, output); h != nil {
+			fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
+		}
 		return code
 	}
-	st.endLive(live)
-	rows, code := st.planTransaction("upgrade", opts, nil)
-	if code >= 0 {
-		return code
+	rows, planCode := st.planUpdate()
+	if planCode >= 0 {
+		return planCode
 	}
 	upgradable := make([]xbps.Row, 0, len(rows))
 	for _, row := range rows {
@@ -436,6 +508,13 @@ func (st *state) runUpdate(opts *options) int {
 		st.writeLog("update", nil, nil)
 	}
 	return exitOK
+}
+
+// planUpdate runs FR-012's count-only dry run. Its argv is exactly
+// `xbps-install -n -u`: update takes no positionals, and validateInvocation
+// has already rejected a `--` passthrough, so none can be appended.
+func (st *state) planUpdate() ([]xbps.Row, int) {
+	return st.planTransaction("upgrade", &options{}, nil)
 }
 
 // commandBinariesForUpdate keeps update's binary rule in the command table
@@ -712,8 +791,9 @@ func rebootHint(rows []xbps.Row) string {
 // planToSummary converts parsed rows into a summary, looking up the old
 // versions and hold state the summary needs.
 func (st *state) planToSummary(rows []xbps.Row) *summary.Summary {
+	held := st.heldPackages()
 	srows := make([]summary.Row, 0, len(rows))
-	var upgradeNames []string
+	var oldNames []string
 	for _, row := range rows {
 		srows = append(srows, summary.Row{
 			Name: row.Name, Version: row.Version, Action: row.Action,
@@ -721,12 +801,18 @@ func (st *state) planToSummary(rows []xbps.Row) *summary.Summary {
 			DownloadSize: row.DownloadSize, HasInstalled: row.HasInstalled,
 			HasDownload: row.HasDownload,
 		})
-		if row.Action == "update" || row.Action == "reinstall" {
-			upgradeNames = append(upgradeNames, row.Name)
+		// The version diff applies to upgrades, reinstalls and held rows
+		// whose installed version differs (FR-063).
+		switch row.Action {
+		case "update", "reinstall", "hold":
+			oldNames = append(oldNames, row.Name)
+		default:
+			if held[row.Name] {
+				oldNames = append(oldNames, row.Name)
+			}
 		}
 	}
-	old := st.lookupOld(upgradeNames)
-	held := st.heldPackages()
+	old := st.lookupOld(oldNames)
 	return summary.Build(srows, held, old)
 }
 
@@ -766,11 +852,10 @@ func (st *state) beginUpdateLive() *liveProgress {
 	}
 	model := newProgressModel("update", nil, nil)
 	model.setRepositoryTotal(repositoryCount())
-	live := newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode, model)
+	live := newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode, model, st.theme)
 	parser := NewStreamParser(0, 0)
 	parser.OnRepoUpdate = func(url string) {
-		model.repository(url)
-		live.Request(true)
+		live.Apply(true, func(m *progressModel) { m.repository(url) })
 	}
 	st.r.parser = parser
 	st.r.live = true

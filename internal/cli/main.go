@@ -45,9 +45,9 @@ type runner struct {
 	lastStdout string
 	quiet      bool
 
-	stdout io.Writer
-	stderr io.Writer
-	stdin  io.Reader
+	stdout       io.Writer
+	stderr       io.Writer
+	stdin        io.Reader
 	parser       *StreamParser
 	live         bool
 	liveProgress *liveProgress
@@ -71,6 +71,7 @@ type state struct {
 	boxStyle    string
 	progressBar bool
 	unit        summary.SizeUnit
+	theme       summary.Theme
 	mode        config.UIMode
 	assumeYes   bool
 	autoRemove  bool
@@ -115,14 +116,6 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		}
 		return exitUsage
 	}
-	// FR-018 points --print-uris at §3.3.7, which #71 owns. Until it lands the
-	// flag must be refused before config resolution, any child and any
-	// prompt, so it can never fall through to a real transaction.
-	if opts.printURIs {
-		fmt.Fprintln(err, "xbpretty: --print-uris is not implemented in this build")
-		return exitRuntime
-	}
-
 	st := &state{stdout: newResilientWriter(out), stderr: err, stdin: in}
 
 	// moo is hidden and never touches config or xbps.
@@ -187,6 +180,7 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		st.progressBar = *opts.progressBar
 	}
 	st.unit = summary.SizeUnit(resolved.unit)
+	st.theme = summaryTheme(cfg.Color.Theme)
 	st.r = &runner{
 		cfg:     cfg,
 		out:     err,
@@ -228,15 +222,16 @@ func (st *state) dispatch(opts *options) int {
 		return st.runSearch(opts)
 	case "show":
 		return st.runShow(opts)
+	case "policy":
+		return st.runPolicy(opts)
 	case "fetch":
 		return st.runFetch(opts)
 	case "download":
-		// TODO(#72): the download command's archive fetch belongs to #72.
-		return st.runUnimplemented(opts.command, opts)
+		return st.runDownload(opts)
 	case "clean":
 		// TODO(#64): cache and repodata cleaning belongs to #64.
 		return st.runUnimplemented(opts.command, opts)
-	case "policy", "history", "undo", "redo":
+	case "history", "undo", "redo":
 		return st.runUnimplemented(opts.command, opts)
 	}
 	fmt.Fprintf(st.stderr, "xbpretty: unknown command %q\n", opts.command)
@@ -268,7 +263,19 @@ func validateInvocation(opts *options, err io.Writer) (int, bool) {
 			fmt.Fprintln(err, "xbpretty: fetch takes no arguments and no -- passthrough")
 			return exitUsage, true
 		}
-	case "upgrade", "full-upgrade", "safe-upgrade", "autoremove", "autopurge", "update", "clean":
+	case "update":
+		// update has no transaction to pass `--` arguments to: it is a sync
+		// plus one count dry run. Reject the passthrough rather than silently
+		// dropping it (FR-012, FR-021).
+		if opts.dashDash {
+			fmt.Fprintln(err, "xbpretty: update takes no arguments and no -- passthrough")
+			return exitUsage, true
+		}
+		if len(args) > 0 {
+			fmt.Fprintf(err, "xbpretty: %s takes no package arguments\n", opts.command)
+			return exitUsage, true
+		}
+	case "upgrade", "full-upgrade", "safe-upgrade", "autoremove", "autopurge", "clean":
 		if len(args) > 0 {
 			fmt.Fprintf(err, "xbpretty: %s takes no package arguments\n", opts.command)
 			return exitUsage, true

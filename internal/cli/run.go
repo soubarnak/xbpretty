@@ -162,6 +162,13 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 		}
 	}()
 
+	// stdout and stderr are forwarded by two goroutines; with no live view
+	// both display through one serialized writer so a non-*os.File sink never
+	// sees concurrent writes.
+	var display *serializedWriter
+	if !r.live {
+		display = &serializedWriter{w: r.stderrWriter()}
+	}
 	var rawStdout bytes.Buffer
 	stdoutDone := make(chan struct{})
 	go func() {
@@ -177,7 +184,7 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 			// FR-066: child stdout is never copied to xbpretty's stdout.
 			// With no live view it is forwarded verbatim on stderr.
 			if !r.live {
-				fmt.Fprintln(r.stderrWriter(), line)
+				fmt.Fprintln(display, line)
 			}
 		}
 	}()
@@ -189,7 +196,7 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 		pr, pw := io.Pipe()
 		mw := io.MultiWriter(&rawStderr, pw)
 		if !r.live {
-			mw = io.MultiWriter(&rawStderr, r.stderrWriter(), pw)
+			mw = io.MultiWriter(&rawStderr, display, pw)
 		}
 		parserDone := make(chan struct{})
 		go func() {
@@ -232,8 +239,9 @@ func (r *runner) streamDirect(name string, args ...string) (int, error) {
 		cmd.Stdout = &rawStdout
 		tee = &teeWriter{w: io.Discard}
 	} else {
-		cmd.Stdout = r.stderrWriter()
-		tee = &teeWriter{w: r.stderrWriter()}
+		display := &serializedWriter{w: r.stderrWriter()}
+		cmd.Stdout = display
+		tee = &teeWriter{w: display}
 	}
 	cmd.Stderr = tee
 	if err := cmd.Start(); err != nil {

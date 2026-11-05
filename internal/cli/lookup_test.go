@@ -71,26 +71,33 @@ func TestParseOldMissingPackage(t *testing.T) {
 }
 
 // TestAC010UpgradeShowsOldVersion drives a captured lookup answer through the
-// summary the way a real run does: an upgrade row renders `old → new`, both
-// bare versions.
+// summary the way a real run does: an upgrade row carries the old version in
+// its own column and the new version with its changed tail in Notice.
 func TestAC010UpgradeShowsOldVersion(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
+	e.tty = true
 	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
 	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
-	code, out, errs := e.run("xbpretty", "install", "xbps", "--dry-run")
+	code, out, errs := e.run("xbpretty", "install", "xbps", "--dry-run", "--color=always")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
-	if !strings.Contains(out, "0.60.7_1 → 0.60.8_1") {
-		t.Errorf("summary is missing the old version:\n%s", out)
+	if !strings.Contains(out, "Old Version:") || !strings.Contains(out, "New Version:") {
+		t.Errorf("summary is missing the version columns:\n%s", out)
+	}
+	if !strings.Contains(out, "0.60.7_1") {
+		t.Errorf("summary is missing the raw old version:\n%s", out)
+	}
+	if !strings.Contains(out, "0.60."+"\x1b[1;93m8_1\x1b[0m") {
+		t.Errorf("summary is missing the highlighted new version:\n%s", out)
 	}
 }
 
-// TestAC010HeldPackageNameCoversHyphens covers the join between the two Hold
+// TestAC010HeldPackageNameCoversHyphens covers the join between the two Held
 // sources: `xbps-query -H` prints a pkgver, and a package name carries
 // hyphens of its own, so the name comes off the version rather than the first
-// hyphen. A held package belongs in the Hold group alone, since the
+// hyphen. A held package belongs in the Held section alone, since the
 // transaction does not touch it.
 func TestAC010HeldPackageNameCoversHyphens(t *testing.T) {
 	e := newEnv(t)
@@ -101,13 +108,13 @@ func TestAC010HeldPackageNameCoversHyphens(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
-	if !strings.Contains(out, "Hold") || !strings.Contains(out, "base-files") {
-		t.Errorf("the held package is missing from the Hold group:\n%s", out)
+	if !strings.Contains(out, "Held") || !strings.Contains(out, "base-files") {
+		t.Errorf("the held package is missing from the Held section:\n%s", out)
 	}
 	if strings.Contains(out, "Upgrade") {
 		t.Errorf("a held package is listed as an upgrade:\n%s", out)
 	}
-	if !strings.Contains(out, "1 hold") {
-		t.Errorf("the footer is missing the hold count:\n%s", out)
+	if !strings.Contains(out, "Held 1") {
+		t.Errorf("the footer is missing the Held count:\n%s", out)
 	}
 }

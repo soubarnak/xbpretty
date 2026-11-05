@@ -18,7 +18,7 @@ import (
 )
 
 // setPtySize applies a TIOCSWINSZ window size to a pty file.
-func setPtySize(t *testing.T, f *os.File, cols, rows int) {
+func setProgressPtySize(t *testing.T, f *os.File, cols, rows int) {
 	t.Helper()
 	ws := winsize{ws_col: uint16(cols), ws_row: uint16(rows)}
 	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), syscall.TIOCSWINSZ, uintptr(unsafe.Pointer(&ws))); errno != 0 {
@@ -109,8 +109,8 @@ func ptyWidgetRun(t *testing.T, argv []string, cols int) (string, string, int) {
 	}
 	defer outMaster.Close()
 	defer errMaster.Close()
-	setPtySize(t, outSlave, cols, 24)
-	setPtySize(t, errSlave, cols, 24)
+	setProgressPtySize(t, outSlave, cols, 24)
+	setProgressPtySize(t, errSlave, cols, 24)
 
 	outCapture := readPty(outMaster)
 	errCapture := readPty(errMaster)
@@ -255,7 +255,7 @@ func TestAC047PlainLineOverPTY(t *testing.T) {
 	if err != nil {
 		t.Skipf("no pseudo-terminal: %v", err)
 	}
-	setPtySize(t, errSlave, 80, 24)
+	setProgressPtySize(t, errSlave, 80, 24)
 	defer errMaster.Close()
 	capture := readPty(errMaster)
 
@@ -404,8 +404,18 @@ func TestAC046MirrorScoreView(t *testing.T) {
 	if code != 1 { // #74's write seam still refuses
 		t.Fatalf("exit = %d\n%s", code, errs)
 	}
-	if !strings.Contains(errs, "Testing Mirrors") {
-		t.Errorf("missing the MirrorScore view:\n%s", errs)
+	frames := progressFrames(errs)
+	if len(frames) == 0 {
+		t.Fatalf("no MirrorScore frames captured:\n%q", errs)
+	}
+	if !strings.Contains(frames[0], "Testing Mirrors") {
+		t.Errorf("first frame is not the MirrorScore view:\n%s", frames[0])
+	}
+	if strings.Contains(frames[0], "Installing Packages") || strings.Contains(frames[0], "Downloading Packages") {
+		t.Errorf("a transaction view flashed before the probes:\n%s", frames[0])
+	}
+	if !strings.Contains(frames[0], "Mirrors:  0/2") {
+		t.Errorf("first frame did not seed the mirror total:\n%s", frames[0])
 	}
 	if !strings.Contains(errs, "Finished: ") {
 		t.Errorf("missing the Finished message:\n%s", errs)
@@ -421,48 +431,59 @@ func TestAC046MirrorScoreView(t *testing.T) {
 // TestCtrlCCancelsOwnedTransfer pins FR-072: Ctrl-C during xbpretty's probe
 // round tears the view down, prints the interruption and exits 130.
 func TestCtrlCCancelsOwnedTransfer(t *testing.T) {
-	fixture := newFetchFixture(t, []fetchMirror{
-		{name: "slow", region: "EU", location: "A", tier: 1, delay: 2 * time.Second},
-	})
-	e, _ := newFetchEnv(t, fixture)
-	e.root = true
-	e.tty = true
-	e.set("TERM", "xterm")
+	for _, tc := range []struct {
+		name string
+		sig  syscall.Signal
+		want int
+	}{
+		{"SIGINT", syscall.SIGINT, exitInterrupted},
+		{"SIGTERM", syscall.SIGTERM, 128 + int(syscall.SIGTERM)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newFetchFixture(t, []fetchMirror{
+				{name: "slow", region: "EU", location: "A", tier: 1, delay: 2 * time.Second},
+			})
+			e, _ := newFetchEnv(t, fixture)
+			e.root = true
+			e.tty = true
+			e.set("TERM", "xterm")
 
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT)
-	defer signal.Stop(sigs)
+			sigs := make(chan os.Signal, 1)
+			signal.Notify(sigs, tc.sig)
+			defer signal.Stop(sigs)
 
-	type fetchResult struct {
-		code int
-		errs string
-	}
-	done := make(chan fetchResult, 1)
-	go func() {
-		code, _, errs := e.run("xbpretty", "fetch")
-		done <- fetchResult{code: code, errs: errs}
-	}()
-
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		select {
-		case result := <-done:
-			if result.code != exitInterrupted {
-				t.Fatalf("exit = %d, want 130\n%s", result.code, result.errs)
+			type fetchResult struct {
+				code int
+				errs string
 			}
-			if !strings.Contains(result.errs, "xbpretty: interrupted") {
-				t.Errorf("missing the interruption message:\n%s", result.errs)
+			done := make(chan fetchResult, 1)
+			go func() {
+				code, _, errs := e.run("xbpretty", "fetch")
+				done <- fetchResult{code: code, errs: errs}
+			}()
+
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				select {
+				case result := <-done:
+					if result.code != tc.want {
+						t.Fatalf("exit = %d, want %d\n%s", result.code, tc.want, result.errs)
+					}
+					if !strings.Contains(result.errs, "xbpretty: interrupted") {
+						t.Errorf("missing the interruption message:\n%s", result.errs)
+					}
+					return
+				default:
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("fetch did not exit after %s", tc.name)
+				}
+				if err := syscall.Kill(os.Getpid(), tc.sig); err != nil {
+					t.Fatalf("signalling the test process: %v", err)
+				}
+				time.Sleep(50 * time.Millisecond)
 			}
-			return
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("fetch did not exit after SIGINT")
-		}
-		if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
-			t.Fatalf("signalling the test process: %v", err)
-		}
-		time.Sleep(50 * time.Millisecond)
+		})
 	}
 }
 
@@ -501,7 +522,7 @@ case "${1:-}" in
     exit 0
     ;;
   -S)
-    printf 'BOOM: repository sync failed\n' >&2
+    printf 'ERROR: failed to open repodata: /var/db/xbps/x86_64-repodata\n' >&2
     exit 2
     ;;
 esac
@@ -520,10 +541,81 @@ exit 0
 	if !strings.Contains(errs, "Updating Package Lists") {
 		t.Errorf("missing the Update view:\n%s", errs)
 	}
-	if !strings.Contains(errs, "BOOM: repository sync failed") {
-		t.Errorf("captured sync output was dropped:\n%s", errs)
+	const raw = "ERROR: failed to open repodata"
+	clearAt := strings.Index(errs, "\x1b[J")
+	rawAt := strings.Index(errs, raw)
+	hintAt := strings.Index(errs, "hint:")
+	if clearAt < 0 {
+		t.Fatalf("the view did not clear on failure:\n%s", errs)
 	}
-	if !strings.Contains(errs, "\x1b[J") {
-		t.Errorf("the view did not clear on failure:\n%s", errs)
+	if rawAt < 0 {
+		t.Fatalf("captured sync output was dropped:\n%s", errs)
+	}
+	if hintAt < 0 {
+		t.Fatalf("the stale-index hint was dropped:\n%s", errs)
+	}
+	if !(clearAt < rawAt && rawAt < hintAt) {
+		t.Errorf("ordering is clear=%d raw=%d hint=%d; want clear before raw before hint", clearAt, rawAt, hintAt)
+	}
+}
+
+// TestAC047NoLiveSurfaceWhenOnlyStdoutIsATTY covers the real per-file TTY
+// matrix: stdout is a terminal but stderr is a pipe, so the widget is
+// unavailable and the plain line is unavailable too. The child output is
+// forwarded verbatim on stderr.
+func TestAC047NoLiveSurfaceWhenOnlyStdoutIsATTY(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.writeConfig(writeTelemetryStub(t))
+
+	orig := isTerminalFn
+	isTerminalFn = isTerminal
+	t.Cleanup(func() { isTerminalFn = orig })
+
+	outMaster, outSlave, err := openPty()
+	if err != nil {
+		t.Skipf("no pseudo-terminal: %v", err)
+	}
+	defer outMaster.Close()
+	setProgressPtySize(t, outSlave, 80, 24)
+	go func() {
+		_, _ = io.Copy(io.Discard, outMaster)
+	}()
+
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var captured strings.Builder
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(&captured, errR)
+	}()
+
+	done := make(chan int, 1)
+	go func() {
+		done <- Run([]string{"xbpretty", "install", "-y", "figlet"}, strings.NewReader(""), outSlave, errW)
+	}()
+	var code int
+	select {
+	case code = <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the PTY run never finished")
+	}
+	outSlave.Close()
+	errW.Close()
+	wg.Wait()
+	errR.Close()
+	if code != 0 {
+		t.Fatalf("exit = %d\n%s", code, captured.String())
+	}
+	errs := captured.String()
+	if !strings.Contains(errs, "figlet-2.2.5_6: unpacking ...") {
+		t.Errorf("child output was not forwarded on stderr:\n%s", errs)
+	}
+	if strings.Contains(errs, "╭") || strings.Contains(errs, "\r\x1b[2K") {
+		t.Errorf("a live surface drew although stderr is a pipe:\n%q", errs)
 	}
 }

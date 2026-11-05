@@ -49,26 +49,23 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 	var live *liveProgress
 	if mode := st.liveMode(); mode != liveOff {
 		model := newProgressModel(cmd, rows, nil)
-		live = newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode, model)
+		live = newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode, model, st.theme)
 		st.r.live = true
 		st.r.liveProgress = live
+		defer live.Finish()
 		parser := st.r.parser
 		parser.OnDownloadTick = func(tick DownloadTick) {
-			model.downloadTick(tick)
-			live.Request(false)
+			live.Apply(false, func(m *progressModel) { m.downloadTick(tick) })
 		}
 		parser.OnDownloadComplete = func(done DownloadComplete) {
 			// A completion is also a cache hit and forces a redraw.
-			model.downloadDone(done)
-			live.Request(true)
+			live.Apply(true, func(m *progressModel) { m.downloadDone(done) })
 		}
 		parser.OnPhaseChange = func(phase string) {
-			model.phase(phase)
-			live.Request(true)
+			live.Apply(true, func(m *progressModel) { m.phase(phase) })
 		}
 		parser.OnPackageEvent = func(event PackageEvent) {
-			model.packageEvent(event)
-			live.Request(true)
+			live.Apply(true, func(m *progressModel) { m.packageEvent(event) })
 		}
 		live.Request(true)
 	}

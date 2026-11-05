@@ -3,11 +3,13 @@ package cli
 import (
 	"fmt"
 	"io"
+	"math"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/soubarnak/xbpretty/internal/fetch"
+	"github.com/soubarnak/xbpretty/internal/summary"
 	"github.com/soubarnak/xbpretty/internal/xbps"
 )
 
@@ -20,15 +22,19 @@ const plainLineWidth = 40
 const flushInterval = 150 * time.Millisecond
 
 // progressModel turns the xbps telemetry callbacks into the five fixed views.
-// It is the only place the spec's formulas live.
+// It is the only place the spec's formulas live. Every mutation goes through
+// liveProgress.Apply, which holds the renderer's mutex: the stdout scanner and
+// the stderr parser call it from different goroutines.
 type progressModel struct {
 	op    string
 	start time.Time
 	now   func() time.Time
 
-	// Download state. Archives are keyed by package name, the same key
-	// packageNameFromFilename produces for a tick or completion.
+	// Download state. archives maps an exact archive filename to its plan
+	// bytes; byPkgver is the same data keyed by pkgver for streams whose
+	// arch suffix this build does not know.
 	archives       map[string]uint64
+	byPkgver       map[string]uint64
 	totalArchives  int
 	totalBytes     uint64
 	completed      map[string]bool
@@ -37,17 +43,20 @@ type progressModel struct {
 	lastCompleted  string
 	inFlight       map[string]uint64
 
-	// Install state: U = 2·A units, unpack and configure each count once.
-	installTotal int
-	unpacked     map[string]bool
-	configured   map[string]bool
-	removed      map[string]bool
-	removeTotal  int
-	currentPkg   string
-	status       string
+	// Install state: U = 2·A unpack units for install/update rows plus one
+	// configure unit for configure-only rows.
+	installTotal   int
+	configureTotal int
+	unpacked       map[string]bool
+	configured     map[string]bool
+	removed        map[string]bool
+	removeTotal    int
+	currentPkg     string
+	status         string
 
 	// Update and MirrorScore state.
 	reposDone, reposTotal int
+	reposTotalKnown       bool
 	repoURL               string
 	mirrorDone            int
 	mirrorTotal           int
@@ -69,6 +78,7 @@ func newProgressModel(op string, rows []xbps.Row, now func() time.Time) *progres
 		start:      now(),
 		now:        now,
 		archives:   map[string]uint64{},
+		byPkgver:   map[string]uint64{},
 		completed:  map[string]bool{},
 		inFlight:   map[string]uint64{},
 		unpacked:   map[string]bool{},
@@ -80,25 +90,29 @@ func newProgressModel(op string, rows []xbps.Row, now func() time.Time) *progres
 		m.kind = viewRemove
 	case "update":
 		m.kind = viewUpdate
+	case "mirror", "fetch":
+		m.kind = viewMirrorScore
 	}
 	for _, row := range rows {
 		switch row.Action {
 		case xbps.ActionRemove:
 			m.removeTotal++
-		case xbps.ActionInstall, xbps.ActionUpdate, xbps.ActionReinstall, xbps.ActionConfigure:
+		case xbps.ActionConfigure:
+			m.configureTotal++
+		case xbps.ActionInstall, xbps.ActionUpdate, xbps.ActionReinstall:
 			m.installTotal++
-			if row.Action == xbps.ActionConfigure {
-				continue
-			}
-			key := row.Pkgver()
-			if _, seen := m.archives[key]; !seen {
-				m.archives[key] = row.DownloadSize
+			pkgver := row.Pkgver()
+			if _, seen := m.byPkgver[pkgver]; !seen {
+				m.byPkgver[pkgver] = row.DownloadSize
 				m.totalBytes += row.DownloadSize
 				m.totalArchives++
 			}
+			if row.Arch != "" {
+				m.archives[pkgver+"."+row.Arch+".xbps"] = row.DownloadSize
+			}
 		}
 	}
-	if m.kind != viewRemove && m.kind != viewUpdate {
+	if m.kind != viewRemove && m.kind != viewUpdate && m.kind != viewMirrorScore {
 		if m.totalArchives > 0 {
 			m.kind = viewDownload
 		} else {
@@ -134,18 +148,35 @@ func (m *progressModel) downloadSpeed() uint64 {
 	return ceilRate(m.position(), m.elapsedSeconds())
 }
 
+// archiveBytes resolves one telemetry filename to the plan's exact bytes.
+// The exact pkgver.arch.xbps key wins; otherwise the pkgver alone matches,
+// which also covers musl and future arch suffixes a build does not know.
+func (m *progressModel) archiveBytes(filename string) (string, uint64, bool) {
+	if bytes, ok := m.archives[filename]; ok {
+		return filename, bytes, true
+	}
+	stem := strings.TrimSuffix(strings.TrimSuffix(filename, ".sig2"), ".xbps")
+	if bytes, ok := m.byPkgver[stem]; ok {
+		return stem, bytes, true
+	}
+	pkgver := packageNameFromFilename(filename)
+	if bytes, ok := m.byPkgver[pkgver]; ok {
+		return pkgver, bytes, true
+	}
+	return "", 0, false
+}
+
 // DownloadTick applies one live tick. A .sig2 signature file never moves the
 // Packages, Data, Speed or Remaining counters.
 func (m *progressModel) downloadTick(tick DownloadTick) {
 	if strings.HasSuffix(tick.Filename, ".sig2") {
 		return
 	}
-	name := packageNameFromFilename(tick.Filename)
-	size, ok := m.archives[name]
-	if !ok || m.completed[name] {
+	key, size, ok := m.archiveBytes(tick.Filename)
+	if !ok || m.completed[key] {
 		return
 	}
-	m.inFlight[name] = uint64(float64(size) * float64(tick.FilePercent) / 100.0)
+	m.inFlight[key] = uint64(float64(size) * float64(tick.FilePercent) / 100.0)
 }
 
 // downloadDone applies one archive completion. Completion lines are the cache
@@ -155,19 +186,15 @@ func (m *progressModel) downloadDone(done DownloadComplete) {
 	if strings.HasSuffix(done.Filename, ".sig2") {
 		return
 	}
-	name := packageNameFromFilename(done.Filename)
-	if m.completed[name] {
+	key, size, ok := m.archiveBytes(done.Filename)
+	if !ok || m.completed[key] {
 		return
 	}
-	size, ok := m.archives[name]
-	if !ok {
-		return
-	}
-	m.completed[name] = true
+	m.completed[key] = true
 	m.completedBytes += size
 	m.completedCount++
 	m.lastCompleted = done.Filename
-	delete(m.inFlight, name)
+	delete(m.inFlight, key)
 }
 
 // phase applies an xbps phase header. Verification snaps the Download view to
@@ -212,19 +239,21 @@ func (m *progressModel) packageEvent(event PackageEvent) {
 }
 
 // repository records one `[*] Updating repository '<url>' ...` line. xbps
-// does not announce the repository count first, so the total grows as the
-// lines arrive (and can be seeded from the xbps.d scan by the caller).
+// does not announce the repository count first; the caller seeds it from the
+// same xbps.d set xbps reads. Until that seed exists the view shows `cur/?`
+// rather than claiming every repository is done.
 func (m *progressModel) repository(url string) {
 	m.reposDone++
 	m.repoURL = url
-	if m.reposTotal < m.reposDone {
+	if m.reposTotalKnown && m.reposDone > m.reposTotal {
 		m.reposTotal = m.reposDone
 	}
 }
 
 func (m *progressModel) setRepositoryTotal(total int) {
-	if total > m.reposTotal {
+	if total > 0 {
 		m.reposTotal = total
+		m.reposTotalKnown = true
 	}
 }
 
@@ -238,35 +267,46 @@ func (m *progressModel) mirrorEvent(finished string, done, total int, elapsed ti
 	m.mirrorElapsed = elapsed
 }
 
+func clampRatio(ratio float64) float64 {
+	if math.IsNaN(ratio) || ratio < 0 {
+		return 0
+	}
+	if ratio > 1 {
+		return 1
+	}
+	return ratio
+}
+
 // ratio is the fraction each view draws. Install is the two-unit model:
-// (unpacked + configured) / (2·A).
+// (unpacked + configured) / (2·A + configure-only rows).
 func (m *progressModel) ratio() float64 {
 	switch m.kind {
 	case viewDownload:
 		if m.totalBytes == 0 {
 			return 0
 		}
-		return float64(m.position()) / float64(m.totalBytes)
+		return clampRatio(float64(m.position()) / float64(m.totalBytes))
 	case viewInstall:
-		if m.installTotal == 0 {
+		denominator := 2*m.installTotal + m.configureTotal
+		if denominator == 0 {
 			return 0
 		}
-		return float64(len(m.unpacked)+len(m.configured)) / float64(2*m.installTotal)
+		return clampRatio(float64(len(m.unpacked)+len(m.configured)) / float64(denominator))
 	case viewRemove:
 		if m.removeTotal == 0 {
 			return 0
 		}
-		return float64(len(m.removed)) / float64(m.removeTotal)
+		return clampRatio(float64(len(m.removed)) / float64(m.removeTotal))
 	case viewUpdate:
 		if m.reposTotal == 0 {
 			return 0
 		}
-		return float64(m.reposDone) / float64(m.reposTotal)
+		return clampRatio(float64(m.reposDone) / float64(m.reposTotal))
 	case viewMirrorScore:
 		if m.mirrorTotal == 0 {
 			return 0
 		}
-		return float64(m.mirrorDone) / float64(m.mirrorTotal)
+		return clampRatio(float64(m.mirrorDone) / float64(m.mirrorTotal))
 	}
 	return 0
 }
@@ -281,7 +321,6 @@ func (m *progressModel) elapsedText() string {
 func (m *progressModel) view() progressView {
 	if m.verifying {
 		m.verifying = false
-		ratio := 1.0
 		m.kind = viewInstall
 		if m.removeTotal > 0 {
 			m.kind = viewRemove
@@ -296,7 +335,7 @@ func (m *progressModel) view() progressView {
 				{"Data", widgetSize(m.totalBytes) + "/" + widgetSize(m.totalBytes)},
 				{"Speed", widgetSize(m.downloadSpeed()) + "/s"},
 			},
-			ratio: ratio,
+			ratio: 1,
 		}
 	}
 	switch m.kind {
@@ -333,23 +372,26 @@ func (m *progressModel) view() progressView {
 			ratio:     m.ratio(),
 		}
 	case viewRemove:
-		text := strings.TrimSpace(m.status + " " + m.currentPkg)
 		return progressView{
 			kind:      viewRemove,
 			msgHeader: "Status",
-			msgText:   text,
+			msgText:   strings.TrimSpace(m.status + " " + m.currentPkg),
 			msgRole:   rolePrimary,
 			left:      []progressInfo{{"Package", m.currentPkg}},
 			right:     []progressInfo{{"Elapsed", m.elapsedText()}},
 			ratio:     m.ratio(),
 		}
 	case viewUpdate:
+		repositories := fmt.Sprintf("%d/?", m.reposDone)
+		if m.reposTotal > 0 {
+			repositories = pairCount(m.reposDone, m.reposTotal)
+		}
 		return progressView{
 			kind:      viewUpdate,
 			msgHeader: "Updating",
 			msgText:   m.repoURL,
 			msgRole:   roleRegular,
-			left:      []progressInfo{{"Repositories", pairCount(m.reposDone, m.reposTotal)}},
+			left:      []progressInfo{{"Repositories", repositories}},
 			right:     []progressInfo{{"Elapsed", m.elapsedText()}},
 			ratio:     m.ratio(),
 		}
@@ -403,33 +445,39 @@ func (m *progressModel) plain() plainState {
 		state.position = position
 		state.total = m.totalBytes
 		state.rate = rate
-		state.hasItems = true
-		state.itemsDone = m.completedCount
-		state.itemsTotal = m.totalArchives
-	case viewInstall:
-		state.message = strings.TrimSpace(m.status + " " + m.currentPkg)
-		if state.message == "" {
-			state.message = "Working..."
+		if m.totalArchives > 0 {
+			state.hasItems = true
+			state.itemsDone = m.completedCount
+			state.itemsTotal = m.totalArchives
 		}
-		state.hasItem = true
-		state.item = m.currentPkg
-	case viewRemove:
-		state.message = strings.TrimSpace(m.status + " " + m.currentPkg)
-		if state.message == "" {
-			state.message = "Working..."
+	case viewInstall, viewRemove:
+		body := strings.TrimSpace(m.status + " " + m.currentPkg)
+		state.message = "Working..."
+		if body != "" {
+			state.message = "Status: " + body
 		}
-		state.hasItem = true
-		state.item = m.currentPkg
+		if m.currentPkg != "" {
+			state.hasItem = true
+			state.item = m.currentPkg
+		}
 	case viewUpdate:
-		state.message = "Updating: " + m.repoURL
-		state.hasRepos = true
-		state.reposDone = m.reposDone
-		state.reposTotal = m.reposTotal
+		state.message = "Working..."
+		if m.repoURL != "" {
+			state.message = "Updating: " + m.repoURL
+			state.hasRepos = true
+			state.reposDone = m.reposDone
+			state.reposTotal = m.reposTotal
+		}
 	case viewMirrorScore:
-		state.message = "Finished: " + m.mirrorURL
-		state.hasMirrors = true
-		state.mirrorDone = m.mirrorDone
-		state.mirrorTotal = m.mirrorTotal
+		state.message = "Working..."
+		if m.mirrorURL != "" {
+			state.message = "Finished: " + m.mirrorURL
+		}
+		if m.mirrorDone > 0 {
+			state.hasMirrors = true
+			state.mirrorDone = m.mirrorDone
+			state.mirrorTotal = m.mirrorTotal
+		}
 	}
 	if state.message == "" {
 		state.message = "Working..."
@@ -484,6 +532,7 @@ type liveProgress struct {
 	color  bool
 	mode   liveMode
 	width  int
+	theme  summary.Theme
 	model  *progressModel
 	mu     sync.Mutex
 	drawn  int
@@ -497,16 +546,30 @@ type liveProgress struct {
 
 // newLiveProgress constructs the renderer. Width is clamped by the renderer
 // through widgetWidth.
-func newLiveProgress(out io.Writer, color bool, width int, mode liveMode, model *progressModel) *liveProgress {
+func newLiveProgress(out io.Writer, color bool, width int, mode liveMode, model *progressModel, theme summary.Theme) *liveProgress {
 	return &liveProgress{
 		out:   out,
 		color: color && mode == liveWidgetMode,
 		mode:  mode,
 		width: width,
+		theme: theme,
 		model: model,
 		now:   time.Now,
 		after: time.AfterFunc,
 	}
+}
+
+// Apply serializes one model mutation with the renderer. The stdout scanner
+// and the stderr parser call it from different goroutines, so every model
+// access must go through here; drawLocked already holds the same lock.
+func (l *liveProgress) Apply(force bool, update func(*progressModel)) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return
+	}
+	update(l.model)
+	l.requestLocked(force)
 }
 
 // SetWidth applies a SIGWINCH width change; the next redraw uses it.
@@ -559,7 +622,7 @@ func (l *liveProgress) drawLocked() {
 		fmt.Fprintf(l.out, "\r\x1b[2K%s", renderPlainLine(l.model.plain()))
 		l.drawn = 1
 	} else {
-		lines := renderProgressView(l.model.view(), l.width, l.color)
+		lines := renderProgressViewThemed(l.model.view(), l.width, l.color, l.theme)
 		if l.drawn == 0 {
 			fmt.Fprint(l.out, strings.Join(lines, "\n"))
 		} else {
@@ -585,7 +648,7 @@ func (l *liveProgress) drawLocked() {
 
 // Finish tears the live surface down. Success clears without any completion
 // line (FR-064); failure also clears, leaving the caller to print the captured
-// child output. No ANSI is left on the line.
+// child output. Finish is idempotent so a deferred safety call is harmless.
 func (l *liveProgress) Finish() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -618,7 +681,7 @@ func (l *liveProgress) Finish() {
 // repositoryCount is the repository total the Update view can know before the
 // sync starts. xbps prints one `[*] Updating repository ...` line per repo and
 // never announces the count, so the xbps.d scan seeds it where possible; when
-// the scan fails the model grows the total as lines arrive.
+// the scan fails the view shows `cur/?`.
 func repositoryCount() int {
 	cfg, err := fetch.DiscoverRepositories(fetchXBPSDDirs)
 	if err != nil {

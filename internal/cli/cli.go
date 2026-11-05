@@ -5,12 +5,17 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/soubarnak/xbpretty/internal/download"
 	"github.com/soubarnak/xbpretty/internal/spec"
 )
 
 // Version is xbpretty's own version string. Release builds set it with
 // -ldflags "-X github.com/soubarnak/xbpretty/internal/cli.Version=X.Y.Z".
 var Version = "dev"
+
+// The download engine's default User-Agent is xbpretty/<version>; the CLI owns
+// the release build's version string, so it forwards it at start-up.
+func init() { download.Version = Version }
 
 // Commands lists the visible subcommands, in help order. The table itself is
 // internal/spec; this stays for callers that only need the names.
