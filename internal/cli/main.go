@@ -108,6 +108,13 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		}
 		return exitUsage
 	}
+	// FR-018 points --print-uris at §3.3.7, which #71 owns. Until it lands the
+	// flag must be refused before config resolution, any child and any
+	// prompt, so it can never fall through to a real transaction.
+	if opts.printURIs {
+		fmt.Fprintln(err, "xbpretty: --print-uris is not implemented in this build")
+		return exitRuntime
+	}
 
 	st := &state{stdout: newResilientWriter(out), stderr: err, stdin: in}
 

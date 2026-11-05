@@ -122,7 +122,7 @@ func (st *state) syncStep() int {
 		return exitRuntime
 	}
 	if code != 0 {
-		if h := hints.Lookup(code, hints.Output{Stdout: output, Stderr: output}); h != nil {
+		if h := hints.Lookup(code, output); h != nil {
 			fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
 		}
 		return code
@@ -146,7 +146,7 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	// per-command existence check when the step is requested.
 	syncWanted := st.wantsSync(cmd, opts)
 	binaries := commandBinaries(cmd)
-	if syncWanted {
+	if syncWanted && euidFn() == 0 {
 		binaries = append(binaries, "install")
 	}
 	// FR-053: check only the binaries this command actually uses, at runtime.
@@ -218,27 +218,22 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		return exitOK
 	}
 
-	if opts.downloadOnly {
-		// #72 owns the predownload. The seam must never fall through to a
-		// real transaction.
-		return st.downloadOnlyStop(cmd, opts, rows)
-	}
-
 	// FR-015: -n takes the refusal path with no prompt, before any of the
 	// checks a real transaction would need.
 	if opts.assumeNo {
 		return st.refuse()
 	}
 	autoAccept := st.assumeYes
+	// FR-073: the non-root check is unconditional and comes before the
+	// non-TTY check, so a non-root run always gets the summary and the
+	// elevation hint.
+	if euidFn() != 0 {
+		st.privHint(cmd, opts)
+		return exitRuntime
+	}
 	if !autoAccept && !isTTY(st.stdin) {
 		// FR-015: never block on a pipe.
 		fmt.Fprintln(st.stderr, "xbpretty: stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed")
-		return exitRuntime
-	}
-	if euidFn() != 0 {
-		// FR-073: non-root real execution prints the summary and the hint,
-		// then exits 1 without prompting.
-		st.privHint(cmd, opts)
 		return exitRuntime
 	}
 	if !autoAccept {
@@ -246,6 +241,13 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		if !ok {
 			return refused
 		}
+	}
+
+	// FR-040: the download-only stop runs after its prompt/root/non-TTY
+	// checks. #72 owns the predownload; the seam must never fall through to
+	// a real transaction.
+	if opts.downloadOnly {
+		return st.downloadOnlyStop(cmd, opts, rows)
 	}
 
 	code = st.execute(cmd, st.binaryFor(cmd), realArgv(cmd, opts, args), rows...)
@@ -326,7 +328,7 @@ func (st *state) planTransaction(cmd string, opts *options, args []string) ([]xb
 	rows, err := xbps.ParsePlan(strings.NewReader(res.stdout))
 	if err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: cannot read the xbps plan: %v\n", err)
-		return nil, exitUsage
+		return nil, exitRuntime
 	}
 	return rows, -1
 }

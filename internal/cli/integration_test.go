@@ -108,13 +108,23 @@ func TestIntegrationPipedStdinNeverBlocks(t *testing.T) {
 	if strings.Contains(errs, "[Y/n]") {
 		t.Errorf("prompted on a pipe:\n%s", errs)
 	}
-	// The piped-stdin rule (FR-010 / AC-004) must fire for root and
-	// non-root alike. A non-root run only adds the stale-index warning.
-	if !strings.Contains(errs, "-y") {
-		t.Errorf("missing the -y hint:\n%s", errs)
-	}
-	if os.Geteuid() == 0 && (strings.Contains(errs, "sudo") || strings.Contains(errs, "doas")) {
-		t.Errorf("root run hit the privilege guard:\n%s", errs)
+	// FR-073 is unconditional for non-root, so a non-root piped run gets the
+	// elevation hint, not the non-TTY message. AC-012's non-TTY line is the
+	// root path.
+	if os.Geteuid() == 0 {
+		if !strings.Contains(errs, "-y") {
+			t.Errorf("missing the -y hint:\n%s", errs)
+		}
+		if strings.Contains(errs, "sudo") || strings.Contains(errs, "doas") {
+			t.Errorf("root run hit the privilege guard:\n%s", errs)
+		}
+	} else {
+		if !strings.Contains(errs, "sudo") && !strings.Contains(errs, "doas") {
+			t.Errorf("non-root run is missing the elevation hint:\n%s", errs)
+		}
+		if strings.Contains(errs, "stdin is not a terminal") {
+			t.Errorf("non-root run took the root-only non-TTY path:\n%s", errs)
+		}
 	}
 }
 

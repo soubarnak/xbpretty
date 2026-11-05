@@ -2,7 +2,7 @@
 # Stub xbps-query: records how it was called and answers from the fixture
 # variables. Queries succeed on their own terms - the transaction's exit
 # code never applies to them, matching real xbps.
-printf '%s\n' "$*" >> "${XB_STUB_LOG:-/dev/null}"
+printf '%s %s\n' "${0##*/}" "$*" >> "${XB_STUB_LOG:-/dev/null}"
 case "$*" in
   *"-H"*)
     printf '%s' "${XB_STUB_HOLD:-}"

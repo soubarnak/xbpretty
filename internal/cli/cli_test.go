@@ -127,8 +127,22 @@ func (e *env) run(argv ...string) (int, string, string) {
 	return code, string(out), string(errs)
 }
 
-// commands returns the argv of every stub xbps invocation.
+// commands returns the argv of every stub xbps invocation, without the
+// binary name the stubs now record.
 func (e *env) commands() []string {
+	e.t.Helper()
+	var out []string
+	for _, line := range e.commandsWithBinary() {
+		if _, args := splitStubLine(line); args != "" {
+			out = append(out, args)
+		}
+	}
+	return out
+}
+
+// commandsWithBinary returns each stub invocation as "<binary> <argv>" so a
+// test can prove which xbps program actually ran.
+func (e *env) commandsWithBinary() []string {
 	e.t.Helper()
 	raw, err := os.ReadFile(e.logPath)
 	if err != nil {
@@ -144,6 +158,12 @@ func (e *env) commands() []string {
 		}
 	}
 	return out
+}
+
+// splitStubLine splits one stub log line into its binary name and its argv.
+func splitStubLine(line string) (binary, args string) {
+	binary, args, _ = strings.Cut(line, " ")
+	return binary, args
 }
 
 func TestAC001NonRootSummaryHintAndExit(t *testing.T) {
@@ -1433,51 +1453,63 @@ func waitForPID(t *testing.T, path string) int {
 // TestAC014SignalledChildDecidesTheExitCode drives a real streamed child,
 // interrupts xbpretty, and checks the whole promise AC-014 makes: the child
 // receives the signal and xbpretty exits with the code a shell would report.
+// FR-074 promises both SIGINT and SIGTERM forwarding.
 func TestAC014SignalledChildDecidesTheExitCode(t *testing.T) {
-	e := newEnv(t)
-	e.root = true
-	pidPath := filepath.Join(e.dir, "child.pid")
-	e.pointInstallAt(writeSlowChild(t, e.dir, e.logPath, pidPath))
+	for _, tt := range []struct {
+		name string
+		sig  syscall.Signal
+		want int
+	}{
+		{"SIGINT", syscall.SIGINT, 130},
+		{"SIGTERM", syscall.SIGTERM, 143},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.root = true
+			pidPath := filepath.Join(e.dir, "child.pid")
+			e.pointInstallAt(writeSlowChild(t, e.dir, e.logPath, pidPath))
 
-	// Keep the test binary alive whatever the timing: stream arms its own
-	// handler only once the child has started.
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT)
-	defer signal.Stop(sigs)
+			// Keep the test binary alive whatever the timing: stream arms its
+			// own handler only once the child has started.
+			sigs := make(chan os.Signal, 1)
+			signal.Notify(sigs, tt.sig)
+			defer signal.Stop(sigs)
 
-	done := make(chan int, 1)
-	go func() {
-		code, _, _ := e.run("xbpretty", "update")
-		done <- code
-	}()
+			done := make(chan int, 1)
+			go func() {
+				code, _, _ := e.run("xbpretty", "update")
+				done <- code
+			}()
 
-	childPID := waitForPID(t, pidPath)
-	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+			childPID := waitForPID(t, pidPath)
+			t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
 
-	// Repeat the signal: a signal delivered before stream's handler is
-	// registered is not queued for it.
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		select {
-		case code := <-done:
-			if code != 130 {
-				t.Fatalf("exit = %d, want 130 (128 + SIGINT)", code)
-			}
-			if path, err := config.TransactionLog(); err == nil {
-				if _, err := os.Stat(path); err == nil {
-					t.Error("an interrupted run wrote to the transaction log")
+			// Repeat the signal: a signal delivered before stream's handler
+			// is registered is not queued for it.
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				select {
+				case code := <-done:
+					if code != tt.want {
+						t.Fatalf("exit = %d, want %d", code, tt.want)
+					}
+					if path, err := config.TransactionLogPath(); err == nil {
+						if _, err := os.Stat(path); err == nil {
+							t.Error("an interrupted run wrote to the transaction log")
+						}
+					}
+					return
+				default:
 				}
+				if time.Now().After(deadline) {
+					t.Fatalf("xbpretty did not exit after %s", tt.name)
+				}
+				if err := syscall.Kill(os.Getpid(), tt.sig); err != nil {
+					t.Fatalf("signalling the test process: %v", err)
+				}
+				time.Sleep(50 * time.Millisecond)
 			}
-			return
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("xbpretty did not exit after SIGINT")
-		}
-		if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
-			t.Fatalf("signalling the test process: %v", err)
-		}
-		time.Sleep(50 * time.Millisecond)
+		})
 	}
 }
 

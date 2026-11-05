@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/soubarnak/xbpretty/internal/config"
 )
 
 // TestAC005InstallArgvAndReinstallGuard pins FR-007: the dry run is exactly
@@ -225,6 +227,21 @@ func TestAC008UpgradeFamilyArgv(t *testing.T) {
 		}
 	})
 
+	t.Run("non-root remove --update does not require xbps-install", func(t *testing.T) {
+		e := newEnv(t)
+		e.root = false
+		missing := filepath.Join(e.dir, "no-such-xbps-install")
+		e.pointInstallAt(missing)
+		e.set("XB_STUB_STDOUT", removePlanFixture)
+		code, _, errs := e.run("xbpretty", "remove", "wget", "--update", "--dry-run")
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0: a non-root run can never execute the sync\n%s", code, errs)
+		}
+		if !strings.Contains(errs, "stale") {
+			t.Errorf("missing the stale-index warning:\n%s", errs)
+		}
+	})
+
 	t.Run("install --update on a non-root run warns and continues", func(t *testing.T) {
 		e := newEnv(t)
 		e.root = false
@@ -439,6 +456,30 @@ func TestAC012NonTTYExactMessage(t *testing.T) {
 	}
 }
 
+// TestNonRootPipedStdinGetsTheHint pins FR-073's unconditional priority over
+// the non-TTY message, even when stdin is a pipe.
+func TestNonRootPipedStdinGetsTheHint(t *testing.T) {
+	e := newEnv(t)
+	e.root = false
+	e.tty = false
+	code, out, errs := e.run("xbpretty", "install", "figlet")
+	if code != 1 {
+		t.Errorf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(out, "figlet") {
+		t.Errorf("the summary is missing:\n%s", out)
+	}
+	if !strings.Contains(errs, "hint: rerun as root: ") {
+		t.Errorf("missing the elevation hint:\n%s", errs)
+	}
+	if strings.Contains(errs, "stdin is not a terminal") {
+		t.Errorf("a non-root run took the root-only non-TTY path:\n%s", errs)
+	}
+	if strings.Contains(errs, "Do you want to continue?") {
+		t.Errorf("the non-root run prompted:\n%s", errs)
+	}
+}
+
 // TestExitCodePassThrough keeps FR-073's xbps pass-through over both runs.
 func TestExitCodePassThrough(t *testing.T) {
 	e := newEnv(t)
@@ -482,12 +523,14 @@ func TestAC056BinaryExistenceIsPerCommand(t *testing.T) {
 }
 
 // TestDownloadOnlyAndImplicitAutoremoveSeams proves the #72/#64 seams never
-// fall through to a real transaction.
+// fall through to a real transaction. The exit code is the seam's temporary
+// one; #72 owns the real download-only behaviour and replaces it. The
+// checks-first tests above pin the flow that must survive that replacement.
 func TestDownloadOnlyAndImplicitAutoremoveSeams(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.tty = true
-	code, _, errs := e.run("xbpretty", "install", "figlet", "--download-only")
+	code, _, errs := e.run("xbpretty", "install", "figlet", "--download-only", "-y")
 	if code != 1 {
 		t.Errorf("exit = %d, want 1 (the seam stops the run)", code)
 	}
@@ -499,6 +542,51 @@ func TestDownloadOnlyAndImplicitAutoremoveSeams(t *testing.T) {
 			t.Errorf("download-only ran a real transaction: %q", c)
 		}
 	}
+}
+
+// TestDownloadOnlyChecksComeFirst pins FR-040's checks before the #72 seam:
+// a non-root run gets the elevation hint, -n refuses, and a piped root run
+// gets the non-TTY line, all without reaching the seam.
+func TestDownloadOnlyChecksComeFirst(t *testing.T) {
+	t.Run("non-root", func(t *testing.T) {
+		e := newEnv(t)
+		e.root = false
+		e.tty = true
+		code, _, errs := e.run("xbpretty", "install", "figlet", "--download-only")
+		if code != 1 {
+			t.Errorf("exit = %d, want 1", code)
+		}
+		if !strings.Contains(errs, "hint: rerun as root: ") {
+			t.Errorf("missing the elevation hint:\n%s", errs)
+		}
+		if strings.Contains(errs, "download-only for install is not implemented") {
+			t.Errorf("the #72 seam ran before the checks:\n%s", errs)
+		}
+	})
+	t.Run("assume-no", func(t *testing.T) {
+		e := newEnv(t)
+		e.root = true
+		e.tty = true
+		code, _, errs := e.run("xbpretty", "install", "figlet", "--download-only", "-n")
+		if code != 1 {
+			t.Errorf("exit = %d, want 1", code)
+		}
+		if !strings.Contains(errs, "user refused confirmation") {
+			t.Errorf("missing the refusal:\n%s", errs)
+		}
+	})
+	t.Run("non-tty", func(t *testing.T) {
+		e := newEnv(t)
+		e.root = true
+		e.tty = false
+		code, _, errs := e.run("xbpretty", "install", "figlet", "--download-only")
+		if code != 1 {
+			t.Errorf("exit = %d, want 1", code)
+		}
+		if !strings.Contains(errs, "stdin is not a terminal") {
+			t.Errorf("missing the non-TTY line:\n%s", errs)
+		}
+	})
 }
 
 // ptyAnswers starts a Run with a real pseudo-terminal on stdin and writes
@@ -645,11 +733,12 @@ func (epipeWriter) Write([]byte) (int, error) { return 0, syscall.EPIPE }
 func TestEPIPEKeepsTheTransactionAndItsCode(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
-	e.set("XB_STUB_EXIT", "17")
 	var errs strings.Builder
+	// The child exits 0 and writes its stdout; only the copy into the closed
+	// stdout fails. The run must keep the child's code, not report the EPIPE.
 	code := Run([]string{"xbpretty", "install", "figlet", "-y"}, strings.NewReader(""), epipeWriter{}, &errs)
-	if code != 17 {
-		t.Errorf("exit = %d, want the run's code 17\n%s", code, errs.String())
+	if code != 0 {
+		t.Errorf("exit = %d, want the child's code 0\n%s", code, errs.String())
 	}
 	ranReal := false
 	for _, c := range e.commands() {
@@ -659,5 +748,99 @@ func TestEPIPEKeepsTheTransactionAndItsCode(t *testing.T) {
 	}
 	if !ranReal {
 		t.Errorf("a failed stdout write aborted the transaction: %q", e.commands())
+	}
+}
+
+// TestNoLogLineOnNonSuccessfulRuns pins ADR-0008/FR-013: a failed run, a
+// refused run and a dry run write no transaction line.
+func TestNoLogLineOnNonSuccessfulRuns(t *testing.T) {
+	tests := []struct {
+		name    string
+		answers string
+		setup   func(*env)
+		argv    []string
+		want    int
+	}{
+		{
+			name:  "failure",
+			setup: func(e *env) { e.set("XB_STUB_EXIT", "17") },
+			argv:  []string{"xbpretty", "install", "figlet", "-y"},
+			want:  17,
+		},
+		{
+			name:    "decline",
+			answers: "n\n",
+			setup:   func(*env) {},
+			argv:    []string{"xbpretty", "install", "figlet"},
+			want:    1,
+		},
+		{
+			name:  "dry run",
+			setup: func(*env) {},
+			argv:  []string{"xbpretty", "install", "figlet", "--dry-run"},
+			want:  0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.root = true
+			e.tty = true
+			tt.setup(e)
+			if tt.answers != "" {
+				e.setAnswers(tt.answers)
+			}
+			code, _, errs := e.run(tt.argv...)
+			if code != tt.want {
+				t.Fatalf("exit = %d, want %d\n%s", code, tt.want, errs)
+			}
+			path, err := config.TransactionLogPath()
+			if err != nil {
+				t.Fatalf("log path: %v", err)
+			}
+			if _, err := os.Stat(path); err == nil {
+				t.Errorf("%s wrote a transaction log line", tt.name)
+			}
+		})
+	}
+}
+
+// TestFullUpgradeConfigChangesNothing pins FR-011: [Nala] full_upgrade is an
+// accepted no-op for argv.
+func TestFullUpgradeConfigChangesNothing(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	cfg := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg, append(data, []byte("\n[Nala]\nfull_upgrade = true\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errs := e.run("xbpretty", "upgrade", "--no-sync", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if got := e.transactionCalls(); len(got) != 1 || got[0] != "-n -u" {
+		t.Errorf("commands = %q, want one -n -u transaction", got)
+	}
+}
+
+// TestMalformedPlanIsARuntimeError pins NFR-003/FR-073: an unreadable plan is
+// a runtime error (1), not a usage error (2).
+func TestMalformedPlanIsARuntimeError(t *testing.T) {
+	e := newEnv(t)
+	e.root = true
+	e.set("XB_STUB_STDOUT", "this is not an xbps plan\n")
+	code, out, errs := e.run("xbpretty", "install", "figlet", "--dry-run")
+	if code != 1 {
+		t.Errorf("exit = %d, want 1\n%s", code, errs)
+	}
+	if !strings.Contains(errs, "cannot read the xbps plan") {
+		t.Errorf("missing the plan error:\n%s", errs)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing", out)
 	}
 }

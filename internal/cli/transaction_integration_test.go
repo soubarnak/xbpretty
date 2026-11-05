@@ -49,14 +49,15 @@ func TestIntegrationTransactionArgv(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
+		bin  string
 		want []string
 	}{
-		{"install dry", []string{"install", "figlet", "--dry-run"}, []string{"-n figlet"}},
-		{"purge dry", []string{"purge", "figlet", "--dry-run"}, []string{"-n -f figlet"}},
-		{"autopurge dry", []string{"autopurge", "--dry-run"}, []string{"-n -o -f"}},
-		{"upgrade no-sync dry", []string{"upgrade", "--no-sync", "--dry-run"}, []string{"-n -u"}},
-		{"upgrade dry", []string{"upgrade", "--dry-run"}, upgradeDryCalls()},
-		{"autoremove dry", []string{"autoremove", "--dry-run"}, []string{"-n -o"}},
+		{"install dry", []string{"install", "figlet", "--dry-run"}, "xbps-install", []string{"-n figlet"}},
+		{"purge dry", []string{"purge", "figlet", "--dry-run"}, "xbps-remove", []string{"-n -f figlet"}},
+		{"autopurge dry", []string{"autopurge", "--dry-run"}, "xbps-remove", []string{"-n -o -f"}},
+		{"upgrade no-sync dry", []string{"upgrade", "--no-sync", "--dry-run"}, "xbps-install", []string{"-n -u"}},
+		{"upgrade dry", []string{"upgrade", "--dry-run"}, "xbps-install", upgradeDryCalls()},
+		{"autoremove dry", []string{"autoremove", "--dry-run"}, "xbps-remove", []string{"-n -o"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -68,21 +69,26 @@ func TestIntegrationTransactionArgv(t *testing.T) {
 				t.Fatalf("exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, out, errs)
 			}
 			var got []string
-			for _, call := range stubCalls(t, logPath) {
-				if strings.HasPrefix(call, "-p ") || call == "-H" || strings.HasPrefix(call, "-X ") {
+			for _, line := range stubCalls(t, logPath) {
+				binary, args := splitStubLine(line)
+				if binary == "xbps-query" {
 					continue
 				}
-				got = append(got, call)
+				if binary != tt.bin {
+					t.Errorf("child = %q, want %q (argv %q)", binary, tt.bin, args)
+				}
+				got = append(got, args)
 			}
 			if strings.Join(got, "|") != strings.Join(tt.want, "|") {
 				t.Errorf("xbps argv = %q, want %q", got, tt.want)
 			}
-			for _, call := range got {
-				if call == "-S" {
-					continue // the separate sync step, never part of the transaction
+			for _, line := range stubCalls(t, logPath) {
+				if strings.HasPrefix(line, "xbps-install -S") || line == "xbps-install -S" {
+					continue
 				}
-				if strings.Contains(" "+call+" ", " -S ") || strings.HasPrefix(call, "-S ") {
-					t.Errorf("-S appeared inside a transaction argv: %q", call)
+				_, args := splitStubLine(line)
+				if strings.Contains(" "+args+" ", " -S ") || strings.HasPrefix(args, "-S ") {
+					t.Errorf("-S appeared inside a transaction argv: %q", args)
 				}
 			}
 		})
@@ -92,6 +98,9 @@ func TestIntegrationTransactionArgv(t *testing.T) {
 // TestIntegrationNonTTYExactMessage drives FR-015's piped-stdin refusal
 // through the real binary, where there is no in-process terminal fake.
 func TestIntegrationNonTTYExactMessage(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("AC-012's non-TTY line is the root path; the non-root path is FR-073's hint")
+	}
 	bin, logPath, cfgDir := integrationEnv(t)
 	cmd := integrationCmd(bin, cfgDir, logPath, "install", "figlet")
 	cmd.Stdin = nil
@@ -140,5 +149,81 @@ func TestIntegrationEPIPEKeepsTheRun(t *testing.T) {
 		if !ok || ee.ExitCode() != 0 {
 			t.Fatalf("exit = %v, want 0 after EPIPE\n%s", err, stderr.String())
 		}
+	}
+}
+
+// TestIntegrationPrintURIsRefusesBeforeAnyChild pins FR-018's #71 seam: the
+// flag prints one line, exits 1, runs no xbps child and writes no log.
+func TestIntegrationPrintURIsRefusesBeforeAnyChild(t *testing.T) {
+	bin, logPath, cfgDir := integrationEnv(t)
+	env := map[string]string{
+		"XDG_CONFIG_HOME": cfgDir,
+		"XDG_STATE_HOME":  filepath.Join(filepath.Dir(cfgDir), "state"),
+		"XB_STUB_LOG":     logPath,
+		"XB_STUB_STDOUT":  planFixture,
+		"NO_COLOR":        "1",
+	}
+	code, out, errs := surfaceRun(t, bin, env, "upgrade", "--print-uris", "-y")
+	if code != 1 {
+		t.Errorf("exit = %d, want 1", code)
+	}
+	want := "xbpretty: --print-uris is not implemented in this build\n"
+	if errs != want {
+		t.Errorf("stderr = %q, want exactly %q", errs, want)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing", out)
+	}
+	if calls := stubCalls(t, logPath); len(calls) != 0 {
+		t.Errorf("an xbps child ran before the refusal: %q", calls)
+	}
+	logPathTransaction := filepath.Join(filepath.Dir(cfgDir), "state", "xbpretty", "transactions.log")
+	if _, err := os.Stat(logPathTransaction); err == nil {
+		t.Error("--print-uris wrote a transaction log line")
+	}
+}
+
+// TestIntegrationNonRootTTYPrintsHint drives FR-073 through the built binary
+// as an unprivileged user with a real terminal on stdin.
+func TestIntegrationNonRootTTYPrintsHint(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("this test needs a non-root process")
+	}
+	bin, logPath, cfgDir := integrationEnv(t)
+	master, slave, err := openPty()
+	if err != nil {
+		t.Skipf("no pseudo-terminal: %v", err)
+	}
+	defer master.Close()
+	defer slave.Close()
+
+	cmd := integrationCmd(bin, cfgDir, logPath, "install", "figlet")
+	cmd.Stdin = slave
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	slave.Close()
+	err = cmd.Wait()
+	ee, ok := err.(*exec.ExitError)
+	if !ok || ee.ExitCode() != 1 {
+		t.Fatalf("exit = %v, want 1\n%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "figlet") {
+		t.Errorf("summary missing from stdout:\n%s", stdout.String())
+	}
+	errs := stderr.String()
+	if !strings.Contains(errs, "hint: rerun as root: ") {
+		t.Errorf("missing the elevation hint:\n%s", errs)
+	}
+	if !strings.Contains(errs, "xbp install figlet") {
+		t.Errorf("the hint does not name the command:\n%s", errs)
+	}
+	if strings.Contains(errs, "Do you want to continue?") {
+		t.Errorf("the non-root run prompted:\n%s", errs)
+	}
+	if strings.Contains(errs, "stdin is not a terminal") {
+		t.Errorf("the non-root run took the non-TTY path:\n%s", errs)
 	}
 }
