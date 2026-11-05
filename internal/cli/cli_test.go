@@ -27,6 +27,7 @@ const planFixture = "figlet-2.2.5_6 install x86_64 https://repo-default.voidlinu
 type env struct {
 	t       *testing.T
 	dir     string
+	stubDir string
 	logPath string
 	tty     bool
 	root    bool
@@ -43,15 +44,8 @@ func newEnv(t *testing.T) *env {
 	if err := os.MkdirAll(filepath.Join(cfgDir, "xbpretty"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := strings.Join([]string{
-		"xbps_install_path = \"" + filepath.Join(stubDir, "xbps-install") + "\"",
-		"xbps_remove_path = \"" + filepath.Join(stubDir, "xbps-remove") + "\"",
-		"xbps_query_path = \"" + filepath.Join(stubDir, "xbps-query") + "\"",
-		"color = \"never\"",
-	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(cfgDir, "xbpretty", "config.toml"), []byte(cfg), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	e := &env{t: t, dir: dir, stubDir: stubDir, logPath: filepath.Join(dir, "commands.log")}
+	e.writeConfig("")
 	t.Setenv("XDG_CONFIG_HOME", cfgDir)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 	t.Setenv("NO_COLOR", "")
@@ -63,8 +57,6 @@ func newEnv(t *testing.T) *env {
 	t.Setenv("XB_STUB_OLD", "")
 	t.Setenv("XB_STUB_REVDEPS", "")
 	t.Setenv("XB_STUB_QUERY", "figlet-2.2.5_6\n657KB\n")
-
-	e := &env{t: t, dir: dir, logPath: filepath.Join(dir, "commands.log")}
 
 	origTerminal, origEuid := isTerminalFn, euidFn
 	isTerminalFn = func(f *os.File) bool { return e.tty }
@@ -475,6 +467,29 @@ func ranRealCommand(e *env) bool {
 	return false
 }
 
+// writeConfig rewrites the default layer in the rev 6 schema. An empty
+// installPath keeps the shared stub; extra lines are appended after [Color].
+func (e *env) writeConfig(installPath string, extra ...string) {
+	e.t.Helper()
+	if installPath == "" {
+		installPath = filepath.Join(e.stubDir, "xbps-install")
+	}
+	lines := []string{
+		"[Xbps]",
+		`install_path = "` + installPath + `"`,
+		`remove_path = "` + filepath.Join(e.stubDir, "xbps-remove") + `"`,
+		`query_path = "` + filepath.Join(e.stubDir, "xbps-query") + `"`,
+		"",
+		"[Color]",
+		`mode = "Never"`,
+	}
+	lines = append(lines, extra...)
+	cfg := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(e.dir, "config", "xbpretty", "config.toml"), []byte(cfg), 0o644); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
 // TestAC019ConfigAssumeYesSkipsPrompt drives the config key, not a flag, at a
 // run that actually reaches the prompt: an empty plan returns at FR-015's
 // "Nothing to do." before the question is asked, so a test built on one can
@@ -488,7 +503,7 @@ func TestAC019ConfigAssumeYesSkipsPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfg, append(data, []byte("assume_yes = true\n")...), 0o644); err != nil {
+	if err := os.WriteFile(cfg, append(data, []byte("\n[Nala]\nassume_yes = true\n")...), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	code, out, errs := e.run("xbpretty", "install", "figlet")
@@ -528,15 +543,18 @@ func TestAC018MissingXBPSBinaryExitsOne(t *testing.T) {
 func TestAC020MalformedConfigExits2(t *testing.T) {
 	e := newEnv(t)
 	cfg := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
-	if err := os.WriteFile(cfg, []byte("color = \"blue\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(cfg, []byte("[Color]\nmode = \"blue\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	code, _, errs := e.run("xbpretty", "install", "figlet")
 	if code != 2 {
 		t.Errorf("exit = %d, want 2", code)
 	}
-	if !strings.Contains(errs, "line 1") {
-		t.Errorf("missing the parse error line number:\n%s", errs)
+	if !strings.Contains(errs, "xbpretty: config ") || !strings.Contains(errs, ":2:") {
+		t.Errorf("missing the config path and line number:\n%s", errs)
+	}
+	if !strings.Contains(errs, "mode") {
+		t.Errorf("the error does not name the key:\n%s", errs)
 	}
 }
 
@@ -1246,20 +1264,20 @@ func TestColorAutoChecksTheTerminalAndNoColor(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		config  string
+		config  config.ColorMode
 		argv    []string
 		tty     bool
 		noColor string
 		want    bool
 	}{
-		{"auto on a terminal", "auto", []string{"--color=auto"}, true, "", true},
-		{"auto off a terminal", "auto", []string{"--color=auto"}, false, "", false},
-		{"auto honours NO_COLOR", "auto", []string{"--color=auto"}, true, "1", false},
-		{"always overrides the terminal", "auto", []string{"--color=always"}, false, "1", true},
-		{"never overrides the terminal", "auto", []string{"--color=never"}, true, "", false},
-		{"the config key still decides", "always", nil, false, "1", true},
-		{"config never wins over the default", "never", nil, true, "", false},
-		{"config auto off a terminal", "auto", nil, false, "", false},
+		{"auto on a terminal", config.ColorAuto, []string{"--color=auto"}, true, "", true},
+		{"auto off a terminal", config.ColorAuto, []string{"--color=auto"}, false, "", false},
+		{"auto honours NO_COLOR", config.ColorAuto, []string{"--color=auto"}, true, "1", false},
+		{"always overrides the terminal", config.ColorAuto, []string{"--color=always"}, false, "1", true},
+		{"never overrides the terminal", config.ColorAuto, []string{"--color=never"}, true, "", false},
+		{"the config key still decides", config.ColorAlways, nil, false, "1", true},
+		{"config never wins over the default", config.ColorNever, nil, true, "", false},
+		{"config auto off a terminal", config.ColorAuto, nil, false, "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1356,23 +1374,11 @@ func writeSlowChild(t *testing.T, dir, logPath, pidPath string) string {
 	return path
 }
 
-// pointInstallAt rewrites the config so xbps_install_path names another
+// pointInstallAt rewrites the config so [Xbps] install_path names another
 // binary, keeping the other two on the shared stubs.
 func (e *env) pointInstallAt(path string) {
 	e.t.Helper()
-	stubDir, err := filepath.Abs("../../testdata/stub")
-	if err != nil {
-		e.t.Fatal(err)
-	}
-	cfg := strings.Join([]string{
-		"xbps_install_path = \"" + path + "\"",
-		"xbps_remove_path = \"" + filepath.Join(stubDir, "xbps-remove") + "\"",
-		"xbps_query_path = \"" + filepath.Join(stubDir, "xbps-query") + "\"",
-		"color = \"never\"",
-	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(e.dir, "config", "xbpretty", "config.toml"), []byte(cfg), 0o644); err != nil {
-		e.t.Fatal(err)
-	}
+	e.writeConfig(path)
 }
 
 // waitForPID blocks until the streamed child has written its pid.
@@ -1937,65 +1943,10 @@ exit 2
 	}
 }
 
-func TestBoxStyleConfigClassic(t *testing.T) {
+func TestBoxStyleFlagOverridesDefault(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.tty = true
-	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
-	content, _ := os.ReadFile(cfgPath)
-	_ = os.WriteFile(cfgPath, append(content, []byte("\nbox_style = \"classic\"\n")...), 0o644)
-	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
-	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
-
-	code, out, errs := e.run("xbpretty", "upgrade", "-n", "--color=auto")
-	if code != 0 {
-		t.Fatalf("exit = %d, want 0\n%s", code, errs)
-	}
-	plain := ansiEscape.ReplaceAllString(out, "")
-	if !strings.Contains(plain, "┌── Packages To Upgrade (1)") {
-		t.Errorf("classic output missing classic header:\n%s", out)
-	}
-	if !strings.Contains(plain, "┌── Summary") {
-		t.Errorf("classic output missing classic summary card:\n%s", out)
-	}
-	if strings.Contains(plain, "╭") || strings.Contains(plain, "╰") {
-		t.Errorf("classic output contains rounded box runes:\n%s", out)
-	}
-}
-
-func TestBoxStyleConfigASCII(t *testing.T) {
-	e := newEnv(t)
-	e.root = true
-	e.tty = true
-	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
-	content, _ := os.ReadFile(cfgPath)
-	_ = os.WriteFile(cfgPath, append(content, []byte("\nbox_style = \"ascii\"\n")...), 0o644)
-	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
-	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
-
-	code, out, errs := e.run("xbpretty", "upgrade", "-n", "--color=auto")
-	if code != 0 {
-		t.Fatalf("exit = %d, want 0\n%s", code, errs)
-	}
-	plain := ansiEscape.ReplaceAllString(out, "")
-	if !strings.Contains(plain, "+-- Packages To Upgrade (1)") {
-		t.Errorf("ascii output missing ascii header:\n%s", out)
-	}
-	if !strings.Contains(plain, "+-- Summary") {
-		t.Errorf("ascii output missing ascii summary card:\n%s", out)
-	}
-	if strings.Contains(plain, "╭") || strings.Contains(plain, "┌") {
-		t.Errorf("ascii output contains unicode box runes:\n%s", out)
-	}
-}
-
-func TestBoxStyleFlagOverridesConfig(t *testing.T) {
-	e := newEnv(t)
-	e.root = true
-	e.tty = true
-	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
-	content, _ := os.ReadFile(cfgPath)
-	_ = os.WriteFile(cfgPath, append(content, []byte("\nbox_style = \"rounded\"\n")...), 0o644)
 	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
 	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
 
@@ -2009,46 +1960,26 @@ func TestBoxStyleFlagOverridesConfig(t *testing.T) {
 	}
 }
 
-func TestMalformedBoxStyleConfigExits2(t *testing.T) {
-	e := newEnv(t)
-	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
-	content, _ := os.ReadFile(cfgPath)
-	_ = os.WriteFile(cfgPath, append(content, []byte("\nbox_style = \"neon\"\n")...), 0o644)
-
-	code, _, errs := e.run("xbpretty", "upgrade", "-n")
-	if code != 2 {
-		t.Fatalf("exit = %d, want 2\n%s", code, errs)
-	}
-	if !strings.Contains(errs, "box_style") {
-		t.Errorf("stderr does not name box_style:\n%s", errs)
-	}
-}
-
-func TestMalformedProgressBarConfigExits2(t *testing.T) {
-	e := newEnv(t)
-	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
-	content, _ := os.ReadFile(cfgPath)
-	_ = os.WriteFile(cfgPath, append(content, []byte("\nprogress_bar = \"maybe\"\n")...), 0o644)
-
-	code, _, errs := e.run("xbpretty", "upgrade", "-n")
-	if code != 2 {
-		t.Fatalf("exit = %d, want 2\n%s", code, errs)
-	}
-	if !strings.Contains(errs, "expected true or false") && !strings.Contains(errs, "progress_bar") {
-		t.Errorf("stderr does not name parse error:\n%s", errs)
-	}
-}
-
 func TestPrecedenceColorFlagAndNoColor(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.tty = true
 	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
-	content, _ := os.ReadFile(cfgPath)
-	_ = os.WriteFile(cfgPath, append(content, []byte("\ncolor = \"auto\"\n")...), 0o644)
+	setMode := func(mode string) {
+		t.Helper()
+		data, err := os.ReadFile(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		updated := strings.Replace(string(data), `mode = "Never"`, `mode = "`+mode+`"`, 1)
+		if err := os.WriteFile(cfgPath, []byte(updated), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	e.set("XB_STUB_STDOUT", planCapture(t, "0607/upgrade.txt"))
+	setMode("Auto")
 
-	// 1. With NO_COLOR set, color is disabled under default/auto config
+	// 1. With NO_COLOR set, color is disabled under Auto.
 	e.set("NO_COLOR", "1")
 	code, out, errs := e.run("xbpretty", "upgrade", "-n")
 	if code != 0 {
@@ -2058,7 +1989,7 @@ func TestPrecedenceColorFlagAndNoColor(t *testing.T) {
 		t.Errorf("NO_COLOR should disable color under auto config:\n%s", out)
 	}
 
-	// 2. Explicit --color=always overrides NO_COLOR and auto config
+	// 2. Explicit --color=always overrides NO_COLOR and Auto.
 	code, out, errs = e.run("xbpretty", "upgrade", "-n", "--color=always")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
@@ -2067,7 +1998,7 @@ func TestPrecedenceColorFlagAndNoColor(t *testing.T) {
 		t.Errorf("--color=always should override NO_COLOR:\n%s", out)
 	}
 
-	// 3. Explicit --color=never disables color even if NO_COLOR is unset
+	// 3. Explicit --color=never disables color even if NO_COLOR is unset.
 	e.set("NO_COLOR", "")
 	code, out, errs = e.run("xbpretty", "upgrade", "-n", "--color=never")
 	if code != 0 {
@@ -2077,14 +2008,14 @@ func TestPrecedenceColorFlagAndNoColor(t *testing.T) {
 		t.Errorf("--color=never should disable color:\n%s", out)
 	}
 
-	// 4. Config color="never" overridden by explicit --color=always
-	_ = os.WriteFile(cfgPath, append(content, []byte("\ncolor = \"never\"\n")...), 0o644)
+	// 4. [Color] mode Never is overridden by explicit --color=always.
+	setMode("Never")
 	code, out, errs = e.run("xbpretty", "upgrade", "-n", "--color=always")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
 	if !strings.Contains(out, "\x1b[") {
-		t.Errorf("--color=always should override config color=never:\n%s", out)
+		t.Errorf("--color=always should override [Color] mode Never:\n%s", out)
 	}
 }
 

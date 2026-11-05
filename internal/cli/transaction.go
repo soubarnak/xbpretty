@@ -17,9 +17,9 @@ import (
 // binaryFor picks the xbps binary a command wraps (FR-002 .. FR-006).
 func (st *state) binaryFor(cmd string) string {
 	if cmd == "remove" || cmd == "autoremove" {
-		return st.r.cfg.XBPSRemove
+		return st.r.cfg.Xbps.RemovePath
 	}
-	return st.r.cfg.XBPSInstall
+	return st.r.cfg.Xbps.InstallPath
 }
 
 // planCommand builds the dry run as one flag cluster followed by the package
@@ -163,7 +163,7 @@ func (st *state) lookupOld(names []string) map[string]summary.Old {
 	for i := 0; i < workers; i++ {
 		go func() {
 			for j := range jobs {
-				res, err := st.r.run(st.r.cfg.XBPSQuery, "-p", "pkgver,installed_size", j.name)
+				res, err := st.r.run(st.r.cfg.Xbps.QueryPath, "-p", "pkgver,installed_size", j.name)
 				old := summary.Old{}
 				if err == nil && res.exitCode == 0 {
 					old = parseOld(res.stdout)
@@ -216,7 +216,7 @@ func parseOld(stdout string) summary.Old {
 // heldPackages lists the packages on hold (FR-011's Hold group).
 func (st *state) heldPackages() map[string]bool {
 	held := map[string]bool{}
-	res, err := st.r.run(st.r.cfg.XBPSQuery, "-H")
+	res, err := st.r.run(st.r.cfg.Xbps.QueryPath, "-H")
 	if err != nil || res.exitCode != 0 {
 		return held
 	}

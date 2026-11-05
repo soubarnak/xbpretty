@@ -155,6 +155,16 @@ func (s *Summary) NetDiskBytes() int64 {
 	return int64(s.AddBytes) - int64(s.OldBytes) - int64(s.RemoveBytes)
 }
 
+// SizeUnit selects the size base the summary prints. Binary uses 1024-based
+// KiB/MiB/GiB; Decimal uses 1000-based KB/MB/GB. The zero value is Binary.
+type SizeUnit string
+
+// The two [Ui] unit values.
+const (
+	SizeBinary  SizeUnit = "Binary"
+	SizeDecimal SizeUnit = "Decimal"
+)
+
 // Renderer draws a summary to a writer, optionally with ANSI colour.
 type Renderer struct {
 	Color       bool
@@ -162,6 +172,7 @@ type Renderer struct {
 	Width       int
 	BoxStyle    string
 	ProgressBar bool
+	Unit        SizeUnit
 }
 
 // Render writes the grouped summary and its footer to w.
@@ -448,7 +459,7 @@ func (r Renderer) renderSummaryCard(w io.Writer, s *Summary, termWidth int, char
 
 	var statParts []string
 	if s.Download > 0 {
-		statParts = append(statParts, sprintf("Transfer: %s download", Human(s.Download)))
+		statParts = append(statParts, sprintf("Transfer: %s download", r.human(s.Download)))
 	}
 	net := s.NetDiskBytes()
 	if net != 0 {
@@ -458,7 +469,7 @@ func (r Renderer) renderSummaryCard(w io.Writer, s *Summary, termWidth int, char
 			sign = "-"
 			abs = uint64(-net)
 		}
-		statParts = append(statParts, sprintf("Disk: %s%s", sign, Human(abs)))
+		statParts = append(statParts, sprintf("Disk: %s%s", sign, r.human(abs)))
 	}
 	if len(statParts) == 0 {
 		statParts = append(statParts, "Transfer: 0 B  •  Disk: 0 B")
@@ -512,31 +523,40 @@ func (r Renderer) size(row Row) string {
 	fetched := row.Action != actionRemove && row.Action != actionHold
 	switch {
 	case fetched && row.HasDownload:
-		return Human(row.DownloadSize)
+		return r.human(row.DownloadSize)
 	case row.HasInstalled:
-		return Human(row.InstalledSize)
+		return r.human(row.InstalledSize)
 	}
 	return "-"
 }
 
 // Human renders a byte count the way the summary shows sizes, e.g. `48.2 MiB`
-// (FR-012).
-func Human(n uint64) string {
-	const (
-		kib = 1024
-		mib = kib * 1024
-		gib = mib * 1024
-	)
+// (FR-012), using the default Binary unit.
+func Human(n uint64) string { return HumanUnit(n, SizeBinary) }
+
+// HumanUnit renders a byte count with the requested [Ui] unit.
+func HumanUnit(n uint64, unit SizeUnit) string {
+	base := uint64(1024)
+	suffixes := [3]string{"KiB", "MiB", "GiB"}
+	if unit == SizeDecimal {
+		base = 1000
+		suffixes = [3]string{"KB", "MB", "GB"}
+	}
+	kib := base
+	mib := kib * base
+	gib := mib * base
 	switch {
 	case n >= gib:
-		return trimZero(float64(n)/gib) + " GiB"
+		return trimZero(float64(n)/float64(gib)) + " " + suffixes[2]
 	case n >= mib:
-		return trimZero(float64(n)/mib) + " MiB"
+		return trimZero(float64(n)/float64(mib)) + " " + suffixes[1]
 	case n >= kib:
-		return trimZero(float64(n)/kib) + " KiB"
+		return trimZero(float64(n)/float64(kib)) + " " + suffixes[0]
 	}
 	return formatInt(n) + " B"
 }
+
+func (r Renderer) human(n uint64) string { return HumanUnit(n, r.Unit) }
 
 func trimZero(v float64) string {
 	s := sprintf("%.1f", v)
@@ -569,7 +589,7 @@ func (r Renderer) footer(s *Summary) string {
 	counts := strings.Join(parts, ", ")
 	line := counts
 	if s.Download > 0 {
-		line += " · " + Human(s.Download) + " download"
+		line += " · " + r.human(s.Download) + " download"
 	}
 	net := s.NetDiskBytes()
 	if net == 0 {
@@ -581,7 +601,7 @@ func (r Renderer) footer(s *Summary) string {
 		sign = "-"
 		abs = uint64(-net)
 	}
-	line += " · " + sign + Human(abs) + " disk"
+	line += " · " + sign + r.human(abs) + " disk"
 	return line
 }
 

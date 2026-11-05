@@ -2,16 +2,15 @@
 package config
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -20,73 +19,80 @@ const (
 	ExitParseError = 2
 )
 
-// Config holds the resolved settings for one run.
-type Config struct {
-	AssumeYes   bool
-	Color       string
-	Verbose     bool
-	Sync        bool
-	Log         bool
-	BoxStyle    string
-	ProgressBar bool
-	XBPSInstall string
-	XBPSRemove  string
-	XBPSQuery   string
+// Error is a configuration rejection. It carries the file and, for a value
+// or table error, the line. Line zero means the error is about the file as a
+// whole (BOM, invalid UTF-8, unreadable file, size).
+type Error struct {
+	Path    string
+	Line    int
+	Message string
 }
 
-// Defaults returns the built-in settings used when neither the config file
-// nor the command line says otherwise.
-func Defaults() Config {
-	return Config{
-		AssumeYes:   false,
-		Color:       "auto",
-		Verbose:     false,
-		Sync:        true,
-		Log:         true,
-		BoxStyle:    "rounded",
-		ProgressBar: true,
-		XBPSInstall: "xbps-install",
-		XBPSRemove:  "xbps-remove",
-		XBPSQuery:   "xbps-query",
+func (e *Error) Error() string {
+	if e.Line > 0 {
+		return fmt.Sprintf("config %s:%d: %s", e.Path, e.Line, e.Message)
 	}
+	return fmt.Sprintf("config %s: %s", e.Path, e.Message)
 }
 
-// ParseError is a malformed config file, carrying the line it was found on.
-type ParseError struct {
-	Line int
-	Text string
+func fileError(path, message string) *Error {
+	return &Error{Path: path, Message: message}
 }
 
-func (e *ParseError) Error() string {
-	return fmt.Sprintf("config line %d: %s", e.Line, e.Text)
-}
-
-// Load reads the config file for the current user and merges it over the
-// built-in defaults. A missing file is not an error.
+// Load reads the default user configuration layer and resolves it over the
+// built-in defaults. A missing file is not an error; an existing file that
+// does not validate is (FR-053). The system layer and --config selection are
+// later tickets; LoadFile is the seam they call.
 func Load() (Config, error) {
-	cfg := Defaults()
 	path, err := Path()
 	if err != nil {
-		return cfg, err
+		return Defaults(), err
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, nil
+		if errors.Is(err, fs.ErrNotExist) {
+			return Defaults(), nil
 		}
-		return cfg, fmt.Errorf("reading config: %w", err)
+		return Defaults(), fileError(path, fmt.Sprintf("cannot read configuration file: %v", err))
 	}
 	defer f.Close()
-	loaded, err := Parse(f)
+	return Parse(path, f)
+}
+
+// LoadFile reads one explicit configuration file. Unlike the default layer a
+// missing or unreadable file is a hard error: this is the seam --config uses.
+func LoadFile(path string) (Config, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return cfg, err
+		return Defaults(), fileError(path, fmt.Sprintf("cannot read configuration file: %v", err))
 	}
-	merge(&cfg, loaded)
+	defer f.Close()
+	return Parse(path, f)
+}
+
+// Parse reads one TOML-subset configuration document and resolves the rev 6
+// schema over the defaults.
+func Parse(path string, r io.Reader) (Config, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxConfigBytes+1))
+	if err != nil {
+		return Defaults(), fileError(path, fmt.Sprintf("cannot read configuration file: %v", err))
+	}
+	doc, err := parseDocument(path, data, false)
+	if err != nil {
+		return Defaults(), err
+	}
+	cfg, err := resolve(doc)
+	if err != nil {
+		if cfgErr, ok := err.(*Error); ok {
+			cfgErr.Path = path
+		}
+		return Defaults(), err
+	}
 	return cfg, nil
 }
 
-// Path resolves the config file location, honouring XDG_CONFIG_HOME and the
-// sudo/doas calling-user lookup.
+// Path resolves the default user config file location, honouring
+// XDG_CONFIG_HOME and the sudo/doas calling-user lookup.
 func Path() (string, error) {
 	base, err := configHome()
 	if err != nil {
@@ -170,133 +176,13 @@ func Invoker() (uid, gid int, ok bool) {
 	return uidNum, gidNum, true
 }
 
-// Parse reads TOML-shaped key/value pairs. Only the keys xbpretty understands
-// are read; anything else is an error, so a typo is never silently ignored.
-func Parse(r io.Reader) (Config, error) {
-	cfg := Defaults()
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 4096), 1024*1024)
-	for lineNo := 1; scanner.Scan(); lineNo++ {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			return cfg, &ParseError{Line: lineNo, Text: "expected key = value"}
-		}
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		if err := apply(&cfg, key, value); err != nil {
-			return cfg, &ParseError{Line: lineNo, Text: err.Error()}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return cfg, fmt.Errorf("reading config: %w", err)
-	}
-	return cfg, nil
-}
-
-func apply(cfg *Config, key, value string) error {
-	switch key {
-	case "assume_yes":
-		b, err := parseBool(value)
-		if err != nil {
-			return err
-		}
-		cfg.AssumeYes = b
-	case "color":
-		v := unquote(value)
-		if !validColor(v) {
-			return fmt.Errorf("color must be one of auto, always, never, got %q", v)
-		}
-		cfg.Color = v
-	case "verbose":
-		b, err := parseBool(value)
-		if err != nil {
-			return err
-		}
-		cfg.Verbose = b
-	case "sync":
-		b, err := parseBool(value)
-		if err != nil {
-			return err
-		}
-		cfg.Sync = b
-	case "log":
-		b, err := parseBool(value)
-		if err != nil {
-			return err
-		}
-		cfg.Log = b
-	case "box_style":
-		v := unquote(value)
-		if !validBoxStyle(v) {
-			return fmt.Errorf("box_style must be one of rounded, classic, ascii, got %q", v)
-		}
-		cfg.BoxStyle = v
-	case "progress_bar":
-		b, err := parseBool(value)
-		if err != nil {
-			return err
-		}
-		cfg.ProgressBar = b
-	case "xbps_install_path":
-		cfg.XBPSInstall = unquote(value)
-	case "xbps_remove_path":
-		cfg.XBPSRemove = unquote(value)
-	case "xbps_query_path":
-		cfg.XBPSQuery = unquote(value)
-	default:
-		return fmt.Errorf("unknown key %q", key)
-	}
-	return nil
-}
-
-func parseBool(value string) (bool, error) {
-	switch v := unquote(value); v {
-	case "true":
-		return true, nil
-	case "false":
-		return false, nil
-	}
-	return false, fmt.Errorf("expected true or false, got %q", value)
-}
-
-func validColor(value string) bool {
-	switch value {
-	case "auto", "always", "never":
-		return true
-	}
-	return false
-}
-
-func validBoxStyle(value string) bool {
-	switch value {
-	case "rounded", "classic", "ascii":
-		return true
-	}
-	return false
-}
-
-func unquote(value string) string {
-	if len(value) >= 2 {
-		if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
-			return value[1 : len(value)-1]
-		}
-	}
-	return value
-}
-
-func merge(dst *Config, src Config) { *dst = src }
-
 // ErrNotInstalled is reported when a configured xbps binary cannot be found.
 var ErrNotInstalled = errors.New("xbps binary not found")
 
 // Resolve checks that every configured xbps binary exists and is executable,
 // returning a per-command error naming what is missing.
 func (c Config) Resolve() error {
-	for _, path := range []string{c.XBPSInstall, c.XBPSRemove, c.XBPSQuery} {
+	for _, path := range []string{c.Xbps.InstallPath, c.Xbps.RemovePath, c.Xbps.QueryPath} {
 		if _, err := exec.LookPath(path); err != nil {
 			return fmt.Errorf("%w: %s", ErrNotInstalled, path)
 		}

@@ -57,6 +57,7 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		Width:       termWidth,
 		BoxStyle:    st.boxStyle,
 		ProgressBar: st.progressBar,
+		Unit:        st.unit,
 	}).Render(st.stdout, sum); err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
 		return exitRuntime
@@ -69,7 +70,7 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 
 	// FR-010: never block on a pipe.
 	stdinIsPipe := !isTTY(st.stdin)
-	autoAccept := opts.yes || st.r.cfg.AssumeYes
+	autoAccept := opts.yes || st.r.cfg.Nala.AssumeYes
 	if stdinIsPipe && !autoAccept {
 		fmt.Fprintln(st.stderr, "xbpretty: stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed")
 		return exitRuntime
@@ -170,7 +171,7 @@ func optsArgs(rows []xbps.Row) []string {
 // `-R` would name.
 func (st *state) revdepsHint(packages []string) {
 	for _, pkg := range packages {
-		res, err := st.r.run(st.r.cfg.XBPSQuery, "-X", pkg)
+		res, err := st.r.run(st.r.cfg.Xbps.QueryPath, "-X", pkg)
 		if err != nil || res.exitCode != 0 {
 			continue
 		}

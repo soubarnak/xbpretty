@@ -9,23 +9,23 @@ import (
 // options is one parsed command line: xbpretty's own flags, the command, the
 // package arguments, and everything after `--` for xbps.
 type options struct {
-	dryRun     bool
-	yes        bool
-	verbose    bool
-	noSync     bool
-	noLog      bool
-	color      string // "", "auto", "always" or "never"
-	version    bool
-	help       bool
-	completion bool
-	command    string
-	args       []string
-	passthru   []string
-	dashDash   bool // a `--` was given, even with nothing after it
-	limit      int  // --limit N for `log`; 0 means not given
+	dryRun      bool
+	yes         bool
+	verbose     bool
+	noSync      bool
+	noLog       bool
+	color       string // "", "auto", "always" or "never"
+	version     bool
+	help        bool
+	completion  bool
+	command     string
+	args        []string
+	passthru    []string
+	dashDash    bool // a `--` was given, even with nothing after it
+	limit       int  // --limit N for `log`; 0 means not given
 	boxStyle    string
 	progressBar *bool
-	explicit   map[string]bool
+	explicit    map[string]bool
 }
 
 // parseArgs reads xbpretty's flags, the command and the package arguments.

@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -12,109 +11,7 @@ import (
 	"time"
 )
 
-func TestParseValidFile(t *testing.T) {
-	in := `
-# a comment
-assume_yes = true
-color = "never"
-verbose = true
-sync = false
-log = false
-box_style = "classic"
-progress_bar = false
-xbps_install_path = "/usr/local/bin/xbps-install"
-xbps_remove_path = '/usr/local/bin/xbps-remove'
-xbps_query_path = /usr/local/bin/xbps-query
-`
-	cfg, err := Parse(strings.NewReader(in))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	want := Config{
-		AssumeYes:   true,
-		Color:       "never",
-		Verbose:     true,
-		Sync:        false,
-		Log:         false,
-		BoxStyle:    "classic",
-		ProgressBar: false,
-		XBPSInstall: "/usr/local/bin/xbps-install",
-		XBPSRemove:  "/usr/local/bin/xbps-remove",
-		XBPSQuery:   "/usr/local/bin/xbps-query",
-	}
-	if cfg != want {
-		t.Errorf("Parse:\n got %+v\nwant %+v", cfg, want)
-	}
-}
-
-func TestParseMissingFileUsesDefaults(t *testing.T) {
-	cfg, err := Parse(strings.NewReader(""))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if cfg != Defaults() {
-		t.Errorf("got %+v, want defaults %+v", cfg, Defaults())
-	}
-}
-
-func TestParseErrors(t *testing.T) {
-	tests := []struct {
-		name     string
-		in       string
-		wantLine int
-	}{
-		{"no equals sign", "assume_yes\n", 1},
-		{"bad bool", "assume_yes = maybe\n", 1},
-		{"bad color", "color = \"blue\"\n", 1},
-		{"bad box_style", "box_style = \"fancy\"\n", 1},
-		{"bad progress_bar", "progress_bar = maybe\n", 1},
-		{"unknown key", "verbose = true\nnope = 1\n", 2},
-		{"line number after comments", "# c\n\nsync = 1\n", 3},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := Parse(strings.NewReader(tt.in))
-			if err == nil {
-				t.Fatal("Parse succeeded, want error")
-			}
-			var pe *ParseError
-			if !errors.As(err, &pe) {
-				t.Fatalf("got %T %v, want *ParseError", err, err)
-			}
-			if pe.Line != tt.wantLine {
-				t.Errorf("line = %d, want %d (error: %v)", pe.Line, tt.wantLine, pe)
-			}
-		})
-	}
-}
-
-func TestBoxStyleAndProgressBarOptions(t *testing.T) {
-	tests := []struct {
-		in          string
-		wantBox     string
-		wantBar     bool
-	}{
-		{"box_style = \"rounded\"\nprogress_bar = true\n", "rounded", true},
-		{"box_style = \"classic\"\nprogress_bar = false\n", "classic", false},
-		{"box_style = 'ascii'\nprogress_bar = true\n", "ascii", true},
-		{"box_style = ascii\nprogress_bar = false\n", "ascii", false},
-		{"", "rounded", true}, // defaults
-	}
-	for _, tt := range tests {
-		cfg, err := Parse(strings.NewReader(tt.in))
-		if err != nil {
-			t.Fatalf("Parse(%q): %v", tt.in, err)
-		}
-		if cfg.BoxStyle != tt.wantBox {
-			t.Errorf("BoxStyle for %q = %q, want %q", tt.in, cfg.BoxStyle, tt.wantBox)
-		}
-		if cfg.ProgressBar != tt.wantBar {
-			t.Errorf("ProgressBar for %q = %v, want %v", tt.in, cfg.ProgressBar, tt.wantBar)
-		}
-	}
-}
-
-func TestLoadMissingFile(t *testing.T) {
+func TestLoadMissingFileIsSilent(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	cfg, err := Load()
 	if err != nil {
@@ -132,18 +29,76 @@ func TestLoadReadsFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "xbpretty", "config.toml")
-	if err := os.WriteFile(path, []byte("assume_yes = true\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("[Nala]\nassume_yes = true\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !cfg.AssumeYes {
+	if !cfg.Nala.AssumeYes {
 		t.Error("assume_yes was not read from the config file")
 	}
-	if cfg.Sync != true || cfg.Log != true {
+	if !cfg.Nala.AutoRemove || !cfg.Nala.AutoUpdate || !cfg.Xbps.TransactionLog {
 		t.Errorf("defaults were not preserved: %+v", cfg)
+	}
+}
+
+// An existing default file that does not validate is a hard error, unlike a
+// missing one (FR-053).
+func TestLoadInvalidExistingFileIsHardError(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "xbpretty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "xbpretty", "config.toml")
+	if err := os.WriteFile(path, []byte("[Ui]\nmode = \"nope\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load accepted an invalid file")
+	}
+	if !strings.Contains(err.Error(), path+":2:") {
+		t.Errorf("error %q does not name the file and line", err)
+	}
+}
+
+func TestLoadFileMissingIsHardError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "absent.toml")
+	_, err := LoadFile(path)
+	if err == nil {
+		t.Fatal("LoadFile accepted a missing file")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name the file", err)
+	}
+}
+
+func TestLoadFileReadsExplicitPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom.toml")
+	if err := os.WriteFile(path, []byte("[Color]\nmode = \"Always\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if cfg.Color.Mode != ColorAlways {
+		t.Errorf("Color.Mode = %q", cfg.Color.Mode)
+	}
+}
+
+func TestErrorFormat(t *testing.T) {
+	err := &Error{Path: "/etc/xbpretty/config.toml", Line: 7, Message: "floats are not supported"}
+	if got, want := err.Error(), "config /etc/xbpretty/config.toml:7: floats are not supported"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+	fileErr := &Error{Path: "/etc/xbpretty/config.toml", Message: "byte-order mark (BOM) is not supported"}
+	if got, want := fileErr.Error(), "config /etc/xbpretty/config.toml: byte-order mark (BOM) is not supported"; got != want {
+		t.Errorf("file-level Error() = %q, want %q", got, want)
 	}
 }
 
@@ -218,19 +173,6 @@ func TestUserHomeFollowsSudoAndDoas(t *testing.T) {
 				t.Errorf("TransactionLog() = %q, want %q", logPath, wantLog)
 			}
 		})
-	}
-}
-
-func TestParseErrorOutput(t *testing.T) {
-	_, err := Parse(strings.NewReader("color = \"blue\"\n"))
-	if err == nil {
-		t.Fatal("Parse succeeded, want error")
-	}
-	if !strings.Contains(err.Error(), "line 1") {
-		t.Errorf("error %q does not name the line", err)
-	}
-	if !strings.Contains(err.Error(), "color") {
-		t.Errorf("error %q does not name the key", err)
 	}
 }
 

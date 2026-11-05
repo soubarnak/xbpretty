@@ -41,6 +41,29 @@ func TestHuman(t *testing.T) {
 	}
 }
 
+func TestHumanUnit(t *testing.T) {
+	tests := []struct {
+		in   uint64
+		unit SizeUnit
+		want string
+	}{
+		{999, SizeDecimal, "999 B"},
+		{1000, SizeDecimal, "1 KB"},
+		{1500, SizeDecimal, "1.5 KB"},
+		{672593, SizeDecimal, "672.6 KB"},
+		{1000000, SizeDecimal, "1 MB"},
+		{48200000, SizeDecimal, "48.2 MB"},
+		{1000000000, SizeDecimal, "1 GB"},
+		{1024, SizeBinary, "1 KiB"},
+		{1024, "", "1 KiB"},
+	}
+	for _, tt := range tests {
+		if got := HumanUnit(tt.in, tt.unit); got != tt.want {
+			t.Errorf("HumanUnit(%d, %q) = %q, want %q", tt.in, tt.unit, got, tt.want)
+		}
+	}
+}
+
 func TestHumanDoesNotRoundUpToNextUnit(t *testing.T) {
 	if got := Human(1023); strings.HasSuffix(got, "KiB") {
 		t.Errorf("Human(1023) = %q, want a byte count", got)

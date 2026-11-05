@@ -24,29 +24,56 @@ func buildBinary(t *testing.T) string {
 	return bin
 }
 
-// integrationEnv sets up a config pointing the built binary at the stubs.
-func integrationEnv(t *testing.T) (bin, logPath, cfgDir string) {
+// integrationConfig writes a rev 6 default layer pointing at the stubs, with
+// the given [Color] mode and any extra lines appended. It returns the
+// XDG_CONFIG_HOME directory and the file path.
+func integrationConfig(t *testing.T, colorMode string, extra ...string) (cfgDir, cfgPath string) {
 	t.Helper()
-	bin = buildBinary(t)
 	stubDir, err := filepath.Abs("../../testdata/stub")
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := t.TempDir()
-	cfgDir = filepath.Join(base, "config")
+	cfgDir = filepath.Join(t.TempDir(), "config")
 	if err := os.MkdirAll(filepath.Join(cfgDir, "xbpretty"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := strings.Join([]string{
-		"xbps_install_path = \"" + filepath.Join(stubDir, "xbps-install") + "\"",
-		"xbps_remove_path = \"" + filepath.Join(stubDir, "xbps-remove") + "\"",
-		"xbps_query_path = \"" + filepath.Join(stubDir, "xbps-query") + "\"",
-		"color = \"never\"",
-	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(cfgDir, "xbpretty", "config.toml"), []byte(cfg), 0o644); err != nil {
+	lines := []string{
+		"[Xbps]",
+		"install_path = \"" + filepath.Join(stubDir, "xbps-install") + "\"",
+		"remove_path = \"" + filepath.Join(stubDir, "xbps-remove") + "\"",
+		"query_path = \"" + filepath.Join(stubDir, "xbps-query") + "\"",
+		"",
+		"[Color]",
+		"mode = \"" + colorMode + "\"",
+	}
+	lines = append(lines, extra...)
+	cfgPath = filepath.Join(cfgDir, "xbpretty", "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return bin, filepath.Join(base, "commands.log"), cfgDir
+	return cfgDir, cfgPath
+}
+
+// integrationEnv sets up a config pointing the built binary at the stubs.
+func integrationEnv(t *testing.T) (bin, logPath, cfgDir string) {
+	t.Helper()
+	bin = buildBinary(t)
+	cfgDir, _ = integrationConfig(t, "Never")
+	return bin, filepath.Join(filepath.Dir(cfgDir), "commands.log"), cfgDir
+}
+
+// integrationCmd returns a command with the environment every integration
+// test shares.
+func integrationCmd(bin string, cfgDir, logPath string, args ...string) *exec.Cmd {
+	cmd := exec.Command(bin, args...)
+	cmd.Env = append(os.Environ(),
+		"XDG_CONFIG_HOME="+cfgDir,
+		"XDG_STATE_HOME="+filepath.Join(filepath.Dir(cfgDir), "state"),
+		"XB_STUB_LOG="+logPath,
+		"XB_STUB_STDOUT="+planFixture,
+		"NO_COLOR=",
+	)
+	return cmd
 }
 
 func TestIntegrationPipedStdinNeverBlocks(t *testing.T) {
@@ -126,5 +153,206 @@ func TestIntegrationLinksDispatchLikeTheCommand(t *testing.T) {
 	// A remove plan, not an install plan: xbps-remove was called.
 	if !strings.Contains(string(raw), "\nfiglet") && !strings.Contains(string(raw), "figlet\n") {
 		t.Errorf("unexpected command log:\n%s", raw)
+	}
+}
+
+// TestIntegrationConfigAssumeYesEndToEnd pins the first behaviour AC of this
+// ticket: [Nala] assume_yes, not a flag, takes a piped stdin past the "pass
+// -y" refusal at the real binary seam.
+func TestIntegrationConfigAssumeYesEndToEnd(t *testing.T) {
+	bin := buildBinary(t)
+	cfgDir, _ := integrationConfig(t, "Never", "", "[Nala]", "assume_yes = true")
+	logPath := filepath.Join(filepath.Dir(cfgDir), "commands.log")
+	cmd := integrationCmd(bin, cfgDir, logPath, "install", "figlet")
+	cmd.Stdin = nil
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 2 {
+		t.Fatalf("config rejected: %v\n%s", err, stderr.String())
+	}
+	errs := stderr.String()
+	if strings.Contains(errs, "stdin is not a terminal") {
+		t.Errorf("assume_yes did not take the run past the non-TTY refusal:\n%s", errs)
+	}
+	if !strings.Contains(stdout.String(), "Install") {
+		t.Errorf("summary missing from stdout:\n%s", stdout.String())
+	}
+	if err != nil && !strings.Contains(errs, "root") && !strings.Contains(errs, "doas") && !strings.Contains(errs, "sudo") {
+		t.Errorf("unexpected failed run: %v\n%s", err, errs)
+	}
+}
+
+// TestIntegrationConfigColorModeEndToEnd drives [Color] mode through the real
+// binary on a pseudo-terminal, where Auto would also colour but Always and
+// Never decide it: the config, not a flag, is the switch.
+func TestIntegrationConfigColorModeEndToEnd(t *testing.T) {
+	bin := buildBinary(t)
+	for _, tt := range []struct {
+		mode     string
+		wantANSI bool
+	}{
+		{"Always", true},
+		{"Never", false},
+	} {
+		t.Run(tt.mode, func(t *testing.T) {
+			cfgDir, _ := integrationConfig(t, tt.mode)
+			logPath := filepath.Join(filepath.Dir(cfgDir), "commands.log")
+			master, slave, err := openPty()
+			if err != nil {
+				t.Skipf("no pseudo-terminal: %v", err)
+			}
+			defer master.Close()
+			cmd := integrationCmd(bin, cfgDir, logPath, "install", "-n", "figlet")
+			cmd.Stdin = nil
+			cmd.Stdout = slave
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			if err := cmd.Start(); err != nil {
+				slave.Close()
+				t.Fatal(err)
+			}
+			slave.Close()
+			outCh := make(chan string, 1)
+			go func() {
+				var b strings.Builder
+				buf := make([]byte, 4096)
+				for {
+					n, err := master.Read(buf)
+					b.Write(buf[:n])
+					if err != nil {
+						break
+					}
+				}
+				outCh <- b.String()
+			}()
+			if err := cmd.Wait(); err != nil {
+				t.Fatalf("run: %v\n%s", err, stderr.String())
+			}
+			out := <-outCh
+			if got := strings.Contains(out, "\x1b["); got != tt.wantANSI {
+				t.Errorf("[Color] mode %s: ANSI = %v, want %v\n%s", tt.mode, got, tt.wantANSI, out)
+			}
+		})
+	}
+}
+
+// TestIntegrationConfigUnitEndToEnd drives [Ui] unit into the size output:
+// the same plan prints KiB under Binary and KB under Decimal.
+func TestIntegrationConfigUnitEndToEnd(t *testing.T) {
+	bin := buildBinary(t)
+	for _, tt := range []struct {
+		unit      string
+		want      string
+		notWanted string
+	}{
+		{"Binary", "KiB", "KB"},
+		{"Decimal", "KB", "KiB"},
+	} {
+		t.Run(tt.unit, func(t *testing.T) {
+			cfgDir, _ := integrationConfig(t, "Never", "", "[Ui]", `unit = "`+tt.unit+`"`)
+			logPath := filepath.Join(filepath.Dir(cfgDir), "commands.log")
+			cmd := integrationCmd(bin, cfgDir, logPath, "install", "-n", "figlet")
+			cmd.Stdin = nil
+			var stdout, stderr strings.Builder
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("run: %v\n%s", err, stderr.String())
+			}
+			out := stdout.String()
+			if !strings.Contains(out, tt.want) {
+				t.Errorf("[Ui] unit %s: output has no %s:\n%s", tt.unit, tt.want, out)
+			}
+			if strings.Contains(out, tt.notWanted) {
+				t.Errorf("[Ui] unit %s: output also has %s:\n%s", tt.unit, tt.notWanted, out)
+			}
+		})
+	}
+}
+
+// TestIntegrationInvalidConfigIsExactHardError pins the error surface:
+// xbpretty: config <path>:<line>: <message>, exit 2.
+func TestIntegrationInvalidConfigIsExactHardError(t *testing.T) {
+	bin := buildBinary(t)
+	cfgDir, cfgPath := integrationConfig(t, "Never")
+	if err := os.WriteFile(cfgPath, []byte("[Ui]\nmode = \"auto\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(filepath.Dir(cfgDir), "commands.log")
+	cmd := integrationCmd(bin, cfgDir, logPath, "install", "-n", "figlet")
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	ee, ok := err.(*exec.ExitError)
+	if !ok || ee.ExitCode() != 2 {
+		t.Fatalf("exit = %v, want 2\n%s", err, stderr.String())
+	}
+	prefix := "xbpretty: config " + cfgPath + ":2: "
+	if !strings.Contains(stderr.String(), prefix) {
+		t.Errorf("stderr missing %q:\n%s", prefix, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("config error wrote to stdout:\n%s", stdout.String())
+	}
+}
+
+// TestIntegrationBypassCommandsDoNotLoadConfig pins FR-053's bypass list with
+// an invalid default file present: every bypass still succeeds.
+func TestIntegrationBypassCommandsDoNotLoadConfig(t *testing.T) {
+	bin := buildBinary(t)
+	cfgDir, cfgPath := integrationConfig(t, "Never")
+	if err := os.WriteFile(cfgPath, []byte("this is not TOML\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(filepath.Dir(cfgDir), "commands.log")
+	stubDir, err := filepath.Abs("../../testdata/stub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkDir := t.TempDir()
+	tests := [][]string{
+		{"--help"},
+		{"--version"},
+		{"completion", "bash"},
+		{"link", linkDir},
+	}
+	for _, argv := range tests {
+		t.Run(strings.Join(argv, " "), func(t *testing.T) {
+			cmd := integrationCmd(bin, cfgDir, logPath, argv...)
+			cmd.Env = append(cmd.Env, "PATH="+stubDir+":"+os.Getenv("PATH"))
+			var stdout, stderr strings.Builder
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("bypass command loaded config: %v\n%s", err, stderr.String())
+			}
+			if strings.Contains(stderr.String(), "config ") {
+				t.Errorf("bypass command reported a config error:\n%s", stderr.String())
+			}
+		})
+	}
+}
+
+// TestIntegrationMissingDefaultConfigIsSilent pins the complement: with no
+// default file at all, a normal run proceeds.
+func TestIntegrationMissingDefaultConfigIsSilent(t *testing.T) {
+	bin := buildBinary(t)
+	cfgDir := filepath.Join(t.TempDir(), "config") // no xbpretty/config.toml
+	stubDir, err := filepath.Abs("../../testdata/stub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(filepath.Dir(cfgDir), "commands.log")
+	cmd := integrationCmd(bin, cfgDir, logPath, "install", "-n", "figlet")
+	cmd.Env = append(cmd.Env, "PATH="+stubDir+":"+os.Getenv("PATH"))
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("missing default file was not silent: %v\n%s", err, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "config ") {
+		t.Errorf("missing default file produced a config message:\n%s", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Install") {
+		t.Errorf("summary missing:\n%s", stdout.String())
 	}
 }

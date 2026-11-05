@@ -9,6 +9,7 @@ import (
 
 	"github.com/soubarnak/xbpretty/internal/completion"
 	"github.com/soubarnak/xbpretty/internal/config"
+	"github.com/soubarnak/xbpretty/internal/summary"
 )
 
 // Exit codes, per NFR-003.
@@ -60,6 +61,7 @@ type state struct {
 	log         bool
 	boxStyle    string
 	progressBar bool
+	unit        summary.SizeUnit
 }
 
 // Main runs xbpretty with the process arguments and returns its exit code.
@@ -124,28 +126,26 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		fmt.Fprintf(err, "xbpretty: %v\n", loadErr)
 		return exitUsage
 	}
-	verbose := cfg.Verbose
-	if opts.explicit["verbose"] {
-		verbose = opts.verbose
-	}
+	verbose := opts.verbose
 	st.opts = opts
-	st.sync = cfg.Sync
+	st.sync = cfg.Nala.AutoUpdate
 	if opts.explicit["sync"] {
 		st.sync = !opts.noSync
 	}
-	st.log = cfg.Log
+	st.log = cfg.Xbps.TransactionLog
 	if opts.explicit["log"] {
 		st.log = !opts.noLog
 	}
-	st.color = wantColor(cfg.Color, opts)
-	st.boxStyle = cfg.BoxStyle
+	st.color = wantColor(cfg.Color.Mode, opts)
+	st.boxStyle = "rounded"
 	if opts.explicit["box_style"] {
 		st.boxStyle = opts.boxStyle
 	}
-	st.progressBar = cfg.ProgressBar
+	st.progressBar = cfg.Ui.Mode != config.ModePlain
 	if opts.explicit["progress_bar"] && opts.progressBar != nil {
 		st.progressBar = *opts.progressBar
 	}
+	st.unit = summary.SizeUnit(cfg.Ui.Unit)
 	st.r = &runner{
 		cfg:     cfg,
 		out:     err,
@@ -180,24 +180,36 @@ func splitArgv(argv []string) (cmd string, args []string) {
 	return "", argv[1:]
 }
 
-// wantColor decides whether the summary carries ANSI colour, per FR-020.
-func wantColor(configValue string, opts *options) bool {
-	// FR-020: an explicit --color wins over the config key, and `auto` means
-	// what it says: colour only on a terminal with NO_COLOR unset.
-	value := configValue
+// wantColor decides whether the summary carries ANSI colour, per FR-057: an
+// explicit --color wins over [Color] mode, and Auto means colour only on a
+// terminal with a non-empty NO_COLOR unset.
+func wantColor(mode config.ColorMode, opts *options) bool {
+	value := mode
 	if opts.explicit["color"] {
-		value = opts.color
+		value = colorModeFromFlag(opts.color)
 	}
 	switch value {
-	case "always":
+	case config.ColorAlways:
 		return true
-	case "never":
+	case config.ColorNever:
 		return false
 	}
 	if os.Getenv("NO_COLOR") != "" {
 		return false
 	}
 	return isTerminalFn(os.Stdout)
+}
+
+// colorModeFromFlag maps the lowercase command-line spelling to the
+// PascalCase [Color] mode enum.
+func colorModeFromFlag(value string) config.ColorMode {
+	switch value {
+	case "always":
+		return config.ColorAlways
+	case "never":
+		return config.ColorNever
+	}
+	return config.ColorAuto
 }
 
 func (st *state) runCompletion(opts *options) int {
