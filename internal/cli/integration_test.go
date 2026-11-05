@@ -249,7 +249,7 @@ func TestIntegrationConfigColorModeEndToEnd(t *testing.T) {
 }
 
 // TestIntegrationConfigUnitEndToEnd drives [Ui] unit into the size output:
-// the same plan prints KiB under Binary and KB under Decimal.
+// the same plan prints KiB under Binary and kB under Decimal.
 func TestIntegrationConfigUnitEndToEnd(t *testing.T) {
 	bin := buildBinary(t)
 	for _, tt := range []struct {
@@ -257,8 +257,8 @@ func TestIntegrationConfigUnitEndToEnd(t *testing.T) {
 		want      string
 		notWanted string
 	}{
-		{"Binary", "KiB", "KB"},
-		{"Decimal", "KB", "KiB"},
+		{"Binary", "KiB", "kB"},
+		{"Decimal", "kB", "KiB"},
 	} {
 		t.Run(tt.unit, func(t *testing.T) {
 			cfgDir, _ := integrationConfig(t, "Never", "", "[Ui]", `unit = "`+tt.unit+`"`)
@@ -403,8 +403,8 @@ func TestIntegrationConfigFlagSelectsFile(t *testing.T) {
 		argv []string
 		want string
 	}{
-		{"before the subcommand", []string{"--config", decimal, "install", "--dry-run", "figlet"}, "KB"},
-		{"after the subcommand", []string{"install", "--config", decimal, "--dry-run", "figlet"}, "KB"},
+		{"before the subcommand", []string{"--config", decimal, "install", "--dry-run", "figlet"}, "kB"},
+		{"after the subcommand", []string{"install", "--config", decimal, "--dry-run", "figlet"}, "kB"},
 		{"last one wins", []string{"--config", decimal, "install", "--dry-run", "figlet", "--config", binaryCfg}, "KiB"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

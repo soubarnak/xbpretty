@@ -69,6 +69,7 @@ type state struct {
 	boxStyle    string
 	progressBar bool
 	unit        summary.SizeUnit
+	theme       summary.Theme
 	mode        config.UIMode
 	assumeYes   bool
 	autoRemove  bool
@@ -185,6 +186,7 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		st.progressBar = *opts.progressBar
 	}
 	st.unit = summary.SizeUnit(resolved.unit)
+	st.theme = summaryTheme(cfg.Color.Theme)
 	st.r = &runner{
 		cfg:     cfg,
 		out:     err,

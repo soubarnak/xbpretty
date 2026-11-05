@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -270,20 +271,44 @@ func commandBinaries(cmd string) []string {
 // renderSummary draws the read-only summary for a non-empty plan.
 func (st *state) renderSummary(rows []xbps.Row) int {
 	sum := st.planToSummary(rows)
-	isPlain := !isTTY(st.stdout)
-	termWidth := terminalWidth(st.stdout)
+	if st.opts != nil {
+		sum.Command = st.opts.command
+	}
+	stdoutTTY := isTTY(st.stdout)
+	// FR-062: the rule width is the stdout terminal width, else a positive
+	// COLUMNS, else 80, and it is used even when piped. Table expansion is a
+	// separate decision: full width on a TTY, natural widths when piped.
+	width := 0
+	if stdoutTTY {
+		width = terminalWidth(st.stdout)
+	}
+	if width <= 0 {
+		width = columnsFromEnv()
+	}
+	if width <= 0 {
+		width = 80
+	}
 	if err := (summary.Renderer{
-		Color:       st.color,
-		Plain:       isPlain,
-		Width:       termWidth,
-		BoxStyle:    st.boxStyle,
-		ProgressBar: st.progressBar,
-		Unit:        st.unit,
+		Color:  st.color,
+		Simple: st.simple,
+		Width:  width,
+		Piped:  !stdoutTTY,
+		Unit:   st.unit,
+		Theme:  st.theme,
 	}).Render(st.stdout, sum); err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
 		return exitRuntime
 	}
 	return -1
+}
+
+// columnsFromEnv reads COLUMNS, ignoring missing or malformed values.
+func columnsFromEnv() int {
+	n, err := strconv.Atoi(os.Getenv("COLUMNS"))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 // allHeld reports whether every row of the plan is a hold row.
@@ -693,8 +718,9 @@ func rebootHint(rows []xbps.Row) string {
 // planToSummary converts parsed rows into a summary, looking up the old
 // versions and hold state the summary needs.
 func (st *state) planToSummary(rows []xbps.Row) *summary.Summary {
+	held := st.heldPackages()
 	srows := make([]summary.Row, 0, len(rows))
-	var upgradeNames []string
+	var oldNames []string
 	for _, row := range rows {
 		srows = append(srows, summary.Row{
 			Name: row.Name, Version: row.Version, Action: row.Action,
@@ -702,12 +728,18 @@ func (st *state) planToSummary(rows []xbps.Row) *summary.Summary {
 			DownloadSize: row.DownloadSize, HasInstalled: row.HasInstalled,
 			HasDownload: row.HasDownload,
 		})
-		if row.Action == "update" || row.Action == "reinstall" {
-			upgradeNames = append(upgradeNames, row.Name)
+		// The version diff applies to upgrades, reinstalls and held rows
+		// whose installed version differs (FR-063).
+		switch row.Action {
+		case "update", "reinstall", "hold":
+			oldNames = append(oldNames, row.Name)
+		default:
+			if held[row.Name] {
+				oldNames = append(oldNames, row.Name)
+			}
 		}
 	}
-	old := st.lookupOld(upgradeNames)
-	held := st.heldPackages()
+	old := st.lookupOld(oldNames)
 	return summary.Build(srows, held, old)
 }
 
