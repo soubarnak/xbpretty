@@ -4,6 +4,16 @@
 
 # xbpretty
 
+> **Rev 6 is approved.** The specification now targets full parity with nala
+> v0.18.2 and adds history/undo/redo, predownload, fetch, discovery with
+> machine output and the full-screen TUI. This README still describes the
+> shipped 0.3.x behaviour until those features land; the contract is
+> [`xbpretty-spec.md`](xbpretty-spec.md), with the matrix in
+> [`docs/parity/matrix.md`](docs/parity/matrix.md), the migration guide in
+> [`docs/migration-rev6.md`](docs/migration-rev6.md) and the decisions in
+> [`docs/adr/`](docs/adr/). The six alias names and the superset extensions
+> are unchanged.
+
 A modern, friendly front end for [`xbps`](https://github.com/void-linux/xbps), the Void Linux package manager, inspired by [Nala](https://gitlab.com/volian/nala).
 
 `xbpretty` previews transactions in rich Unicode container tables, highlights package version diffs, asks for confirmation before acting, tracks downloads and installations in a live framed progress widget, records transaction history, and explains common xbps errors with actionable hints. It wraps `xbps-install`, `xbps-remove`, and `xbps-query`; it does not replace them.

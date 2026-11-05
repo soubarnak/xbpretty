@@ -1,0 +1,35 @@
+# xbpretty rev 6 configuration.
+[Nala]
+auto_remove = true
+auto_update = true
+update_show_packages = false
+full_upgrade = false
+simple = false
+assume_yes = false
+
+[Ui]
+mode = "Auto"
+unit = "Binary"
+
+[Color]
+mode = "Auto"
+
+[Color.theme]
+Primary = { fg = "BrightGreen" }
+Secondary = { fg = "BrightBlue" }
+Highlight = { fg = "Reset" }
+Regular = { fg = "Reset", modifier = "" }
+ProgressFilled = { fg = "BrightGreen" }
+ProgressUnfilled = { fg = "BrightRed" }
+Notice = { fg = "BrightYellow" }
+Warning = { fg = "BrightYellow" }
+Error = { fg = "BrightRed" }
+
+[Xbps]
+install_path = "xbps-install"
+remove_path = "xbps-remove"
+query_path = "xbps-query"
+rindex_path = "xbps-rindex"
+uhelper_path = "xbps-uhelper"
+pkgdb_path = "xbps-pkgdb"
+transaction_log = true
