@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -125,7 +126,7 @@ func TestApplyWritesSavesBackupAndManifest(t *testing.T) {
 	}
 	manifestPath := filepath.Join(t.TempDir(), "fetch.json")
 
-	manifest, err := fetch.ApplyWrites(writes, fetch.Manifest{}, manifestPath, writtenAt, "https://repo-fi.voidlinux.org", "x86_64")
+	manifest, _, err := fetch.ApplyWrites(writes, fetch.Manifest{}, manifestPath, writtenAt, "https://repo-fi.voidlinux.org", "x86_64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,6 +166,12 @@ func TestApplyWritesSavesBackupAndManifest(t *testing.T) {
 		if info.Mode().Perm() != 0o644 {
 			t.Errorf("%s mode = %o, want 0644", path, info.Mode().Perm())
 		}
+		if os.Geteuid() == 0 {
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if !ok || stat.Uid != 0 || stat.Gid != 0 {
+				t.Errorf("%s owner = %v, want root:root", path, stat)
+			}
+		}
 	}
 	raw, err := os.ReadFile(manifestPath)
 	if err != nil {
@@ -203,7 +210,7 @@ func TestApplyWritesCreatedFileHasNoBackup(t *testing.T) {
 	}
 	writes[0].Path = filepath.Join(targetDir, filepath.Base(source))
 
-	manifest, err := fetch.ApplyWrites(writes, fetch.Manifest{}, filepath.Join(t.TempDir(), "fetch.json"), time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
+	manifest, _, err := fetch.ApplyWrites(writes, fetch.Manifest{}, filepath.Join(t.TempDir(), "fetch.json"), time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +231,7 @@ func TestApplyWritesKeepsTheFirstBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifestPath := filepath.Join(t.TempDir(), "fetch.json")
-	first, err := fetch.ApplyWrites(writes, fetch.Manifest{}, manifestPath, time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
+	first, _, err := fetch.ApplyWrites(writes, fetch.Manifest{}, manifestPath, time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +241,7 @@ func TestApplyWritesKeepsTheFirstBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fetch.ApplyWrites(writes, first, manifestPath, time.Now(), "https://repo-de.voidlinux.org", "x86_64"); err != nil {
+	if _, _, err := fetch.ApplyWrites(writes, first, manifestPath, time.Now(), "https://repo-de.voidlinux.org", "x86_64"); err != nil {
 		t.Fatal(err)
 	}
 	backupContent, err := os.ReadFile(source + fetch.BackupSuffix)
@@ -248,7 +255,7 @@ func TestApplyWritesKeepsTheFirstBackup(t *testing.T) {
 
 func TestApplyWritesCarriesUntouchedEntries(t *testing.T) {
 	dir := t.TempDir()
-	set, source := managedSet(t, dir, "10-repository-main.conf")
+	set, _ := managedSet(t, dir, "10-repository-main.conf")
 	writes, err := fetch.PlanWrites(set, "https://repo-fi.voidlinux.org", time.Now(), dir, false)
 	if err != nil {
 		t.Fatal(err)
@@ -265,7 +272,7 @@ func TestApplyWritesCarriesUntouchedEntries(t *testing.T) {
 			SHA256:  "deadbeef",
 		}},
 	}
-	manifest, err := fetch.ApplyWrites(writes, previous, filepath.Join(t.TempDir(), "fetch.json"), time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
+	manifest, _, err := fetch.ApplyWrites(writes, previous, filepath.Join(t.TempDir(), "fetch.json"), time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,9 +283,6 @@ func TestApplyWritesCarriesUntouchedEntries(t *testing.T) {
 	for _, entry := range manifest.Files {
 		if entry.Path == previous.Files[0].Path {
 			carried = entry.Backup == previous.Files[0].Backup && entry.SHA256 == previous.Files[0].SHA256
-		}
-		if entry.Path == source && entry.Path == previous.Files[0].Path {
-			t.Fatal("the carried-over entry collided with a written file")
 		}
 	}
 	if !carried {
@@ -297,7 +301,7 @@ func TestManifestRoundTrip(t *testing.T) {
 			Path:    "/etc/xbps.d/00-repository-main.conf",
 			Backup:  "/etc/xbps.d/00-repository-main.conf.xbpretty-backup",
 			Created: false,
-			SHA256:  "abc",
+			SHA256:  strings.Repeat("a", 64),
 		}},
 	}
 	if err := fetch.WriteManifest(path, want); err != nil {
@@ -346,6 +350,11 @@ func TestScanSyncErrors(t *testing.T) {
 			stderr: "  ERROR: [reposync] failed https://repo-fi.voidlinux.org/current\n",
 		},
 		{
+			name:        "a longer path is not the written path",
+			stderr:      "ERROR: [reposync] failed https://repo-fi.voidlinux.org/current-extra\n",
+			wantForeign: true,
+		},
+		{
 			name:   "clean",
 			stderr: "repo-fi: 1234 packages\n",
 		},
@@ -360,16 +369,18 @@ func TestScanSyncErrors(t *testing.T) {
 	}
 }
 
-func TestWrittenRepositoryURLs(t *testing.T) {
-	set := fetch.RepositorySet{Lines: []fetch.RepositoryLine{
-		{Value: "https://repo-default.voidlinux.org/current", Suffix: "/current", Managed: true},
-		{Value: "https://repo-default.voidlinux.org/current/multilib", Suffix: "/current/multilib", Managed: true},
-		{Value: "https://example.com/custom", Suffix: "/custom", Managed: false},
-	}}
-	got := fetch.WrittenRepositoryURLs(set, "https://repo-fi.voidlinux.org/")
-	want := "https://repo-fi.voidlinux.org/current\nhttps://repo-fi.voidlinux.org/current/multilib"
+func TestWrittenURLsIncludesDerivedFiles(t *testing.T) {
+	writes := []fetch.PlannedWrite{
+		{URLs: []string{"https://repo-fi.voidlinux.org/current"}},
+		{URLs: []string{"https://repo-fi.voidlinux.org/current/nonfree"}},
+		// A preserved custom line is not written by this run and must not
+		// widen the sync-error scope.
+		{Content: []byte("repository=https://example.com/custom\n")},
+	}
+	got := fetch.WrittenURLs(writes)
+	want := "https://repo-fi.voidlinux.org/current\nhttps://repo-fi.voidlinux.org/current/nonfree"
 	if strings.Join(got, "\n") != want {
-		t.Errorf("WrittenRepositoryURLs = %v, want %s", got, want)
+		t.Errorf("WrittenURLs = %v, want %s", got, want)
 	}
 }
 
@@ -443,4 +454,217 @@ func TestPlanWritesMasksByBasename(t *testing.T) {
 	if writes[0].Path != filepath.Join(etcDir, "10-repository-main.conf") {
 		t.Errorf("target = %q, want the same basename under the write directory", writes[0].Path)
 	}
+}
+
+func TestApplyWritesRollsBackWhenTheManifestCannotBeWritten(t *testing.T) {
+	dir := t.TempDir()
+	set, source := managedSet(t, dir, "10-repository-main.conf")
+	writes, err := fetch.PlanWrites(set, "https://repo-fi.voidlinux.org", time.Now(), dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fetch.ApplyWrites(writes, fetch.Manifest{}, filepath.Join(blocker, "fetch.json"), time.Now(), "https://repo-fi.voidlinux.org", "x86_64"); err == nil {
+		t.Fatal("ApplyWrites succeeded with an uncreatable manifest")
+	}
+	content, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != originalRepositoryConf {
+		t.Errorf("target was not rolled back:\n%s", content)
+	}
+	if _, err := os.Stat(source + fetch.BackupSuffix); !os.IsNotExist(err) {
+		t.Errorf("a failed commit left its backup behind: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".xbpretty.tmp-") {
+			t.Errorf("a failed commit left a temp file: %s", entry.Name())
+		}
+	}
+}
+
+func TestReadManifestForRejectsInvalidEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(t.TempDir(), "fetch.json")
+	valid := fetch.Manifest{
+		SchemaVersion: 1, WrittenAt: "2026-11-05T20:55:12+05:30",
+		Mirror: "https://repo-fi.voidlinux.org", Arch: "x86_64",
+		Files: []fetch.ManifestFile{{
+			Path: filepath.Join(dir, "00-repository-main.conf"), Created: true,
+			SHA256: strings.Repeat("a", 64),
+		}},
+	}
+	tests := []struct {
+		name   string
+		mutate func(*fetch.Manifest)
+	}{
+		{"relative path", func(m *fetch.Manifest) { m.Files[0].Path = "00-repository-main.conf" }},
+		{"outside config dir", func(m *fetch.Manifest) { m.Files[0].Path = filepath.Join(t.TempDir(), "x.conf") }},
+		{"wrong backup", func(m *fetch.Manifest) { m.Files[0].Backup = "/tmp/elsewhere" }},
+		{"short sha", func(m *fetch.Manifest) { m.Files[0].SHA256 = "abc" }},
+		{"non-hex sha", func(m *fetch.Manifest) { m.Files[0].SHA256 = strings.Repeat("z", 64) }},
+		{"future schema", func(m *fetch.Manifest) { m.SchemaVersion = 2 }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manifest := valid
+			manifest.Files = append([]fetch.ManifestFile(nil), valid.Files...)
+			tt.mutate(&manifest)
+			raw, err := json.Marshal(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fetch.ReadManifestFor(path, dir); err == nil {
+				t.Errorf("ReadManifestFor accepted %s", tt.name)
+			}
+		})
+	}
+}
+
+func TestReadRegularFileNoFollowRejectsSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := fetch.ReadRegularFileNoFollow(link); err == nil {
+		t.Error("ReadRegularFileNoFollow followed a symlink")
+	}
+	content, err := fetch.ReadRegularFileNoFollow(target)
+	if err != nil || string(content) != "secret" {
+		t.Errorf("regular read = %q, %v", content, err)
+	}
+}
+
+func TestPlanWritesNonFreeSkipsABasenameAlreadyWritten(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "10-repository-main.conf")
+	nonfreeNamed := filepath.Join(dir, "10-repository-nonfree.conf")
+	for path, body := range map[string]string{
+		main:         "repository=https://repo-default.voidlinux.org/current\n",
+		nonfreeNamed: "repository=https://repo-default.voidlinux.org/current\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set := fetch.RepositorySet{
+		Suffixes: []string{"/current"},
+		Lines: []fetch.RepositoryLine{
+			{File: main, Basename: "10-repository-main.conf", Value: "https://repo-default.voidlinux.org/current", Suffix: "/current", Managed: true},
+			{File: nonfreeNamed, Basename: "10-repository-nonfree.conf", Value: "https://repo-default.voidlinux.org/current", Suffix: "/current", Managed: true},
+		},
+	}
+	writes, err := fetch.PlanWrites(set, "https://repo-fi.voidlinux.org", time.Now(), dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPath := map[string]fetch.PlannedWrite{}
+	for _, write := range writes {
+		if _, exists := byPath[write.Path]; exists {
+			t.Errorf("duplicate planned path %s", write.Path)
+		}
+		byPath[write.Path] = write
+	}
+	entry, ok := byPath[filepath.Join(dir, "10-repository-nonfree.conf")]
+	if !ok {
+		t.Fatal("the discovered 10-repository-nonfree.conf was not written")
+	}
+	if entry.Derived {
+		t.Error("the discovered file was replaced by a derived non-free write")
+	}
+	if !strings.Contains(string(entry.Content), "repository=https://repo-fi.voidlinux.org/current\n") {
+		t.Errorf("discovered file content = %q", entry.Content)
+	}
+}
+
+func TestApplyWritesDedupesByPath(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "10-repository-main.conf")
+	write := fetch.PlannedWrite{
+		Path: target, Content: []byte("repository=https://repo-fi.voidlinux.org/current\n"),
+		SHA256: strings.Repeat("a", 64),
+	}
+	manifest, _, err := fetch.ApplyWrites([]fetch.PlannedWrite{write, write}, fetch.Manifest{}, filepath.Join(t.TempDir(), "fetch.json"), time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Files) != 1 {
+		t.Errorf("manifest files = %+v, want one deduped entry", manifest.Files)
+	}
+}
+
+func TestApplyWritesSnapshotsAPreviouslyCreatedFile(t *testing.T) {
+	dir := t.TempDir()
+	set, _ := managedSet(t, dir, "10-repository-main.conf")
+	fixtureSource := filepath.Join(dir, "10-repository-main.conf")
+	// Move the source out of the target directory so fetch creates it.
+	systemDir := t.TempDir()
+	systemSource := filepath.Join(systemDir, filepath.Base(fixtureSource))
+	original, err := os.ReadFile(fixtureSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(systemSource, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i := range set.Lines {
+		set.Lines[i].File = systemSource
+	}
+	if err := os.Remove(fixtureSource); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(t.TempDir(), "fetch.json")
+	first, _, err := fetch.ApplyWrites(
+		mustPlan(t, set, "https://repo-fi.voidlinux.org", dir),
+		fetch.Manifest{}, manifestPath, time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Files) != 1 || !first.Files[0].Created || first.Files[0].Backup != "" {
+		t.Fatalf("first manifest = %+v, want created with no backup", first.Files)
+	}
+	firstContent, err := os.ReadFile(first.Files[0].Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second, _, err := fetch.ApplyWrites(
+		mustPlan(t, set, "https://repo-de.voidlinux.org", dir),
+		first, manifestPath, time.Now(), "https://repo-de.voidlinux.org", "x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := second.Files[0]
+	if entry.Created || entry.Backup == "" {
+		t.Errorf("second entry = %+v, want a snapshot backup", entry)
+	}
+	backup, err := os.ReadFile(entry.Backup)
+	if err != nil || string(backup) != string(firstContent) {
+		t.Errorf("snapshot backup = %q, %v; want the first fetch's output", backup, err)
+	}
+}
+
+func mustPlan(t *testing.T, set fetch.RepositorySet, mirror, dir string) []fetch.PlannedWrite {
+	t.Helper()
+	writes, err := fetch.PlanWrites(set, mirror, time.Now(), dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return writes
 }

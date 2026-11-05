@@ -174,3 +174,35 @@ func TestNonFreeSuffixes(t *testing.T) {
 		})
 	}
 }
+
+func TestClassifyRepositoriesUsesTheMirrorBasePath(t *testing.T) {
+	root := t.TempDir()
+	writeRepoFile(t, root, "10-repository-main.conf", strings.Join([]string{
+		"repository=https://mirror.example/one/current",
+		"repository=https://mirror.example/one/current/multilib",
+		"",
+	}, "\n"))
+	cfg, err := fetch.DiscoverRepositories([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := fetch.ClassifyRepositories(cfg, []string{"https://mirror.example/one"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(set.Suffixes, ",") != "/current,/current/multilib" {
+		t.Errorf("Suffixes = %v, want suffixes relative to the mirror's /one base", set.Suffixes)
+	}
+	if set.Primary != "/current" {
+		t.Errorf("Primary = %q, want /current", set.Primary)
+	}
+
+	// The previous manifest's full URL is enough when the live list moved on.
+	set, err = fetch.ClassifyRepositories(cfg, []string{"https://other.example"}, []string{"https://mirror.example/one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(set.Suffixes, ",") != "/current,/current/multilib" {
+		t.Errorf("previous-mirror Suffixes = %v", set.Suffixes)
+	}
+}

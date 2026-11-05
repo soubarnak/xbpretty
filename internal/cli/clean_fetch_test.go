@@ -23,9 +23,12 @@ func newCleanFetchEnv(t *testing.T) (*env, string, string) {
 		t.Fatal(err)
 	}
 	manifestPath := filepath.Join(e.dir, "var-lib-xbpretty", "fetch.json")
-	orig := fetchManifestPath
+	origManifest, origWriteDir := fetchManifestPath, fetchWriteDir
 	fetchManifestPath = manifestPath
-	t.Cleanup(func() { fetchManifestPath = orig })
+	fetchWriteDir = xbpsd
+	t.Cleanup(func() {
+		fetchManifestPath, fetchWriteDir = origManifest, origWriteDir
+	})
 	return e, xbpsd, manifestPath
 }
 
@@ -80,8 +83,8 @@ func TestCleanFetchRestoresTheBackupAndDeletesTheManifest(t *testing.T) {
 	if calls := e.commands(); len(calls) != 0 {
 		t.Errorf("clean --fetch ran a child: %q", calls)
 	}
-	if _, err := os.Stat(backup); err != nil {
-		t.Errorf("restoring consumed the backup: %v", err)
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Errorf("restoring did not consume the backup: %v", err)
 	}
 }
 
@@ -153,10 +156,10 @@ func TestCleanFetchNamesACorruptManifestAndTouchesNothing(t *testing.T) {
 
 func TestCleanFetchWarnsBeforeRevertingAHandEditedFile(t *testing.T) {
 	tests := []struct {
-		name     string
-		created  bool
-		backup   bool
-		warning  string
+		name    string
+		created bool
+		backup  bool
+		warning string
 	}{
 		{name: "restoring", backup: true, warning: "was modified after fetch; restoring "},
 		{name: "removing", created: true, warning: "was modified after fetch; removing it"},
@@ -218,7 +221,7 @@ func TestCleanFetchSkipsAnAbsentFileAndStillSucceeds(t *testing.T) {
 	writeCleanFetchManifest(t, manifestPath, fetch.Manifest{
 		SchemaVersion: 1, WrittenAt: "2026-11-05T20:55:12+05:30",
 		Mirror: "https://repo-fi.voidlinux.org", Arch: "x86_64",
-		Files: []fetch.ManifestFile{{Path: missing, Created: true, SHA256: "abc"}},
+		Files: []fetch.ManifestFile{{Path: missing, Created: true, SHA256: strings.Repeat("a", 64)}},
 	})
 	code, _, errs := e.run("xbpretty", "clean", "--fetch")
 	if code != 0 {
@@ -283,10 +286,10 @@ func TestCleanFetchManifestSchemaIsTheFetchSchema(t *testing.T) {
 		Mirror:        "https://repo-fi.voidlinux.org",
 		Arch:          "x86_64",
 		Files: []fetch.ManifestFile{{
-			Path: "/etc/xbps.d/00-repository-main.conf",
-			Backup: "/etc/xbps.d/00-repository-main.conf.xbpretty-backup",
+			Path:    "/etc/xbps.d/00-repository-main.conf",
+			Backup:  "/etc/xbps.d/00-repository-main.conf.xbpretty-backup",
 			Created: false,
-			SHA256: "abc",
+			SHA256:  strings.Repeat("a", 64),
 		}},
 	}
 	if err := fetch.WriteManifest(path, manifest); err != nil {
@@ -304,5 +307,71 @@ func TestCleanFetchManifestSchemaIsTheFetchSchema(t *testing.T) {
 		if _, ok := decoded[key]; !ok {
 			t.Errorf("manifest lacks %q: %s", key, raw)
 		}
+	}
+}
+
+func TestCleanFetchRejectsANonRegularTarget(t *testing.T) {
+	e, xbpsd, manifestPath := newCleanFetchEnv(t)
+	real := filepath.Join(xbpsd, "real.conf")
+	if err := os.WriteFile(real, []byte("repository=https://repo-fi.voidlinux.org/current\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(xbpsd, "10-repository-main.conf")
+	if err := os.Symlink(real, target); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	writeCleanFetchManifest(t, manifestPath, fetch.Manifest{
+		SchemaVersion: 1, WrittenAt: "2026-11-05T20:55:12+05:30",
+		Mirror: "https://repo-fi.voidlinux.org", Arch: "x86_64",
+		Files: []fetch.ManifestFile{{Path: target, Created: true, SHA256: contentSHA("x")}},
+	})
+	code, _, errs := e.run("xbpretty", "clean", "--fetch")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(errs, "is not a regular file") {
+		t.Errorf("stderr = %q", errs)
+	}
+	if _, err := os.Lstat(target); err != nil {
+		t.Errorf("the rejected target was touched: %v", err)
+	}
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Errorf("the manifest was removed on failure: %v", err)
+	}
+}
+
+func TestCleanFetchRejectsASymlinkedBackup(t *testing.T) {
+	e, xbpsd, manifestPath := newCleanFetchEnv(t)
+	target := filepath.Join(xbpsd, "10-repository-main.conf")
+	const written = "repository=https://repo-fi.voidlinux.org/current\n"
+	if err := os.WriteFile(target, []byte(written), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	backup := target + fetch.BackupSuffix
+	realBackup := filepath.Join(xbpsd, "elsewhere")
+	if err := os.WriteFile(realBackup, []byte("original\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realBackup, backup); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	writeCleanFetchManifest(t, manifestPath, fetch.Manifest{
+		SchemaVersion: 1, WrittenAt: "2026-11-05T20:55:12+05:30",
+		Mirror: "https://repo-fi.voidlinux.org", Arch: "x86_64",
+		Files: []fetch.ManifestFile{{Path: target, Backup: backup, SHA256: contentSHA(written)}},
+	})
+	code, _, errs := e.run("xbpretty", "clean", "--fetch")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(errs, "is not a regular file") {
+		t.Errorf("stderr = %q", errs)
+	}
+	content, err := os.ReadFile(target)
+	if err != nil || string(content) != written {
+		t.Errorf("the target changed before the backup was validated: %q %v", content, err)
+	}
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Errorf("the manifest was removed on failure: %v", err)
 	}
 }

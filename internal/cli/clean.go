@@ -94,7 +94,7 @@ func (st *state) cleanLists(opts *options) int {
 // about and still reverted: leaving a broken fetch-written config behind is
 // worse than the warning.
 func (st *state) cleanFetchRestore(_ *options) int {
-	manifest, err := fetch.ReadManifest(fetchManifestPath)
+	manifest, err := fetch.ReadManifestFor(fetchManifestPath, fetchWriteDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			fmt.Fprintln(st.stderr, "xbpretty: no repository configuration written by xbp fetch")
@@ -113,11 +113,11 @@ func (st *state) cleanFetchRestore(_ *options) int {
 			fmt.Fprintf(st.stderr, "xbpretty: restoring %s: %v\n", entry.Path, statErr)
 			return exitRuntime
 		}
-		if info.IsDir() {
-			fmt.Fprintf(st.stderr, "xbpretty: restoring %s: is a directory\n", entry.Path)
+		if !info.Mode().IsRegular() {
+			fmt.Fprintf(st.stderr, "xbpretty: restoring %s: is not a regular file\n", entry.Path)
 			return exitRuntime
 		}
-		current, readErr := os.ReadFile(entry.Path)
+		current, readErr := fetch.ReadRegularFileNoFollow(entry.Path)
 		if readErr != nil {
 			fmt.Fprintf(st.stderr, "xbpretty: restoring %s: %v\n", entry.Path, readErr)
 			return exitRuntime
@@ -130,13 +130,19 @@ func (st *state) cleanFetchRestore(_ *options) int {
 			}
 		}
 		if entry.Backup != "" {
-			content, backupErr := os.ReadFile(entry.Backup)
+			content, backupErr := fetch.ReadRegularFileNoFollow(entry.Backup)
 			if backupErr != nil {
 				fmt.Fprintf(st.stderr, "xbpretty: restoring %s: %v\n", entry.Path, backupErr)
 				return exitRuntime
 			}
 			if err := fetch.WriteAtomic(entry.Path, content); err != nil {
 				fmt.Fprintf(st.stderr, "xbpretty: restoring %s: %v\n", entry.Path, err)
+				return exitRuntime
+			}
+			// The backup has been consumed. A later fetch must snapshot
+			// afresh rather than reuse this pre-fetch file.
+			if err := os.Remove(entry.Backup); err != nil && !os.IsNotExist(err) {
+				fmt.Fprintf(st.stderr, "xbpretty: restoring %s: removing backup %s: %v\n", entry.Path, entry.Backup, err)
 				return exitRuntime
 			}
 			if st.r != nil && st.r.verbose {

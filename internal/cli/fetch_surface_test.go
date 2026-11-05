@@ -55,7 +55,7 @@ func TestAC035FetchWritesSyncsAndCleanFetchReverts(t *testing.T) {
 	if err != nil || string(backup) != string(original) {
 		t.Errorf("backup = %q, %v; want the original bytes", backup, err)
 	}
-	manifest, err := fetch.ReadManifest(manifestPath)
+	manifest, err := fetch.ReadManifestFor(manifestPath, xbpsd)
 	if err != nil {
 		t.Fatalf("manifest: %v", err)
 	}

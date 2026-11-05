@@ -24,7 +24,7 @@ var (
 	fetchManifestPath  = fetch.DefaultManifestPath
 	fetchHTTPClient    = fetch.NewHTTPClient
 	fetchArch          = runtimeXBPSArch()
-	fetchPreviousHosts = func() []string { return fetch.ManifestMirrorHosts(fetchManifestPath) }
+	fetchPreviousHosts = func() []string { return fetch.ManifestMirrorURLs(fetchManifestPath) }
 	// pickMirror is #78's picker seam. Nil means the non-TTY top-3 shortlist,
 	// which is also the documented fallback while the picker is unbuilt.
 	pickMirror func(ranked []fetch.Result) (int, bool)
@@ -76,7 +76,7 @@ func (st *state) runFetch(opts *options) int {
 		}
 	}
 
-	repos, err := fetch.ClassifyRepositories(cfg, fetch.MirrorHosts(mirrors), fetchPreviousHosts())
+	repos, err := fetch.ClassifyRepositories(cfg, mirrorBaseURLs(mirrors), fetchPreviousHosts())
 	if err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
 		return exitRuntime
@@ -144,6 +144,12 @@ func (st *state) runFetch(opts *options) int {
 	}
 	if euidFn() != 0 {
 		fmt.Fprintln(st.stderr, "hint: run with sudo to write the repository configuration")
+		return exitRuntime
+	}
+	// FR-053: prove the configured sync binary before the first byte is
+	// written, so a missing xbps-install cannot leave a half-done fetch.
+	if err := st.r.cfg.ResolveFor("install"); err != nil {
+		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
 		return exitRuntime
 	}
 
@@ -233,7 +239,7 @@ func (st *state) writeRepositoryConfiguration(plan fetchWritePlan) ([]string, in
 		return nil, exitRuntime, fetch.ErrNoManagedRepo
 	}
 
-	previous, prevErr := fetch.ReadManifest(fetchManifestPath)
+	previous, prevErr := fetch.ReadManifestFor(fetchManifestPath, fetchWriteDir)
 	if prevErr != nil && !os.IsNotExist(prevErr) {
 		// A corrupt previous manifest cannot be carried over. The current
 		// write is still atomic; the operator's next clean --fetch will name
@@ -241,7 +247,7 @@ func (st *state) writeRepositoryConfiguration(plan fetchWritePlan) ([]string, in
 		previous = fetch.Manifest{}
 	}
 
-	manifest, err := fetch.ApplyWrites(writes, previous, fetchManifestPath, plan.WrittenAt, plan.Mirror.URL, plan.Arch)
+	_, preImages, err := fetch.ApplyWrites(writes, previous, fetchManifestPath, plan.WrittenAt, plan.Mirror.URL, plan.Arch)
 	if err != nil {
 		return nil, exitRuntime, err
 	}
@@ -253,14 +259,13 @@ func (st *state) writeRepositoryConfiguration(plan fetchWritePlan) ([]string, in
 
 	code, output, runErr := st.r.streamStderr(st.r.cfg.Xbps.InstallPath, "-S")
 	if runErr != nil {
-		st.revertFetchWrites(writes, previous, manifest)
+		st.revertFetchWrites(preImages, previous)
 		return nil, exitRuntime, runErr
 	}
 
-	failed, foreign := fetch.ScanSyncErrors(output.Stdout, output.Stderr,
-		fetch.WrittenRepositoryURLs(plan.Repositories, plan.Mirror.URL))
+	failed, foreign := fetch.ScanSyncErrors(output.Stdout, output.Stderr, fetch.WrittenURLs(writes))
 	if code != 0 || failed {
-		st.revertFetchWrites(writes, previous, manifest)
+		st.revertFetchWrites(preImages, previous)
 		if code != 0 {
 			return nil, code, nil
 		}
@@ -272,37 +277,25 @@ func (st *state) writeRepositoryConfiguration(plan fetchWritePlan) ([]string, in
 	return paths, exitOK, nil
 }
 
-// revertFetchWrites restores or deletes only the files this run wrote, then
-// puts the previous manifest back (or removes the manifest on a first write)
-// so carried-over entries and an earlier fetch stay revertable. A failed
-// revert step keeps the current manifest for a later clean --fetch.
-func (st *state) revertFetchWrites(writes []fetch.PlannedWrite, previous, current fetch.Manifest) {
-	written := make(map[string]bool, len(writes))
-	for _, write := range writes {
-		written[write.Path] = true
-	}
-
+// revertFetchWrites restores the configuration that was live immediately
+// before this run, not the pre-first-fetch backup, then puts the previous
+// manifest back (or removes it on a first write) so carried-over entries and an
+// earlier fetch stay revertable. A failed revert step keeps the current
+// manifest for a later clean --fetch.
+func (st *state) revertFetchWrites(preImages []fetch.PreImage, previous fetch.Manifest) {
 	restored := true
-	for _, entry := range current.Files {
-		if !written[entry.Path] {
-			continue
-		}
+	for _, pre := range preImages {
 		var revertErr error
-		if entry.Backup != "" && fileExists(entry.Backup) {
-			content, readErr := os.ReadFile(entry.Backup)
-			if readErr != nil {
-				revertErr = readErr
-			} else {
-				revertErr = fetch.WriteAtomic(entry.Path, content)
-			}
+		if pre.Existed {
+			revertErr = fetch.WriteAtomic(pre.Path, pre.Content)
 		} else {
-			revertErr = os.Remove(entry.Path)
+			revertErr = os.Remove(pre.Path)
 			if os.IsNotExist(revertErr) {
 				revertErr = nil
 			}
 		}
 		if revertErr != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: reverting %s: %v\n", entry.Path, revertErr)
+			fmt.Fprintf(st.stderr, "xbpretty: reverting %s: %v\n", pre.Path, revertErr)
 			restored = false
 		}
 	}
@@ -318,6 +311,16 @@ func (st *state) revertFetchWrites(writes []fetch.PlannedWrite, previous, curren
 		_ = os.Remove(fetchManifestPath)
 	}
 	fmt.Fprintln(st.stderr, "xbpretty: repository sync failed; previous configuration restored")
+}
+
+// mirrorBaseURLs returns the live mirror URLs, whose paths are the bases a
+// repository= suffix is relative to.
+func mirrorBaseURLs(mirrors []fetch.Mirror) []string {
+	out := make([]string, 0, len(mirrors))
+	for _, mirror := range mirrors {
+		out = append(out, mirror.URL)
+	}
+	return out
 }
 
 // fileExists reports whether path exists, without following a broken link's

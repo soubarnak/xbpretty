@@ -99,7 +99,7 @@ func TestAC016Clean(t *testing.T) {
 		if _, err := os.Stat(repodata); !os.IsNotExist(err) {
 			t.Errorf("--lists did not win: repodata still exists")
 		}
-		if strings.Contains(errs, "not implemented") {
+		if strings.Contains(errs, "no repository configuration") {
 			t.Errorf("--fetch ran before --lists:\n%s", errs)
 		}
 		if out != "" {

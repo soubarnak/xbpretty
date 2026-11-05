@@ -5,10 +5,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/url"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -38,13 +39,25 @@ type ManifestFile struct {
 }
 
 // PlannedWrite is one masking file fetch will write: the same-basename target,
-// the system file it masks, and the exact bytes.
+// the system file it masks, and the exact bytes. Derived marks a file
+// --non-free synthesised rather than one discovered on the system.
 type PlannedWrite struct {
 	Basename string
 	Source   string
 	Path     string
 	Content  []byte
 	SHA256   string
+	Derived  bool
+	URLs     []string // repository URLs this file contributes (managed only)
+}
+
+// PreImage is one target's bytes immediately before this run wrote it. A sync
+// failure restores these, not the first fetch's .xbpretty-backup, so a re-fetch
+// that fails returns to the configuration that was live when it started.
+type PreImage struct {
+	Path    string
+	Existed bool
+	Content []byte
 }
 
 // PlanWrites builds one target per managed basename. The source file is the
@@ -54,7 +67,7 @@ type PlannedWrite struct {
 func PlanWrites(set RepositorySet, mirror string, writtenAt time.Time, targetDir string, nonFree bool) ([]PlannedWrite, error) {
 	type group struct {
 		source  string
-		managed map[string]bool
+		managed map[string]string // raw repository= value -> relative path suffix
 	}
 	order := make([]string, 0)
 	groups := map[string]*group{}
@@ -64,14 +77,15 @@ func PlanWrites(set RepositorySet, mirror string, writtenAt time.Time, targetDir
 		}
 		g, ok := groups[line.Basename]
 		if !ok {
-			g = &group{source: line.File, managed: map[string]bool{}}
+			g = &group{source: line.File, managed: map[string]string{}}
 			groups[line.Basename] = g
 			order = append(order, line.Basename)
 		}
-		g.managed[line.Value] = true
+		g.managed[line.Value] = line.Suffix
 	}
 
 	writes := make([]PlannedWrite, 0, len(order))
+	byPath := map[string]bool{}
 	for _, basename := range order {
 		g := groups[basename]
 		original, err := os.ReadFile(g.source)
@@ -83,24 +97,32 @@ func PlanWrites(set RepositorySet, mirror string, writtenAt time.Time, targetDir
 			continue
 		}
 		sum := sha256.Sum256(content)
+		path := filepath.Join(targetDir, basename)
+		if byPath[path] {
+			continue
+		}
+		byPath[path] = true
 		writes = append(writes, PlannedWrite{
 			Basename: basename,
 			Source:   g.source,
-			Path:     filepath.Join(targetDir, basename),
+			Path:     path,
 			Content:  content,
 			SHA256:   hex.EncodeToString(sum[:]),
+			URLs:     managedURLs(g.managed, mirror),
 		})
 	}
 	if nonFree {
-		writes = append(writes, nonFreeWrites(set, mirror, writtenAt, targetDir)...)
+		writes = appendNonFreeWrites(writes, set, mirror, writtenAt, targetDir, byPath)
 	}
 	return writes, nil
 }
 
-// nonFreeWrites derives FR-046's non-free files only when the system does not
-// already configure that repository path. The primary gets 10-repository-
-// nonfree.conf; every managed /multilib path also gets its nonfree sibling.
-func nonFreeWrites(set RepositorySet, mirror string, writtenAt time.Time, targetDir string) []PlannedWrite {
+// appendNonFreeWrites derives FR-046's non-free files only when the system
+// does not already configure that repository path. The primary base is the
+// first managed suffix that is not itself non-free; every managed /multilib
+// path also gets its nonfree sibling. A derived basename already planned from a
+// discovered file is never duplicated.
+func appendNonFreeWrites(writes []PlannedWrite, set RepositorySet, mirror string, writtenAt time.Time, targetDir string, byPath map[string]bool) []PlannedWrite {
 	configured := map[string]bool{}
 	for _, line := range set.Lines {
 		if line.Suffix != "" {
@@ -117,6 +139,10 @@ func nonFreeWrites(set RepositorySet, mirror string, writtenAt time.Time, target
 		if suffix == "" || configured[suffix] {
 			return
 		}
+		path := filepath.Join(targetDir, basename)
+		if byPath[path] {
+			return
+		}
 		for _, d := range wanted {
 			if d.suffix == suffix {
 				return
@@ -126,11 +152,18 @@ func nonFreeWrites(set RepositorySet, mirror string, writtenAt time.Time, target
 		wanted = append(wanted, derived{suffix: suffix, basename: basename})
 	}
 	primary := ""
-	if len(set.Suffixes) > 0 {
-		primary = set.Suffixes[0]
+	for _, suffix := range set.Suffixes {
+		if suffix != "" && !strings.HasSuffix(suffix, "/nonfree") {
+			primary = suffix
+			break
+		}
 	}
 	if primary != "" {
-		add(primary+"/nonfree", "10-repository-nonfree.conf")
+		basename := "10-repository-nonfree.conf"
+		if strings.HasSuffix(primary, "/multilib") {
+			basename = "10-repository-multilib-nonfree.conf"
+		}
+		add(primary+"/nonfree", basename)
 	}
 	for _, suffix := range set.Suffixes {
 		if strings.HasSuffix(suffix, "/multilib") {
@@ -139,31 +172,39 @@ func nonFreeWrites(set RepositorySet, mirror string, writtenAt time.Time, target
 	}
 
 	base := strings.TrimRight(mirror, "/")
-	out := make([]PlannedWrite, 0, len(wanted))
 	for _, d := range wanted {
 		content := fmt.Sprintf("# Written by xbpretty fetch on %s; revert with 'xbp clean --fetch'.\nrepository=%s%s\n",
 			writtenAt.Format(time.RFC3339), base, d.suffix)
 		sum := sha256.Sum256([]byte(content))
-		out = append(out, PlannedWrite{
+		path := filepath.Join(targetDir, d.basename)
+		byPath[path] = true
+		writes = append(writes, PlannedWrite{
 			Basename: d.basename,
-			Path:     filepath.Join(targetDir, d.basename),
+			Path:     path,
 			Content:  []byte(content),
 			SHA256:   hex.EncodeToString(sum[:]),
+			Derived:  true,
+			URLs:     []string{base + d.suffix},
 		})
 	}
-	return out
+	return writes
 }
 
 // rewriteRepositoryLines prepends FR-047's provenance header and rewrites only
 // the managed repository= values. Every other byte of the original line stays
-// as it was, including whitespace, comments and unrelated keys.
-func rewriteRepositoryLines(original []byte, mirror string, managed map[string]bool, writtenAt time.Time) ([]byte, int) {
+// as it was, including whitespace, comments and unrelated keys. An earlier
+// fetch's header is replaced, never stacked.
+func rewriteRepositoryLines(original []byte, mirror string, managed map[string]string, writtenAt time.Time) ([]byte, int) {
 	header := fmt.Sprintf("# Written by xbpretty fetch on %s; revert with 'xbp clean --fetch'.\n", writtenAt.Format(time.RFC3339))
 	var b strings.Builder
 	b.WriteString(header)
 	rewritten := 0
-	for _, line := range strings.SplitAfter(string(original), "\n") {
+	lines := strings.SplitAfter(string(original), "\n")
+	for i, line := range lines {
 		if line == "" {
+			continue
+		}
+		if i == 0 && isProvenanceHeader(line) {
 			continue
 		}
 		trimmed := strings.TrimSpace(line)
@@ -177,20 +218,12 @@ func rewriteRepositoryLines(original []byte, mirror string, managed map[string]b
 			continue
 		}
 		raw := strings.TrimSpace(value)
-		if !managed[raw] {
+		suffix, ok := managed[raw]
+		if !ok {
 			b.WriteString(line)
 			continue
 		}
-		u, err := url.Parse(raw)
-		if err != nil || u.Host == "" {
-			b.WriteString(line)
-			continue
-		}
-		suffix := strings.TrimRight(u.Path, "/")
-		if suffix == "/" {
-			suffix = ""
-		}
-		replacement := strings.TrimRight(mirror, "/") + suffix
+		replacement := strings.TrimRight(mirror, "/") + strings.TrimRight(suffix, "/")
 		if eq := strings.Index(line, "="); eq >= 0 {
 			line = line[:eq+1] + strings.Replace(line[eq+1:], raw, replacement, 1)
 		}
@@ -203,9 +236,36 @@ func rewriteRepositoryLines(original []byte, mirror string, managed map[string]b
 	return []byte(b.String()), rewritten
 }
 
-// WrittenRepositoryURLs returns the repository URLs this run would write: the
-// chosen mirror plus each managed line's preserved path suffix. FR-049 scopes
-// sync errors to exactly these URLs.
+// isProvenanceHeader reports whether a line is the header a previous fetch
+// wrote at the top of a masking file.
+func isProvenanceHeader(line string) bool {
+	const prefix = "# Written by xbpretty fetch on "
+	if !strings.HasPrefix(line, prefix) {
+		return false
+	}
+	return strings.HasSuffix(strings.TrimSuffix(line, "\n"), "; revert with 'xbp clean --fetch'.")
+}
+
+// managedURLs returns the rewritten repository URLs a file contributes: the
+// chosen mirror plus each managed line's relative suffix, deduplicated.
+func managedURLs(managed map[string]string, mirror string) []string {
+	base := strings.TrimRight(mirror, "/")
+	var out []string
+	seen := map[string]bool{}
+	for _, suffix := range managed {
+		value := base + strings.TrimRight(suffix, "/")
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+// WrittenRepositoryURLs returns the repository URLs a managed set contributes
+// for the chosen mirror: the mirror base plus each line's relative suffix.
+// Preserved custom/local lines are excluded.
 func WrittenRepositoryURLs(set RepositorySet, mirror string) []string {
 	base := strings.TrimRight(mirror, "/")
 	var out []string
@@ -214,13 +274,53 @@ func WrittenRepositoryURLs(set RepositorySet, mirror string) []string {
 		if !line.Managed {
 			continue
 		}
-		u := base + strings.TrimRight(line.Suffix, "/")
-		if !seen[u] {
-			seen[u] = true
-			out = append(out, u)
+		value := base + strings.TrimRight(line.Suffix, "/")
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+// WrittenURLs returns the repository URLs the files this run writes actually
+// contribute, including --non-free's derived files and excluding preserved
+// custom/local lines. FR-049 scopes sync errors to exactly these URLs.
+func WrittenURLs(writes []PlannedWrite) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, write := range writes {
+		for _, value := range write.URLs {
+			if value == "" || seen[value] {
+				continue
+			}
+			seen[value] = true
+			out = append(out, value)
 		}
 	}
 	return out
+}
+
+// errorLineNamesURL reports whether a sync ERROR line names url as a whole
+// repository path, so /current does not match /current-extra.
+func errorLineNamesURL(line, url string) bool {
+	offset := 0
+	for {
+		index := strings.Index(line[offset:], url)
+		if index < 0 {
+			return false
+		}
+		end := offset + index + len(url)
+		if end == len(line) {
+			return true
+		}
+		switch line[end] {
+		case '/', '\\', '\'', '"', ' ', '\t', ':', ',', ')', ']':
+			return true
+		}
+		offset += index + 1
+	}
 }
 
 // ScanSyncErrors inspects the captured xbps-install -S output. xbps exits 0
@@ -236,7 +336,7 @@ func ScanSyncErrors(stdout, stderr string, writtenURLs []string) (failed, foreig
 			}
 			matchesWritten := false
 			for _, written := range writtenURLs {
-				if written != "" && strings.Contains(line, written) {
+				if written != "" && errorLineNamesURL(line, written) {
 					matchesWritten = true
 					break
 				}
@@ -249,23 +349,6 @@ func ScanSyncErrors(stdout, stderr string, writtenURLs []string) (failed, foreig
 		}
 	}
 	return failed, foreign
-}
-
-// ReadManifest reads and validates one schema-1 manifest. A missing file
-// returns an error satisfying os.IsNotExist.
-func ReadManifest(path string) (Manifest, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return Manifest{}, err
-	}
-	var manifest Manifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return Manifest{}, err
-	}
-	if manifest.SchemaVersion != ManifestSchemaVersion {
-		return Manifest{}, fmt.Errorf("unsupported schema_version %d", manifest.SchemaVersion)
-	}
-	return manifest, nil
 }
 
 // WriteManifest writes the schema-1 manifest atomically at 0644.
@@ -291,36 +374,53 @@ func WriteManifest(path string, manifest Manifest) error {
 // are made before any target changes, targets are renamed into place only after
 // every temp exists, and a failure rolls the renames back. Entries for files
 // this run did not touch are carried over from previous (FR-047).
-func ApplyWrites(writes []PlannedWrite, previous Manifest, manifestPath string, writtenAt time.Time, mirror, arch string) (Manifest, error) {
+func ApplyWrites(writes []PlannedWrite, previous Manifest, manifestPath string, writtenAt time.Time, mirror, arch string) (Manifest, []PreImage, error) {
 	previousByPath := map[string]ManifestFile{}
 	for _, entry := range previous.Files {
 		previousByPath[entry.Path] = entry
 	}
 
 	targets := make([]writeTarget, 0, len(writes))
+	preImages := make([]PreImage, 0, len(writes))
+	seenPath := map[string]bool{}
 	for _, write := range writes {
-		if err := os.MkdirAll(filepath.Dir(write.Path), 0o755); err != nil {
-			return Manifest{}, fmt.Errorf("writing %s: %w", write.Path, err)
+		if seenPath[write.Path] {
+			continue
 		}
+		seenPath[write.Path] = true
 		info, statErr := os.Lstat(write.Path)
 		exists := statErr == nil && !info.IsDir()
 		if statErr != nil && !os.IsNotExist(statErr) {
-			return Manifest{}, fmt.Errorf("writing %s: %w", write.Path, statErr)
+			return Manifest{}, nil, fmt.Errorf("writing %s: %w", write.Path, statErr)
+		}
+		if write.Derived && exists {
+			prev, managed := previousByPath[write.Path]
+			if !managed || !prev.Created {
+				return Manifest{}, nil, fmt.Errorf("refusing to overwrite %s: not created by xbp fetch", write.Path)
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(write.Path), 0o755); err != nil {
+			return Manifest{}, nil, fmt.Errorf("writing %s: %w", write.Path, err)
 		}
 		var original []byte
 		if exists {
 			var err error
 			original, err = os.ReadFile(write.Path)
 			if err != nil {
-				return Manifest{}, fmt.Errorf("writing %s: %w", write.Path, err)
+				return Manifest{}, nil, fmt.Errorf("writing %s: %w", write.Path, err)
 			}
 		}
+		preImages = append(preImages, PreImage{Path: write.Path, Existed: exists, Content: original})
 
 		t := writeTarget{write: write, exists: exists, original: original}
 		if prev, ok := previousByPath[write.Path]; ok {
 			switch {
 			case prev.Backup != "" && fileExists(prev.Backup):
 				t.backup = prev.Backup
+			case prev.Created && exists:
+				// created:true says no backup is known, but the target exists
+				// now, so snapshot the bytes a later clean must restore.
+				t.backup = write.Path + BackupSuffix
 			case prev.Created:
 				t.created = true
 			case exists:
@@ -345,7 +445,7 @@ func ApplyWrites(writes []PlannedWrite, previous Manifest, manifestPath string, 
 		}
 		if err := writeFileAtomic(t.backup, t.original); err != nil {
 			removeAll(createdBackups)
-			return Manifest{}, fmt.Errorf("writing %s: %w", t.backup, err)
+			return Manifest{}, nil, fmt.Errorf("writing %s: %w", t.backup, err)
 		}
 		createdBackups = append(createdBackups, t.backup)
 	}
@@ -357,7 +457,7 @@ func ApplyWrites(writes []PlannedWrite, previous Manifest, manifestPath string, 
 		if err != nil {
 			removeAll(temps)
 			removeAll(createdBackups)
-			return Manifest{}, fmt.Errorf("writing %s: %w", t.write.Path, err)
+			return Manifest{}, nil, fmt.Errorf("writing %s: %w", t.write.Path, err)
 		}
 		temps[i] = temp
 	}
@@ -368,10 +468,17 @@ func ApplyWrites(writes []PlannedWrite, previous Manifest, manifestPath string, 
 			removeAll(temps[i:])
 			rollbackTargets(targets, renamed)
 			removeAll(createdBackups)
-			return Manifest{}, fmt.Errorf("writing %s: %w", t.write.Path, err)
+			return Manifest{}, nil, fmt.Errorf("writing %s: %w", t.write.Path, err)
 		}
 		temps[i] = ""
 		renamed = append(renamed, i)
+	}
+	dirs := map[string]bool{}
+	for _, t := range targets {
+		dirs[filepath.Dir(t.write.Path)] = true
+	}
+	for dir := range dirs {
+		syncDir(dir)
 	}
 
 	manifest := Manifest{
@@ -399,9 +506,9 @@ func ApplyWrites(writes []PlannedWrite, previous Manifest, manifestPath string, 
 	if err := WriteManifest(manifestPath, manifest); err != nil {
 		rollbackTargets(targets, renamed)
 		removeAll(createdBackups)
-		return Manifest{}, fmt.Errorf("writing %s: %w", manifestPath, err)
+		return Manifest{}, nil, fmt.Errorf("writing %s: %w", manifestPath, err)
 	}
-	return manifest, nil
+	return manifest, preImages, nil
 }
 
 // writeTarget is one planned file with the pre-run state rollback needs.
@@ -507,3 +614,21 @@ func syncDir(dir string) {
 // backup. It never creates the xbps.d directory's parents beyond one level of
 // MkdirAll, which the release binary only ever calls for /etc/xbps.d.
 func WriteAtomic(path string, content []byte) error { return writeFileAtomic(path, content) }
+
+// ReadRegularFileNoFollow reads a manifest backup or target only when it is a
+// regular file and not a symlink, so a crafted link cannot redirect a restore.
+func ReadRegularFileNoFollow(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
