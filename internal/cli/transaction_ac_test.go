@@ -197,6 +197,34 @@ func TestAC008UpgradeFamilyArgv(t *testing.T) {
 		}
 	})
 
+	t.Run("remove --update syncs with xbps-install first", func(t *testing.T) {
+		e := newEnv(t)
+		e.root = true
+		e.set("XB_STUB_STDOUT", removePlanFixture)
+		code, _, errs := e.run("xbpretty", "remove", "wget", "--update", "--dry-run")
+		if code != 0 {
+			t.Fatalf("exit = %d, want 0\n%s", code, errs)
+		}
+		got := e.transactionCalls()
+		if len(got) != 2 || got[0] != "-S" || got[1] != "-n wget" {
+			t.Errorf("commands = %q, want -S then -n wget", got)
+		}
+	})
+
+	t.Run("remove --update requires the install binary it now uses", func(t *testing.T) {
+		e := newEnv(t)
+		e.root = true
+		missing := filepath.Join(e.dir, "no-such-xbps-install")
+		e.pointInstallAt(missing)
+		code, _, errs := e.run("xbpretty", "remove", "wget", "--update", "--dry-run")
+		if code != 1 {
+			t.Errorf("exit = %d, want 1", code)
+		}
+		if !strings.Contains(errs, "xbpretty: xbps binary not found: "+missing) {
+			t.Errorf("missing the per-binary error:\n%s", errs)
+		}
+	})
+
 	t.Run("install --update on a non-root run warns and continues", func(t *testing.T) {
 		e := newEnv(t)
 		e.root = false

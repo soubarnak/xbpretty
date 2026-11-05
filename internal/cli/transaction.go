@@ -34,10 +34,10 @@ func isUpgradeCommand(cmd string) bool {
 }
 
 // commandUsesSync reports whether a command may run the separate `xbps-install
-// -S` step. xbps-remove has no -S, so the remove family never carries it
-// (FR-013).
+// -S` step (FR-013). Every transaction verb can: the step is its own
+// xbps-install call, never a flag on the transaction's own binary.
 func commandUsesSync(cmd string) bool {
-	return isUpgradeCommand(cmd) || cmd == "install" || cmd == "update"
+	return spec.IsTransaction(cmd)
 }
 
 // purgeRequested reports whether the command's transaction uses `-f` to delete
@@ -109,7 +109,9 @@ func (st *state) wantsSync(cmd string, opts *options) bool {
 }
 
 // syncStep runs `xbps-install -S` as its own step, with its output on stderr
-// and never inside the transaction argv. A non-zero code aborts the run with
+// and never inside the transaction argv. #63 owns the sync internals
+// (repository configuration and mirror behaviour); this is the seam it
+// replaces. A non-zero code aborts the run with
 // xbps's own code and a hint; xbps exits 0 when every fetch fails, so an exit
 // of 0 continues to the dry run (FR-013). It returns -1 when the policy allows
 // the caller to continue.
@@ -139,8 +141,16 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		return st.runUpdate(opts)
 	}
 
+	// FR-013: the index step is separate and root-only. It uses
+	// xbps-install even for the remove family, so that binary joins the
+	// per-command existence check when the step is requested.
+	syncWanted := st.wantsSync(cmd, opts)
+	binaries := commandBinaries(cmd)
+	if syncWanted {
+		binaries = append(binaries, "install")
+	}
 	// FR-053: check only the binaries this command actually uses, at runtime.
-	if err := st.r.cfg.ResolveFor(commandBinaries(cmd)...); err != nil {
+	if err := st.r.cfg.ResolveFor(binaries...); err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
 		return exitRuntime
 	}
@@ -164,9 +174,9 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		}
 	}
 
-	// FR-013: the index step is separate and root-only. A non-root request
-	// prints the stale-index warning and continues against the cached index.
-	if st.wantsSync(cmd, opts) {
+	// FR-013: a non-root sync request prints the stale-index warning and
+	// continues against the cached index.
+	if syncWanted {
 		if euidFn() != 0 {
 			fmt.Fprintln(st.stderr, "warning: not running as root, so the repository index was not refreshed; it may be stale")
 		} else if code := st.syncStep(); code >= 0 {

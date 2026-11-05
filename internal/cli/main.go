@@ -208,8 +208,13 @@ func (st *state) dispatch(opts *options) int {
 	case "full-upgrade", "safe-upgrade":
 		// The upgrade family is an equivalence in FR-011.
 		return st.runTransaction("upgrade", opts)
-	case "download", "clean", "list", "search", "show",
-		"policy", "history", "undo", "redo", "fetch":
+	case "download":
+		// TODO(#72): the download command's archive fetch belongs to #72.
+		return st.runUnimplemented(opts.command, opts)
+	case "clean":
+		// TODO(#64): cache and repodata cleaning belongs to #64.
+		return st.runUnimplemented(opts.command, opts)
+	case "list", "search", "show", "policy", "history", "undo", "redo", "fetch":
 		return st.runUnimplemented(opts.command, opts)
 	}
 	fmt.Fprintf(st.stderr, "xbpretty: unknown command %q\n", opts.command)
