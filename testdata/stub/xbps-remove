@@ -8,11 +8,22 @@ printf '%s %s\n' "${0##*/}" "$*" >> "${XB_STUB_LOG:-/dev/null}"
 case "${1:-}" in
   --*) ;;
   -*n*)
-    printf '%s' "${XB_STUB_STDOUT:-}"
+    # XB_STUB_REMOVE_STDOUT overrides the plan for xbps-remove only, so a test
+    # can give the primary transaction and the implicit orphan transaction
+    # different plans. When it is unset, the shared fixture applies.
+    out="${XB_STUB_STDOUT:-}"
+    case " $* " in
+      *" -o "*)
+        if [ "${XB_STUB_REMOVE_STDOUT+x}" = x ]; then
+          out="$XB_STUB_REMOVE_STDOUT"
+        fi
+        ;;
+    esac
+    printf '%s' "$out"
     printf '%s' "${XB_STUB_STDERR:-}" >&2
     exit "${XB_STUB_PLAN_EXIT:-0}"
     ;;
 esac
 printf '%s' "${XB_STUB_RUN_STDOUT:-${XB_STUB_STDOUT:-}}"
 printf '%s' "${XB_STUB_RUN_STDERR:-${XB_STUB_STDERR:-}}" >&2
-exit "${XB_STUB_EXIT:-0}"
+exit "${XB_STUB_REMOVE_EXIT:-${XB_STUB_EXIT:-0}}"

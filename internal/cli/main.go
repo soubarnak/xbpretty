@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -75,6 +76,11 @@ type state struct {
 	simple      bool
 	full        bool
 	historyDir  string
+
+	// promptScanner is the one reader over stdin. A transaction can ask twice
+	// (primary then implicit orphan), so a single scanner keeps the answers
+	// the first read may have buffered.
+	promptScanner *bufio.Scanner
 }
 
 // Main runs xbpretty with the process arguments and returns its exit code.
@@ -232,8 +238,7 @@ func (st *state) dispatch(opts *options) int {
 		// TODO(#72): the download command's archive fetch belongs to #72.
 		return st.runUnimplemented(opts.command, opts)
 	case "clean":
-		// TODO(#64): cache and repodata cleaning belongs to #64.
-		return st.runUnimplemented(opts.command, opts)
+		return st.runClean(opts)
 	case "policy", "history", "undo", "redo":
 		return st.runUnimplemented(opts.command, opts)
 	}
