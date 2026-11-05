@@ -396,7 +396,7 @@ func (st *state) runUpdate(opts *options) int {
 	if code := st.syncStep(); code >= 0 {
 		return code
 	}
-	rows, code := st.planTransaction("upgrade", opts, nil)
+	rows, code := st.planUpdate()
 	if code >= 0 {
 		return code
 	}
@@ -417,6 +417,13 @@ func (st *state) runUpdate(opts *options) int {
 		st.writeLog("update", nil, nil)
 	}
 	return exitOK
+}
+
+// planUpdate runs FR-012's count-only dry run. Its argv is exactly
+// `xbps-install -n -u`: update takes no positionals and, unlike a transaction,
+// has no `--` passthrough to append.
+func (st *state) planUpdate() ([]xbps.Row, int) {
+	return st.planTransaction("upgrade", &options{}, nil)
 }
 
 // commandBinariesForUpdate keeps update's binary rule in the command table
