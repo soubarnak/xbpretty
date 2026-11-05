@@ -48,9 +48,12 @@ for arch in $archs; do
 	install -Dm644 "$here/man/xbpretty.conf.5" "$root/usr/share/man/man5/xbpretty.conf.5"
 	# One man8 alias link per installed name; the page itself is the shared
 	# generated xbpretty.8 (FR-076, AC-059).
-	for alias in xbp xbp-install xbp-remove xbp-upgrade xbp-autoremove xbp-update; do
-		ln -s xbpretty.8 "$root/usr/share/man/man8/$alias.8"
-	done
+	ln -s xbpretty.8 "$root/usr/share/man/man8/xbp.8"
+	ln -s xbpretty.8 "$root/usr/share/man/man8/xbp-install.8"
+	ln -s xbpretty.8 "$root/usr/share/man/man8/xbp-remove.8"
+	ln -s xbpretty.8 "$root/usr/share/man/man8/xbp-upgrade.8"
+	ln -s xbpretty.8 "$root/usr/share/man/man8/xbp-autoremove.8"
+	ln -s xbpretty.8 "$root/usr/share/man/man8/xbp-update.8"
 	install -Dm644 "$here/docs/config.toml.example" "$root/usr/share/doc/xbpretty/config.toml.example"
 	install -Dm644 "$here/docs/migration-rev6.md" "$root/usr/share/doc/xbpretty/migration-rev6.md"
 	install -Dm644 "$here/LICENSE" "$root/usr/share/licenses/xbpretty/LICENSE"
