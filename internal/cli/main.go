@@ -46,11 +46,12 @@ type runner struct {
 	lastStdout string
 	quiet      bool
 
-	stdout io.Writer
-	stderr io.Writer
-	stdin  io.Reader
-	parser *StreamParser
-	widget *ProgressWidget
+	stdout       io.Writer
+	stderr       io.Writer
+	stdin        io.Reader
+	parser       *StreamParser
+	live         bool
+	liveProgress *liveProgress
 
 	// verboseMu serialises the verbose line written by the discovery worker
 	// pool, where several xbps-query children run at once.

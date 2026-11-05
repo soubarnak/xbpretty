@@ -12,6 +12,25 @@ import (
 	"github.com/soubarnak/xbpretty/internal/xbps"
 )
 
+// liveMode applies FR-064/FR-065's suppression matrix. The widget needs both
+// streams on a terminal; the plain line needs only stderr. Plain mode, -v,
+// TERM=dumb and a redirected stderr all turn live output off entirely.
+func (st *state) liveMode() liveMode {
+	if !st.progressBar || st.r == nil || st.r.verbose {
+		return liveOff
+	}
+	if strings.EqualFold(os.Getenv("TERM"), "dumb") {
+		return liveOff
+	}
+	if !isTTY(st.stderr) {
+		return liveOff
+	}
+	if !isTTY(st.stdout) {
+		return livePlainMode
+	}
+	return liveWidgetMode
+}
+
 // execute streams one xbps command live (FR-014) and handles its outcome. It
 // applies no post-success side effects: the driver's commit step
 // (executePhases/completeTransaction) runs them once the whole command, which
@@ -32,21 +51,38 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 		st.downloadSink.Seed(st.r.parser)
 	}
 
-	isInteractive := isTTY(st.stdout) && isTTY(st.stderr)
-	useWidget := st.progressBar && !st.r.verbose && isInteractive
-	var widget *ProgressWidget
-	if useWidget {
-		termWidth := terminalWidth(st.stderr)
-		widget = NewProgressWidget(st.stderr, st.boxStyle, st.color, termWidth, len(rows), totalDl)
-		widget.AttachToParser(st.r.parser)
-		widget.Start()
-		st.r.widget = widget
+	// FR-064: the widget or FR-065's plain line draws from the same telemetry
+	// the parser already reads. No live view means the child output is
+	// forwarded verbatim instead.
+	var live *liveProgress
+	if mode := st.liveMode(); mode != liveOff {
+		model := newProgressModel(cmd, rows, nil)
+		live = newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode, model, st.theme)
+		st.r.live = true
+		st.r.liveProgress = live
+		defer live.Finish()
+		parser := st.r.parser
+		parser.OnDownloadTick = func(tick DownloadTick) {
+			live.Apply(false, func(m *progressModel) { m.downloadTick(tick) })
+		}
+		parser.OnDownloadComplete = func(done DownloadComplete) {
+			// A completion is also a cache hit and forces a redraw.
+			live.Apply(true, func(m *progressModel) { m.downloadDone(done) })
+		}
+		parser.OnPhaseChange = func(phase string) {
+			live.Apply(true, func(m *progressModel) { m.phase(phase) })
+		}
+		parser.OnPackageEvent = func(event PackageEvent) {
+			live.Apply(true, func(m *progressModel) { m.packageEvent(event) })
+		}
+		live.Request(true)
 	}
 
 	code, err := st.r.stream(bin, args...)
-	if widget != nil {
-		widget.Finish(code, st.r.lastStderr, rows, cmd)
-		st.r.widget = nil
+	if live != nil {
+		live.Finish()
+		st.r.live = false
+		st.r.liveProgress = nil
 	}
 	if err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
@@ -57,17 +93,16 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 		return exitOK
 	}
 
-	// On failure:
-	// If widget was active, raw output was suppressed during run; print it now (FR-017).
-	if widget != nil {
+	// On failure the live surface clears, then the captured child output is
+	// printed on stderr before the one matching hint (FR-064, FR-066).
+	if live != nil {
 		if st.r.lastStdout != "" {
-			fmt.Fprint(st.stdout, st.r.lastStdout)
+			fmt.Fprint(st.stderr, st.r.lastStdout)
 		}
-		if stderr != "" {
-			fmt.Fprint(st.stderr, stderr)
+		if st.r.lastStderr != "" {
+			fmt.Fprint(st.stderr, st.r.lastStderr)
 		}
 	}
-	// FR-017: the raw xbps output stays, then one matching hint if any.
 	if h := hints.Lookup(code, hints.Output{Stdout: st.r.lastStdout, Stderr: stderr}); h != nil {
 		fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
 	}

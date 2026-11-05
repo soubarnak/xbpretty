@@ -75,7 +75,10 @@ func (r *runner) isInteractive() bool {
 	if r.verbose {
 		return false
 	}
-	return isTTY(r.stdoutWriter())
+	// A live view needs the child on a PTY even when stdout is redirected:
+	// xbps then writes its download telemetry to stderr in the shape the
+	// parser expects instead of block-buffering it on a pipe.
+	return isTTY(r.stdoutWriter()) || r.live
 }
 
 // stream runs a command with its output streamed live, and forwards
@@ -135,10 +138,10 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 			if f, ok := r.stdinReader().(*os.File); ok {
 				_ = inheritPtySize(f, master)
 			}
-			if r.widget != nil {
+			if r.liveProgress != nil {
 				if f, ok := r.stderrWriter().(*os.File); ok {
 					if tw := terminalWidth(f); tw > 0 {
-						r.widget.SetWidth(tw)
+						r.liveProgress.SetWidth(tw)
 					}
 				}
 			}
@@ -159,6 +162,13 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 		}
 	}()
 
+	// stdout and stderr are forwarded by two goroutines; with no live view
+	// both display through one serialized writer so a non-*os.File sink never
+	// sees concurrent writes.
+	var display *serializedWriter
+	if !r.live {
+		display = &serializedWriter{w: r.stderrWriter()}
+	}
 	var rawStdout bytes.Buffer
 	stdoutDone := make(chan struct{})
 	go func() {
@@ -171,10 +181,10 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 			if r.parser != nil {
 				r.parser.FeedStdout(line)
 			}
-			if r.widget == nil {
-				if out := r.stdoutWriter(); out != nil {
-					fmt.Fprintln(out, line)
-				}
+			// FR-066: child stdout is never copied to xbpretty's stdout.
+			// With no live view it is forwarded verbatim on stderr.
+			if !r.live {
+				fmt.Fprintln(display, line)
 			}
 		}
 	}()
@@ -184,11 +194,9 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 	go func() {
 		defer close(stderrDone)
 		pr, pw := io.Pipe()
-		var mw io.Writer
-		if r.widget == nil {
-			mw = io.MultiWriter(&rawStderr, r.stderrWriter(), pw)
-		} else {
-			mw = io.MultiWriter(&rawStderr, pw)
+		mw := io.MultiWriter(&rawStderr, pw)
+		if !r.live {
+			mw = io.MultiWriter(&rawStderr, display, pw)
 		}
 		parserDone := make(chan struct{})
 		go func() {
@@ -221,9 +229,20 @@ func (r *runner) streamDirect(name string, args ...string) (int, error) {
 	cmd := exec.Command(name, args...)
 	cmd.Env = r.env()
 	cmd.Stdin = r.stdinReader()
-	cmd.Stdout = r.stdoutWriter()
 
-	tee := &teeWriter{w: r.stderrWriter()}
+	// FR-065: with no live view the child output is forwarded verbatim on
+	// stderr. A live plain line consumes it instead and keeps it for the
+	// failure path.
+	var rawStdout bytes.Buffer
+	var tee *teeWriter
+	if r.live {
+		cmd.Stdout = &rawStdout
+		tee = &teeWriter{w: io.Discard}
+	} else {
+		display := &serializedWriter{w: r.stderrWriter()}
+		cmd.Stdout = display
+		tee = &teeWriter{w: display}
+	}
 	cmd.Stderr = tee
 	if err := cmd.Start(); err != nil {
 		return 1, fmt.Errorf("starting %s: %w", name, err)
@@ -244,6 +263,7 @@ func (r *runner) streamDirect(name string, args ...string) (int, error) {
 	}()
 
 	err := cmd.Wait()
+	r.lastStdout = rawStdout.String()
 	r.lastStderr = tee.String()
 	return waitCode(cmd, err, name)
 }
