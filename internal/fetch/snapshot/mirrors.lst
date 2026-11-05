@@ -1,0 +1,33 @@
+EU	https://repo-fi.voidlinux.org/	Helsinki, Finland	1
+EU	https://repo-de.voidlinux.org/	Frankfurt, Germany	1
+World	https://repo-fastly.voidlinux.org/	Fastly Global CDN	1
+NA	https://mirrors.summithq.com/voidlinux/	Chicago, USA	1
+World	https://mirrors.cicku.me/voidlinux	Cloudflare Global CDN	2
+AS	https://mirror.nju.edu.cn/voidlinux/	China	2
+AS	https://mirrors.bfsu.edu.cn/voidlinux/	Beijing, China	2
+AS	https://mirrors.tuna.tsinghua.edu.cn/voidlinux/	Beijing, China	2
+AS	https://mirror.mmdbalkhi.ir/void/	Tehran, Iran	2
+AS	https://mirrors.kubarcloud.net/voidlinux/	Tehran, Iran	2
+AS	https://repo.jing.rocks/voidlinux/	Tokyo, Japan	2
+AS	https://mirror.freedif.org/voidlinux/	Singapore	2
+AS	https://mirror.heigou.pe.kr/voidlinux/	South Korea	2
+AS	https://mirror.meowsmp.net/voidlinux/	Hanoi, Vietnam	2
+EU	https://voidlinux.mirror-services.net/voidlinux/	Belgium	2
+EU	http://ftp.dk.xemacs.org/voidlinux/	Denmark	2
+EU	https://mirrors.dotsrc.org/voidlinux/	Denmark	2
+EU	https://void.mirror.lynnfra.net/	Nuremberg, Germany	2
+EU	https://ftp.cc.uoc.gr/mirrors/linux/voidlinux/	Greece	2
+EU	https://voidlinux.mirror.garr.it/	Italy	2
+EU	https://void.sakamoto.pl/	Warsaw, Poland	2
+EU	http://ftp.debian.ru/mirrors/voidlinux/	Russia	2
+EU	https://mirror.yandex.ru/mirrors/voidlinux/	Russia	2
+EU	https://ftp.lysator.liu.se/pub/voidlinux/	Sweden	2
+EU	https://mirror.accum.se/mirror/voidlinux/	Sweden	2
+EU	https://mirror.puzzle.ch/voidlinux/	Bern, Switzerland	2
+NA	https://mirror.vofr.net/voidlinux/	Virginia, USA	2
+NA	https://mirrors.lug.mtu.edu/voidlinux/	Michigan, USA	2
+NA	https://void.tuxmirrors.xyz/	Montreal, Canada	2
+OC	https://mirror.aarnet.edu.au/pub/voidlinux/	Canberra, Australia	2
+SA	https://void.voidbr.org/voidlinux/	Mirante do Paranapanema/SP, Brazil	2
+SA	https://void.voidlinux.com.br/voidlinux/	Cacoal, Brazil	2
+SA	https://mirror.linux.ec/voidlinux/	Quito, Ecuador	2

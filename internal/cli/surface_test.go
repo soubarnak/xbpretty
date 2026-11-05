@@ -227,10 +227,17 @@ func TestSurfaceGlobalFlagsBeforeAndAfterCommandAndConflicts(t *testing.T) {
 			t.Errorf("%v = %d, %q; want the exact missing-country usage error", args, code, errs)
 		}
 	}
-	// On fetch, -c is accepted and the command reaches its stub instead of 2.
-	code, _, errs := surfaceRun(t, bin, env, "fetch", "-c", "IN")
+	// On fetch, -c is accepted and the command reaches its handler instead of
+	// 2. The tagged binary and an empty xbps.d keep the built-binary test off
+	// the network: discovery fails before the mirror list is requested.
+	code, _, errs := surfaceRun(t, taggedBinary(t), mergeEnv(env, map[string]string{
+		"XBPRETTY_TEST_FETCH_XBPSD": t.TempDir(),
+	}), "fetch", "-c", "IN")
 	if code == 2 || strings.Contains(errs, "unknown flag") {
 		t.Errorf("fetch -c IN was rejected: %d\n%s", code, errs)
+	}
+	if !strings.Contains(errs, "no xbps repository configuration found under /usr/share/xbps.d") {
+		t.Errorf("fetch -c IN did not reach discovery: %d\n%s", code, errs)
 	}
 	// A flag on the wrong command is a usage error.
 	for _, args := range [][]string{{"list", "--fix-broken"}, {"list", "-y"}, {"install", "figlet", "--limit", "2"}, {"fetch", "-n"}, {"fetch", "--simple"}, {"fetch", "--update"}} {
@@ -508,12 +515,13 @@ func TestSurfaceFlagScopingFixes(t *testing.T) {
 }
 
 func TestSurfaceFetchCountryAndConfigInEveryOrder(t *testing.T) {
-	bin := buildBinary(t)
+	bin := taggedBinary(t)
 	cfgDir, cfgPath := integrationConfig(t, "Never")
 	env := map[string]string{
-		"XDG_CONFIG_HOME": cfgDir,
-		"XDG_STATE_HOME":  filepath.Join(filepath.Dir(cfgDir), "state"),
-		"NO_COLOR":        "1",
+		"XDG_CONFIG_HOME":           cfgDir,
+		"XDG_STATE_HOME":            filepath.Join(filepath.Dir(cfgDir), "state"),
+		"NO_COLOR":                  "1",
+		"XBPRETTY_TEST_FETCH_XBPSD": t.TempDir(),
 	}
 	args := [][]string{
 		{"fetch", "-c", "IN", "--config", cfgPath},
@@ -525,7 +533,7 @@ func TestSurfaceFetchCountryAndConfigInEveryOrder(t *testing.T) {
 		if code == 2 || strings.Contains(errs, "unknown flag") || strings.Contains(errs, "usage:") {
 			t.Errorf("%v did not parse: exit %d\n%s", argv, code, errs)
 		}
-		if !strings.Contains(errs, "xbpretty: fetch is not implemented in this build") {
+		if !strings.Contains(errs, "xbpretty: no xbps repository configuration found under /usr/share/xbps.d") {
 			t.Errorf("%v did not reach the fetch handler: exit %d\n%s", argv, code, errs)
 		}
 	}
