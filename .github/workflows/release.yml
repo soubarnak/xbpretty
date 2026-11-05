@@ -81,7 +81,7 @@ jobs:
         env:
           XBPS_PRIVKEY: ${{ secrets.XBPS_PRIVKEY }}
         run: |
-          tools/release-sign.sh "$RUNNER_TEMP/assets" "$VERSION"
+          tools/release-sign.sh "$RUNNER_TEMP/assets" "$VERSION" $ARCHES
           tools/release-gates.sh assets "$RUNNER_TEMP/assets" "$VERSION"
       - name: Publish release
         env:
