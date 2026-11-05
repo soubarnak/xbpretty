@@ -328,10 +328,41 @@ func (m *Matrix) Validate(root string) error {
 			return fmt.Errorf("parity: %s is a [P] AC but no matrix row cites it", ac)
 		}
 	}
+	if implementationMode(root) {
+		if err := m.requireTestCells(); err != nil {
+			return err
+		}
+	}
 	tests, err := declaredTests(root)
 	if err != nil {
 		return err
 	}
+	return m.checkTestCells(tests)
+}
+
+// implementationMode reports whether the packaged spec exists. ADR-0020: the
+// spec phase may leave `test` cells at the em dash; once internal/spec exists,
+// the release half of the contract is live and every cell must resolve.
+func implementationMode(root string) bool {
+	_, err := os.Stat(filepath.Join(root, "internal", "spec"))
+	return err == nil
+}
+
+// requireTestCells is the release-phase rule: no row may keep the spec-phase
+// placeholder. A `release:` gate is the only accepted non-test value.
+func (m *Matrix) requireTestCells() error {
+	for _, r := range m.Matrix {
+		if strings.TrimSpace(r.Test) == "—" || strings.TrimSpace(r.Test) == "" {
+			return fmt.Errorf("parity: %s has no test cell; implementation mode requires a TestParity_ name or a release: gate", r.ID)
+		}
+	}
+	return nil
+}
+
+// checkTestCells resolves every cited Test* name against the module's declared
+// tests. This is AC-063's renamed/deleted clause and its exact message is
+// asserted by TestCitedTestMustExist.
+func (m *Matrix) checkTestCells(tests map[string]bool) error {
 	for _, r := range m.Matrix {
 		for _, tok := range strings.Split(r.Test, ",") {
 			tok = strings.TrimSpace(tok)
