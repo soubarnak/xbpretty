@@ -107,15 +107,16 @@ func TestAC016Clean(t *testing.T) {
 		}
 	})
 
-	t.Run("clean --fetch is the named #74 seam", func(t *testing.T) {
+	t.Run("clean --fetch without a manifest errors", func(t *testing.T) {
 		bin, env := implicitEnv(t)
+		env["XBPRETTY_TEST_FETCH_MANIFEST"] = filepath.Join(t.TempDir(), "fetch.json")
 		clearLog(t, implicitLog(env))
 		code, _, errs := surfaceRun(t, bin, env, "clean", "--fetch")
 		if code != 1 {
-			t.Errorf("exit = %d, want 1 (the #74 seam)", code)
+			t.Errorf("exit = %d, want 1", code)
 		}
-		if !strings.Contains(errs, "clean --fetch is not implemented in this build") {
-			t.Errorf("the #74 seam did not announce itself:\n%s", errs)
+		if !strings.Contains(errs, "xbpretty: no repository configuration written by xbp fetch") {
+			t.Errorf("stderr = %q", errs)
 		}
 		if calls := stubCalls(t, implicitLog(env)); len(calls) != 0 {
 			t.Errorf("clean --fetch ran a child: %q", calls)
@@ -123,26 +124,32 @@ func TestAC016Clean(t *testing.T) {
 	})
 
 	t.Run("clean is root-only", func(t *testing.T) {
-		for _, args := range [][]string{
-			{"clean"},
-			{"clean", "--fetch"}, // the #74 seam is root-gated too
-			{"clean", "--lists"},
-		} {
+		cases := []struct {
+			args []string
+			hint string
+		}{
+			{[]string{"clean"}, "hint: rerun as root: "},
+			// FR-048 names the fetch revert instead of the generic clean hint.
+			{[]string{"clean", "--fetch"}, "hint: run with sudo to restore the repository configuration"},
+			{[]string{"clean", "--lists"}, "hint: rerun as root: "},
+		}
+		for _, tt := range cases {
 			bin, env := implicitEnv(t)
 			env["XBPRETTY_TEST_EUID"] = "1000"
+			env["XBPRETTY_TEST_FETCH_MANIFEST"] = filepath.Join(t.TempDir(), "fetch.json")
 			clearLog(t, implicitLog(env))
-			code, _, errs := surfaceRun(t, bin, env, args...)
+			code, _, errs := surfaceRun(t, bin, env, tt.args...)
 			if code != 1 {
-				t.Errorf("%v exit = %d, want 1", args, code)
+				t.Errorf("%v exit = %d, want 1", tt.args, code)
 			}
-			if !strings.Contains(errs, "hint: rerun as root: ") {
-				t.Errorf("%v missing the elevation hint:\n%s", args, errs)
+			if !strings.Contains(errs, tt.hint) {
+				t.Errorf("%v missing %q:\n%s", tt.args, tt.hint, errs)
 			}
-			if strings.Contains(errs, "not implemented") {
-				t.Errorf("%v reached the #74 seam before the root check:\n%s", args, errs)
+			if strings.Contains(errs, "no repository configuration") {
+				t.Errorf("%v read the manifest before the root check:\n%s", tt.args, errs)
 			}
 			if calls := stubCalls(t, implicitLog(env)); len(calls) != 0 {
-				t.Errorf("%v ran a child as non-root: %q", args, calls)
+				t.Errorf("%v ran a child as non-root: %q", tt.args, calls)
 			}
 		}
 	})

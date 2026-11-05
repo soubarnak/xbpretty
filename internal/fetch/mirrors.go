@@ -1,7 +1,7 @@
-// Package fetch implements the read-only half of `xbp fetch`: the Void mirror
-// list, repository discovery, the 256 KiB repodata probe, ranking and the
-// ranking table. Writing /etc/xbps.d is #74's half and lives behind the CLI's
-// write seam.
+// Package fetch implements `xbp fetch`: the Void mirror list, repository
+// discovery, the 256 KiB repodata probe, ranking and the ranking table, plus
+// the same-basename /etc/xbps.d writes, the backup and the schema-1 manifest
+// that revert through clean --fetch.
 package fetch
 
 import (

@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -144,6 +146,8 @@ func (f *fetchFixture) counts() (list, probes, heads int, ranges, headPaths []st
 func newFetchEnv(t *testing.T, fixture *fetchFixture) (*env, string) {
 	t.Helper()
 	e := newEnv(t)
+	e.set("XB_STUB_RUN_STDOUT", "")
+	e.set("XB_STUB_RUN_STDERR", "")
 	xbpsd := filepath.Join(e.dir, "xbps.d")
 	if err := os.MkdirAll(xbpsd, 0o755); err != nil {
 		t.Fatal(err)
@@ -153,18 +157,20 @@ func newFetchEnv(t *testing.T, fixture *fetchFixture) (*env, string) {
 		t.Fatal(err)
 	}
 
-	origURL, origDirs, origArch, origClient, origPick, origEvents, origPrevious :=
-		fetchMirrorListURL, fetchXBPSDDirs, fetchArch, fetchHTTPClient, pickMirror, mirrorScoreEvents, fetchPreviousHosts
+	origURL, origDirs, origArch, origClient, origPick, origEvents, origPrevious, origWriteDir, origManifest :=
+		fetchMirrorListURL, fetchXBPSDDirs, fetchArch, fetchHTTPClient, pickMirror, mirrorScoreEvents, fetchPreviousHosts, fetchWriteDir, fetchManifestPath
 	fetchMirrorListURL = fixture.srv.URL + "/mirrors.lst"
 	fetchXBPSDDirs = []string{xbpsd}
+	fetchWriteDir = xbpsd
+	fetchManifestPath = filepath.Join(e.dir, "fetch.json")
 	fetchArch = "x86_64"
 	fetchHTTPClient = fixture.srv.Client
 	pickMirror = nil
 	mirrorScoreEvents = func(fetch.ProgressEvent) {}
 	fetchPreviousHosts = func() []string { return nil }
 	t.Cleanup(func() {
-		fetchMirrorListURL, fetchXBPSDDirs, fetchArch, fetchHTTPClient, pickMirror, mirrorScoreEvents, fetchPreviousHosts =
-			origURL, origDirs, origArch, origClient, origPick, origEvents, origPrevious
+		fetchMirrorListURL, fetchXBPSDDirs, fetchArch, fetchHTTPClient, pickMirror, mirrorScoreEvents, fetchPreviousHosts, fetchWriteDir, fetchManifestPath =
+			origURL, origDirs, origArch, origClient, origPick, origEvents, origPrevious, origWriteDir, origManifest
 	})
 	return e, xbpsd
 }
@@ -334,24 +340,227 @@ func TestFetchDryRunAsRootWritesNothing(t *testing.T) {
 	}
 }
 
-func TestFetchRootReachesWriteSeamOnly(t *testing.T) {
+// writeFetchConf sets the one managed configuration file the write path
+// masks. It returns the original bytes.
+func writeFetchConf(t *testing.T, dir string) []byte {
+	t.Helper()
+	if err := os.Remove(filepath.Join(dir, "00-repository-main.conf")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	original := []byte("# system comment\n" +
+		"architecture=x86_64\n" +
+		"repository=https://repo-default.voidlinux.org/current\n" +
+		"ignorepkg=foo bar\n" +
+		"bestmatching=true\n" +
+		"repository=https://example.com/custom\n" +
+		"repository=/var/cache/local\n")
+	if err := os.WriteFile(filepath.Join(dir, "10-repository-main.conf"), original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return original
+}
+
+func fetchSHA256Of(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func TestFetchWritesMaskingFileBackupManifestAndSyncs(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "Helsinki, Finland", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	original := writeFetchConf(t, xbpsd)
+	target := filepath.Join(xbpsd, "10-repository-main.conf")
+
+	code, out, errs := e.run("xbpretty", "fetch")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, out, errs)
+	}
+	if errs != "" {
+		t.Errorf("successful fetch wrote stderr:\n%s", errs)
+	}
+	written, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, body, ok := strings.Cut(string(written), "\n")
+	if !ok {
+		t.Fatalf("written file has no header line:\n%s", written)
+	}
+	const prefix = "# Written by xbpretty fetch on "
+	const suffix = "; revert with 'xbp clean --fetch'."
+	if !strings.HasPrefix(header, prefix) || !strings.HasSuffix(header, suffix) {
+		t.Errorf("header = %q, want %q...%q", header, prefix, suffix)
+	}
+	stamp := strings.TrimSuffix(strings.TrimPrefix(header, prefix), suffix)
+	if _, err := time.Parse(time.RFC3339, stamp); err != nil {
+		t.Errorf("header timestamp %q is not RFC3339: %v", stamp, err)
+	}
+	wantBody := "# system comment\n" +
+		"architecture=x86_64\n" +
+		"repository=" + fixture.srv.URL + "/one/current\n" +
+		"ignorepkg=foo bar\n" +
+		"bestmatching=true\n" +
+		"repository=https://example.com/custom\n" +
+		"repository=/var/cache/local\n"
+	if body != wantBody {
+		t.Errorf("written body:\n%s\nwant:\n%s", body, wantBody)
+	}
+
+	backup := target + fetch.BackupSuffix
+	backupContent, err := os.ReadFile(backup)
+	if err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	if string(backupContent) != string(original) {
+		t.Errorf("backup = %q, want the original bytes", backupContent)
+	}
+	for _, path := range []string{target, backup} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o644 {
+			t.Errorf("%s mode = %o, want 0644", path, info.Mode().Perm())
+		}
+	}
+
+	manifest, err := fetch.ReadManifest(fetchManifestPath)
+	if err != nil {
+		t.Fatalf("manifest: %v", err)
+	}
+	if manifest.SchemaVersion != 1 || manifest.Mirror != fixture.srv.URL+"/one" ||
+		manifest.Arch != "x86_64" || manifest.WrittenAt == "" {
+		t.Errorf("manifest header = %+v", manifest)
+	}
+	if len(manifest.Files) != 1 {
+		t.Fatalf("manifest files = %+v, want one", manifest.Files)
+	}
+	entry := manifest.Files[0]
+	if entry.Path != target || entry.Backup != backup || entry.Created || entry.SHA256 != fetchSHA256Of(written) {
+		t.Errorf("manifest entry = %+v", entry)
+	}
+
+	cmds := e.commands()
+	if len(cmds) != 1 || cmds[0] != "-S" {
+		t.Errorf("children = %q, want exactly xbps-install -S", cmds)
+	}
+	if !strings.Contains(out, "Sources have been written to "+target) {
+		t.Errorf("stdout does not name the written file:\n%s", out)
+	}
+}
+
+func TestFetchSyncErrorOnWrittenRepositoryRestoresPreviousConfiguration(t *testing.T) {
 	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
 	e, xbpsd := newFetchEnv(t, fixture)
 	e.root = true
+	original := writeFetchConf(t, xbpsd)
+	target := filepath.Join(xbpsd, "10-repository-main.conf")
+	e.set("XB_STUB_RUN_STDERR", fmt.Sprintf(
+		"ERROR: [reposync] failed to fetch file '%s/one/current/x86_64-repodata': Not Found\n", fixture.srv.URL))
 
-	code, out, errs := e.run("xbpretty", "fetch")
+	code, _, errs := e.run("xbpretty", "fetch")
 	if code != 1 {
-		t.Fatalf("exit = %d, want 1\n%s\n%s", code, out, errs)
+		t.Fatalf("exit = %d, want 1\n%s", code, errs)
 	}
-	if !strings.Contains(errs, "writing the repository configuration is not implemented in this build") {
-		t.Errorf("stderr does not name the #74 write seam:\n%s", errs)
+	restored, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(out, "Mirror") {
-		t.Errorf("table was not printed before the write seam:\n%s", out)
+	if string(restored) != string(original) {
+		t.Errorf("target was not restored:\n%s", restored)
 	}
-	assertNoFiles(t, xbpsd)
-	if cmds := e.commands(); len(cmds) != 0 {
-		t.Errorf("#73 started a child: %v", cmds)
+	if _, err := os.Stat(fetchManifestPath); !os.IsNotExist(err) {
+		t.Errorf("manifest survived a full revert: %v", err)
+	}
+	for _, want := range []string{
+		"ERROR: [reposync] failed to fetch file",
+		"xbpretty: repository sync failed; previous configuration restored",
+	} {
+		if !strings.Contains(errs, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, errs)
+		}
+	}
+}
+
+func TestFetchSyncForeignErrorIsForwardedWithoutRevert(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	writeFetchConf(t, xbpsd)
+	e.set("XB_STUB_RUN_STDERR", "ERROR: [reposync] failed to fetch file 'https://example.com/custom/x86_64-repodata': Not Found\n")
+
+	code, _, errs := e.run("xbpretty", "fetch")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 for a foreign repository error\n%s", code, errs)
+	}
+	written, err := os.ReadFile(filepath.Join(xbpsd, "10-repository-main.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(written), fixture.srv.URL+"/one/current") {
+		t.Errorf("the new configuration was reverted:\n%s", written)
+	}
+	if _, err := os.Stat(fetchManifestPath); err != nil {
+		t.Errorf("manifest missing after a successful sync: %v", err)
+	}
+	for _, want := range []string{
+		"ERROR: [reposync] failed to fetch file 'https://example.com/custom/x86_64-repodata'",
+		"xbpretty: repository sync reported errors; review the output above",
+	} {
+		if !strings.Contains(errs, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, errs)
+		}
+	}
+	if strings.Contains(errs, "previous configuration restored") {
+		t.Errorf("a foreign error reverted the configuration:\n%s", errs)
+	}
+}
+
+func TestFetchNonZeroSyncExitRevertsAndPassesTheChildCode(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	original := writeFetchConf(t, xbpsd)
+	e.set("XB_STUB_EXIT", "42")
+
+	code, _, errs := e.run("xbpretty", "fetch")
+	if code != 42 {
+		t.Fatalf("exit = %d, want 42 (xbps-install's code)\n%s", code, errs)
+	}
+	restored, err := os.ReadFile(filepath.Join(xbpsd, "10-repository-main.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restored) != string(original) {
+		t.Errorf("target was not restored on a non-zero sync exit:\n%s", restored)
+	}
+	if !strings.Contains(errs, "xbpretty: repository sync failed; previous configuration restored") {
+		t.Errorf("stderr lacks the restore line:\n%s", errs)
+	}
+}
+
+func TestFetchSyncKeepsStdinAvailableForTheKeyPrompt(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	writeFetchConf(t, xbpsd)
+
+	// The sync child is the only reader. If xbpretty consumed stdin first, the
+	// stub would see EOF instead of the answer.
+	script := filepath.Join(t.TempDir(), "xbps-install-sync")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nread line\nprintf 'READ:%s\\n' \"$line\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.writeConfig(script)
+	e.setAnswers("key-import-answer\n")
+
+	code, _, errs := e.run("xbpretty", "fetch")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if !strings.Contains(errs, "READ:key-import-answer") {
+		t.Errorf("the sync child did not receive stdin; xbpretty consumed it:\n%s", errs)
 	}
 }
 
@@ -655,10 +864,11 @@ func TestFetchPickerSeamGatesAndValidatesOnce(t *testing.T) {
 		return 0, true
 	}
 
-	// Root + TTY + no --auto + no --dry-run runs the picker seam exactly once.
+	// Root + TTY + no --auto + no --dry-run runs the picker seam exactly once
+	// and writes its single choice.
 	code, out, errs := e.run("xbpretty", "fetch")
-	if code != 1 { // #74's write seam still refuses
-		t.Fatalf("exit = %d, want 1\n%s\n%s", code, out, errs)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s\n%s", code, out, errs)
 	}
 	if calls != 1 {
 		t.Errorf("picker calls = %d, want 1", calls)
@@ -890,5 +1100,35 @@ func TestFetchMalformedMirrorRowsOnlyUnderVerbose(t *testing.T) {
 	}
 	if !strings.Contains(errs, "verbose: mirror list: line 2") {
 		t.Errorf("malformed row was not reported under -v:\n%s", errs)
+	}
+}
+
+func TestFetchNonFreeWritesTheDerivedRepositoryFile(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	writeFetchConf(t, xbpsd)
+
+	code, out, errs := e.run("xbpretty", "fetch", "--non-free")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	derived := filepath.Join(xbpsd, "10-repository-nonfree.conf")
+	content, err := os.ReadFile(derived)
+	if err != nil {
+		t.Fatalf("derived non-free file: %v", err)
+	}
+	if !strings.Contains(string(content), "repository="+fixture.srv.URL+"/one/current/nonfree\n") {
+		t.Errorf("derived content = %q", content)
+	}
+	manifest, err := fetch.ReadManifest(fetchManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Files) != 2 {
+		t.Errorf("manifest files = %d, want the managed file plus the derived one", len(manifest.Files))
+	}
+	if strings.Count(out, "Sources have been written to ") != 2 {
+		t.Errorf("stdout should name two written files:\n%s", out)
 	}
 }
