@@ -25,6 +25,7 @@ type options struct {
 	limit       int  // --limit N for `log`; 0 means not given
 	boxStyle    string
 	progressBar *bool
+	configPath  string // --config FILE; empty means the default user layer
 	explicit    map[string]bool
 }
 
@@ -73,6 +74,22 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 				}
 				o.color = value
 				o.explicit["color"] = true
+			case "config":
+				if !hasValue {
+					if i+1 >= len(argv) {
+						return nil, fmt.Errorf("--config needs a file")
+					}
+					i++
+					value = argv[i]
+				}
+				if value == "" {
+					return nil, fmt.Errorf("--config needs a file")
+				}
+				if value == "-" || value == "/dev/stdin" {
+					return nil, fmt.Errorf("--config %s is not supported; use a regular file", value)
+				}
+				o.configPath = value
+				o.explicit["config"] = true
 			case "limit":
 				if !hasValue {
 					if i+1 >= len(argv) {
@@ -242,6 +259,7 @@ Flags:
       --no-log      do not append to the transaction log
       --limit N     with log: keep only the last N matching lines
       --color=WHEN  colour the summary: auto, always or never
+      --config FILE read FILE instead of the user config file
       --version     print version information
 
 Arguments after -- are passed to xbps unchanged, in both the dry run and the

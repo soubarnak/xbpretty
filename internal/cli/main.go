@@ -116,15 +116,17 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		usage(err)
 		return exitUsage
 	}
-	isLogCommand := opts.command == "log" && cmd == ""
-	if isLogCommand {
-		return st.runLog(opts)
-	}
 
-	cfg, loadErr := config.Load()
+	// FR-053: only help, version, completion and link bypass config. Every
+	// other command, including log, validates the selected layer.
+	cfg, loadErr := loadConfig(opts)
 	if loadErr != nil {
 		fmt.Fprintf(err, "xbpretty: %v\n", loadErr)
 		return exitUsage
+	}
+	isLogCommand := opts.command == "log" && cmd == ""
+	if isLogCommand {
+		return st.runLog(opts)
 	}
 	verbose := opts.verbose
 	st.opts = opts
@@ -167,6 +169,15 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		return exitRuntime
 	}
 	return st.runTransaction(cmd, opts)
+}
+
+// loadConfig resolves the configuration layer for this run. --config replaces
+// the default user layer; system layers and trust are ticket #60.
+func loadConfig(opts *options) (config.Config, error) {
+	if opts.explicit["config"] {
+		return config.LoadFile(opts.configPath)
+	}
+	return config.Load()
 }
 
 // splitArgv takes the command out of argv[0] for the xbp-* link names.

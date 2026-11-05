@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 // NalaConfig is nala's [Nala] table: the six behaviour switches.
@@ -198,6 +199,10 @@ func DefaultTheme() Theme {
 }
 
 // resolve applies the parsed document to the defaults.
+//
+// #60 intercepts the ten rev-5 top-level keys here, before this blanket
+// unknown-key rejection: tomlDoc.top preserves them with their line numbers,
+// and parseDocument's allowBare flag carries rev-5 bare/quoted values.
 func resolve(doc *tomlDoc) (Config, error) {
 	cfg := Defaults()
 	for _, entry := range doc.top {
@@ -230,26 +235,30 @@ func applyTable(cfg *Config, table tomlTable) error {
 
 func applyNala(cfg *NalaConfig, table tomlTable) error {
 	for _, entry := range table.entries {
+		// Dispatch on the key name first: a misspelled key is an unknown-key
+		// error regardless of the value's type (FR-053).
+		var target *bool
+		switch entry.key {
+		case "auto_remove":
+			target = &cfg.AutoRemove
+		case "auto_update":
+			target = &cfg.AutoUpdate
+		case "update_show_packages":
+			target = &cfg.UpdateShowPackages
+		case "full_upgrade":
+			target = &cfg.FullUpgrade
+		case "simple":
+			target = &cfg.Simple
+		case "assume_yes":
+			target = &cfg.AssumeYes
+		default:
+			return unknownKey(table.name, entry)
+		}
 		value, err := boolValue(table.name, entry)
 		if err != nil {
 			return err
 		}
-		switch entry.key {
-		case "auto_remove":
-			cfg.AutoRemove = value
-		case "auto_update":
-			cfg.AutoUpdate = value
-		case "update_show_packages":
-			cfg.UpdateShowPackages = value
-		case "full_upgrade":
-			cfg.FullUpgrade = value
-		case "simple":
-			cfg.Simple = value
-		case "assume_yes":
-			cfg.AssumeYes = value
-		default:
-			return unknownKey(table.name, entry)
-		}
+		*target = value
 	}
 	return nil
 }
@@ -341,7 +350,7 @@ func validatePath(key, path string) error {
 		return fmt.Errorf("[Xbps] %s must not be empty", key)
 	}
 	for _, r := range path {
-		if r < 0x20 || r == 0x7f {
+		if unicode.IsControl(r) {
 			return fmt.Errorf("[Xbps] %s must not contain control characters", key)
 		}
 	}

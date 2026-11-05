@@ -77,6 +77,24 @@ func TestDefaultsAreTheSpecDefaults(t *testing.T) {
 	}
 }
 
+// TestCanonicalNalaConfigParsesToDefaults pins AC-067's other half: the
+// canonical nala v0.18.2 nala.conf parses unchanged and resolves to the same
+// defaults xbpretty uses.
+func TestCanonicalNalaConfigParsesToDefaults(t *testing.T) {
+	f, err := os.Open("testdata/nala-v0.18.2.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	cfg, err := Parse("nala.conf", f)
+	if err != nil {
+		t.Fatalf("Parse canonical nala.conf: %v", err)
+	}
+	if cfg != Defaults() {
+		t.Errorf("canonical nala.conf does not equal defaults:\n got %+v\nwant %+v", cfg, Defaults())
+	}
+}
+
 // TestAliasesResolveLikeCanonicalTables pins FR-051's lowercase aliases.
 func TestAliasesResolveLikeCanonicalTables(t *testing.T) {
 	canonical := `[Nala]
@@ -127,6 +145,8 @@ func TestSchemaValidationErrors(t *testing.T) {
 		{"unknown nested table", "[Color.extra]\nx = true\n", 1, "unknown table [Color.extra]"},
 		{"unknown top-level key", "assume_yes = true\n", 1, "unknown key \"assume_yes\""},
 		{"unknown Nala key", "[Nala]\nnope = true\n", 2, `unknown key "nope" in [Nala]`},
+		{"misspelled Nala key with integer", "[Nala]\nauto_remov = 1\n", 2, `unknown key "auto_remov" in [Nala]`},
+		{"misspelled Nala key with string", "[Nala]\nassume_ye = \"true\"\n", 2, `unknown key "assume_ye" in [Nala]`},
 		{"unknown Ui key", "[Ui]\ncolour = \"Auto\"\n", 2, `unknown key "colour" in [Ui]`},
 		{"unknown Color key", "[Color]\nmode = \"Auto\"\nprimary = \"Red\"\n", 3, `unknown key "primary" in [Color]`},
 		{"unknown Xbps key", "[Xbps]\ninstall = \"xbps-install\"\n", 2, `unknown key "install" in [Xbps]`},
@@ -143,6 +163,7 @@ func TestSchemaValidationErrors(t *testing.T) {
 		{"home path", "[Xbps]\nremove_path = \"~/bin/xbps-remove\"\n", 2, "[Xbps] remove_path must be a bare program name or an absolute path"},
 		{"empty path", "[Xbps]\nremove_path = \"\"\n", 2, "[Xbps] remove_path must not be empty"},
 		{"control character in path", "[Xbps]\ninstall_path = \"xbps\\u0001\"\n", 2, "[Xbps] install_path must not contain control characters"},
+		{"C1 control character in path", "[Xbps]\ninstall_path = \"xbps\\u0085\"\n", 2, "[Xbps] install_path must not contain control characters"},
 		{"bare path with arguments", "[Xbps]\ninstall_path = \"xbps-install -S\"\n", 2, "[Xbps] install_path must be a bare program name or an absolute path"},
 		{"absolute path with arguments", "[Xbps]\ninstall_path = \"/usr/bin/xbps-install -S\"\n", 2, "[Xbps] install_path must be a bare program name or an absolute path"},
 		{"role is not a table", "[Color.theme]\nPrimary = \"Red\"\n", 2, "[Color.theme] Primary must be an inline table, got string"},

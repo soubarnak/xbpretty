@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -310,11 +311,13 @@ func TestIntegrationBypassCommandsDoNotLoadConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	linkDir := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "absent.toml")
 	tests := [][]string{
 		{"--help"},
 		{"--version"},
 		{"completion", "bash"},
 		{"link", linkDir},
+		{"--config", missing, "--help"},
 	}
 	for _, argv := range tests {
 		t.Run(strings.Join(argv, " "), func(t *testing.T) {
@@ -354,5 +357,185 @@ func TestIntegrationMissingDefaultConfigIsSilent(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Install") {
 		t.Errorf("summary missing:\n%s", stdout.String())
+	}
+}
+
+// writeIntegrationConfigFile writes one config file at path.
+func writeIntegrationConfigFile(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestIntegrationConfigFlagSelectsFile pins --config: it replaces the default
+// user layer, is accepted before and after the subcommand, is last-wins and
+// changes behaviour through config.LoadFile.
+func TestIntegrationConfigFlagSelectsFile(t *testing.T) {
+	bin := buildBinary(t)
+	cfgDir, cfgPath := integrationConfig(t, "Never")
+	defaultBody, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The default layer is invalid: a successful run proves --config replaced
+	// it rather than merely supplementing it.
+	writeIntegrationConfigFile(t, cfgPath, "[Ui]\nmode = \"not-a-mode\"\n")
+	logPath := filepath.Join(filepath.Dir(cfgDir), "commands.log")
+
+	decimal := filepath.Join(t.TempDir(), "decimal.toml")
+	writeIntegrationConfigFile(t, decimal, string(defaultBody)+"\n[Ui]\nunit = \"Decimal\"\n")
+	binaryCfg := filepath.Join(t.TempDir(), "binary.toml")
+	writeIntegrationConfigFile(t, binaryCfg, string(defaultBody))
+
+	for _, tt := range []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{"before the subcommand", []string{"--config", decimal, "install", "-n", "figlet"}, "KB"},
+		{"after the subcommand", []string{"install", "--config", decimal, "-n", "figlet"}, "KB"},
+		{"last one wins", []string{"--config", decimal, "install", "-n", "figlet", "--config", binaryCfg}, "KiB"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := integrationCmd(bin, cfgDir, logPath, tt.argv...)
+			var stdout, stderr strings.Builder
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("run: %v\n%s", err, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tt.want) {
+				t.Errorf("output does not use %s:\n%s", tt.want, stdout.String())
+			}
+			if strings.Contains(stderr.String(), "config ") {
+				t.Errorf("unexpected config error:\n%s", stderr.String())
+			}
+		})
+	}
+}
+
+// TestIntegrationConfigFlagErrors pins --config's hard errors: a missing or
+// invalid file and the two stream paths FR-053 rejects.
+func TestIntegrationConfigFlagErrors(t *testing.T) {
+	bin := buildBinary(t)
+	cfgDir, _ := integrationConfig(t, "Never")
+	logPath := filepath.Join(filepath.Dir(cfgDir), "commands.log")
+
+	t.Run("missing file", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "absent.toml")
+		cmd := integrationCmd(bin, cfgDir, logPath, "--config", missing, "install", "-n", "figlet")
+		var stdout, stderr strings.Builder
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		ee, ok := err.(*exec.ExitError)
+		if !ok || ee.ExitCode() != 2 {
+			t.Fatalf("exit = %v, want 2\n%s", err, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "xbpretty: config "+missing+":") {
+			t.Errorf("missing config envelope for %q:\n%s", missing, stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("config error wrote to stdout:\n%s", stdout.String())
+		}
+	})
+
+	t.Run("invalid file", func(t *testing.T) {
+		bad := filepath.Join(t.TempDir(), "bad.toml")
+		writeIntegrationConfigFile(t, bad, "[Ui]\nmode = \"Auto\"\nunit = \"binary\"\n")
+		cmd := integrationCmd(bin, cfgDir, logPath, "install", "--config", bad, "-n", "figlet")
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		ee, ok := err.(*exec.ExitError)
+		if !ok || ee.ExitCode() != 2 {
+			t.Fatalf("exit = %v, want 2\n%s", err, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "xbpretty: config "+bad+":3:") {
+			t.Errorf("invalid config envelope missing line 3:\n%s", stderr.String())
+		}
+	})
+
+	for _, stream := range []string{"-", "/dev/stdin"} {
+		t.Run("rejects "+stream, func(t *testing.T) {
+			cmd := integrationCmd(bin, cfgDir, logPath, "--config", stream, "install", "-n", "figlet")
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			ee, ok := err.(*exec.ExitError)
+			if !ok || ee.ExitCode() != 2 {
+				t.Fatalf("exit = %v, want 2\n%s", err, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "not supported") {
+				t.Errorf("stderr does not reject %s:\n%s", stream, stderr.String())
+			}
+		})
+	}
+}
+
+// TestIntegrationLogValidatesConfig pins FR-053's bypass list: log is not on
+// it, so an invalid default layer is a hard error for log too.
+func TestIntegrationLogValidatesConfig(t *testing.T) {
+	bin := buildBinary(t)
+	cfgDir, cfgPath := integrationConfig(t, "Never")
+	writeIntegrationConfigFile(t, cfgPath, "[Ui]\nmode = \"not-a-mode\"\n")
+	logPath := filepath.Join(filepath.Dir(cfgDir), "commands.log")
+	cmd := integrationCmd(bin, cfgDir, logPath, "log")
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	ee, ok := err.(*exec.ExitError)
+	if !ok || ee.ExitCode() != 2 {
+		t.Fatalf("exit = %v, want 2\n%s", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "xbpretty: config "+cfgPath+":2:") {
+		t.Errorf("log did not report the config error:\n%s", stderr.String())
+	}
+}
+
+// TestIntegrationRejectedTOMLConstructsExitTwo pins AC-067 at the built-binary
+// seam: every rejected construct prints the exact path-and-line envelope and
+// exits 2.
+func TestIntegrationRejectedTOMLConstructsExitTwo(t *testing.T) {
+	bin := buildBinary(t)
+	tests := []struct {
+		name string
+		body string
+		line int
+	}{
+		{"floats", "[Nala]\nauto_remove = 1.5\n", 2},
+		{"dates", "[Nala]\nauto_remove = 2026-01-02\n", 2},
+		{"times", "[Nala]\nauto_remove = 07:32:00\n", 2},
+		{"multiline strings", "[Ui]\nmode = \"\"\"Auto\"\"\"\n", 2},
+		{"dotted keys", "[Ui]\nmode = \"Auto\"\nunit.value = \"Binary\"\n", 3},
+		{"arrays of tables", "[[Nala]]\n", 1},
+		{"quoted keys", "[Nala]\n\"assume_yes\" = true\n", 2},
+		{"alternate theme key", "[Color]\ntheme = { Primary = { fg = \"Reset\" } }\n", 2},
+		{"alternate theme subtable", "[Color.theme.Primary]\n", 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfgDir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(cfgDir, "xbpretty"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cfgPath := filepath.Join(cfgDir, "xbpretty", "config.toml")
+			writeIntegrationConfigFile(t, cfgPath, tt.body)
+			cmd := exec.Command(bin, "install", "-n", "figlet")
+			cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+cfgDir)
+			var stdout, stderr strings.Builder
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			ee, ok := err.(*exec.ExitError)
+			if !ok || ee.ExitCode() != 2 {
+				t.Fatalf("exit = %v, want 2\n%s", err, stderr.String())
+			}
+			prefix := "xbpretty: config " + cfgPath + ":" + strconv.Itoa(tt.line) + ": "
+			if !strings.Contains(stderr.String(), prefix) {
+				t.Errorf("stderr missing %q:\n%s", prefix, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("rejected config wrote to stdout:\n%s", stdout.String())
+			}
+		})
 	}
 }

@@ -93,6 +93,9 @@ func Parse(path string, r io.Reader) (Config, error) {
 
 // Path resolves the default user config file location, honouring
 // XDG_CONFIG_HOME and the sudo/doas calling-user lookup.
+//
+// #60 owns layered selection: the /etc layer, the absolute-XDG rule and
+// ignoring XDG when an invoking SUDO_USER/DOAS_USER is present.
 func Path() (string, error) {
 	base, err := configHome()
 	if err != nil {
@@ -181,6 +184,10 @@ var ErrNotInstalled = errors.New("xbps binary not found")
 
 // Resolve checks that every configured xbps binary exists and is executable,
 // returning a per-command error naming what is missing.
+//
+// Rev 6 requires existence to be checked only for the binaries the selected
+// command uses (FR-053); the shared command table that supplies command→binary
+// ownership belongs to #62.
 func (c Config) Resolve() error {
 	for _, path := range []string{c.Xbps.InstallPath, c.Xbps.RemovePath, c.Xbps.QueryPath} {
 		if _, err := exec.LookPath(path); err != nil {
