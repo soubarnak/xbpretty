@@ -108,13 +108,23 @@ func TestIntegrationPipedStdinNeverBlocks(t *testing.T) {
 	if strings.Contains(errs, "[Y/n]") {
 		t.Errorf("prompted on a pipe:\n%s", errs)
 	}
-	// The piped-stdin rule (FR-010 / AC-004) must fire for root and
-	// non-root alike. A non-root run only adds the stale-index warning.
-	if !strings.Contains(errs, "-y") {
-		t.Errorf("missing the -y hint:\n%s", errs)
-	}
-	if os.Geteuid() == 0 && (strings.Contains(errs, "sudo") || strings.Contains(errs, "doas")) {
-		t.Errorf("root run hit the privilege guard:\n%s", errs)
+	// FR-073 is unconditional for non-root, so a non-root piped run gets the
+	// elevation hint, not the non-TTY message. AC-012's non-TTY line is the
+	// root path.
+	if os.Geteuid() == 0 {
+		if !strings.Contains(errs, "-y") {
+			t.Errorf("missing the -y hint:\n%s", errs)
+		}
+		if strings.Contains(errs, "sudo") || strings.Contains(errs, "doas") {
+			t.Errorf("root run hit the privilege guard:\n%s", errs)
+		}
+	} else {
+		if !strings.Contains(errs, "sudo") && !strings.Contains(errs, "doas") {
+			t.Errorf("non-root run is missing the elevation hint:\n%s", errs)
+		}
+		if strings.Contains(errs, "stdin is not a terminal") {
+			t.Errorf("non-root run took the root-only non-TTY path:\n%s", errs)
+		}
 	}
 }
 
@@ -130,7 +140,7 @@ func TestIntegrationLinksDispatchLikeTheCommand(t *testing.T) {
 		t.Fatalf("xbp-remove was not created: %v", err)
 	}
 	// Invoking through the link must behave like `xbpretty remove`.
-	cmd := exec.Command(link, "figlet", "-n")
+	cmd := exec.Command(link, "figlet", "--dry-run")
 	cmd.Env = append(os.Environ(),
 		"XDG_CONFIG_HOME="+cfgDir,
 		"XDG_STATE_HOME="+filepath.Dir(cfgDir)+"/state",
@@ -204,7 +214,7 @@ func TestIntegrationConfigColorModeEndToEnd(t *testing.T) {
 				t.Skipf("no pseudo-terminal: %v", err)
 			}
 			defer master.Close()
-			cmd := integrationCmd(bin, cfgDir, logPath, "install", "-n", "figlet")
+			cmd := integrationCmd(bin, cfgDir, logPath, "install", "--dry-run", "figlet")
 			cmd.Stdin = nil
 			cmd.Stdout = slave
 			var stderr strings.Builder
@@ -253,7 +263,7 @@ func TestIntegrationConfigUnitEndToEnd(t *testing.T) {
 		t.Run(tt.unit, func(t *testing.T) {
 			cfgDir, _ := integrationConfig(t, "Never", "", "[Ui]", `unit = "`+tt.unit+`"`)
 			logPath := filepath.Join(filepath.Dir(cfgDir), "commands.log")
-			cmd := integrationCmd(bin, cfgDir, logPath, "install", "-n", "figlet")
+			cmd := integrationCmd(bin, cfgDir, logPath, "install", "--dry-run", "figlet")
 			cmd.Stdin = nil
 			var stdout, stderr strings.Builder
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -280,7 +290,7 @@ func TestIntegrationInvalidConfigIsExactHardError(t *testing.T) {
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(filepath.Dir(cfgDir), "commands.log")
-	cmd := integrationCmd(bin, cfgDir, logPath, "install", "-n", "figlet")
+	cmd := integrationCmd(bin, cfgDir, logPath, "install", "--dry-run", "figlet")
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
@@ -345,7 +355,7 @@ func TestIntegrationMissingDefaultConfigIsSilent(t *testing.T) {
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(filepath.Dir(cfgDir), "commands.log")
-	cmd := integrationCmd(bin, cfgDir, logPath, "install", "-n", "figlet")
+	cmd := integrationCmd(bin, cfgDir, logPath, "install", "--dry-run", "figlet")
 	cmd.Env = append(cmd.Env, "PATH="+stubDir+":"+os.Getenv("PATH"))
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -393,9 +403,9 @@ func TestIntegrationConfigFlagSelectsFile(t *testing.T) {
 		argv []string
 		want string
 	}{
-		{"before the subcommand", []string{"--config", decimal, "install", "-n", "figlet"}, "KB"},
-		{"after the subcommand", []string{"install", "--config", decimal, "-n", "figlet"}, "KB"},
-		{"last one wins", []string{"--config", decimal, "install", "-n", "figlet", "--config", binaryCfg}, "KiB"},
+		{"before the subcommand", []string{"--config", decimal, "install", "--dry-run", "figlet"}, "KB"},
+		{"after the subcommand", []string{"install", "--config", decimal, "--dry-run", "figlet"}, "KB"},
+		{"last one wins", []string{"--config", decimal, "install", "--dry-run", "figlet", "--config", binaryCfg}, "KiB"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd := integrationCmd(bin, cfgDir, logPath, tt.argv...)
@@ -423,7 +433,7 @@ func TestIntegrationConfigFlagErrors(t *testing.T) {
 
 	t.Run("missing file", func(t *testing.T) {
 		missing := filepath.Join(t.TempDir(), "absent.toml")
-		cmd := integrationCmd(bin, cfgDir, logPath, "--config", missing, "install", "-n", "figlet")
+		cmd := integrationCmd(bin, cfgDir, logPath, "--config", missing, "install", "--dry-run", "figlet")
 		var stdout, stderr strings.Builder
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
 		err := cmd.Run()
@@ -442,7 +452,7 @@ func TestIntegrationConfigFlagErrors(t *testing.T) {
 	t.Run("invalid file", func(t *testing.T) {
 		bad := filepath.Join(t.TempDir(), "bad.toml")
 		writeIntegrationConfigFile(t, bad, "[Ui]\nmode = \"Auto\"\nunit = \"binary\"\n")
-		cmd := integrationCmd(bin, cfgDir, logPath, "install", "--config", bad, "-n", "figlet")
+		cmd := integrationCmd(bin, cfgDir, logPath, "install", "--config", bad, "--dry-run", "figlet")
 		var stderr strings.Builder
 		cmd.Stderr = &stderr
 		err := cmd.Run()
@@ -457,7 +467,7 @@ func TestIntegrationConfigFlagErrors(t *testing.T) {
 
 	for _, stream := range []string{"-", "/dev/stdin"} {
 		t.Run("rejects "+stream, func(t *testing.T) {
-			cmd := integrationCmd(bin, cfgDir, logPath, "--config", stream, "install", "-n", "figlet")
+			cmd := integrationCmd(bin, cfgDir, logPath, "--config", stream, "install", "--dry-run", "figlet")
 			var stderr strings.Builder
 			cmd.Stderr = &stderr
 			err := cmd.Run()
@@ -520,7 +530,7 @@ func TestIntegrationRejectedTOMLConstructsExitTwo(t *testing.T) {
 			}
 			cfgPath := filepath.Join(cfgDir, "xbpretty", "config.toml")
 			writeIntegrationConfigFile(t, cfgPath, tt.body)
-			cmd := exec.Command(bin, "install", "-n", "figlet")
+			cmd := exec.Command(bin, "install", "--dry-run", "figlet")
 			cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+cfgDir)
 			var stdout, stderr strings.Builder
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr

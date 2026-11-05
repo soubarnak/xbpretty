@@ -57,6 +57,10 @@ type Command struct {
 	Group               string
 	Hidden              bool
 	Flags               []string // canonical flag long names accepted in addition to globals
+	// Binaries names the configured xbps programs the command runs. FR-053
+	// checks existence only for these, at runtime. Values are the config keys
+	// without the Xbps prefix: "install", "remove" or "query".
+	Binaries []string
 }
 
 // Groups keep the help and completions in a stable, readable order.
@@ -79,32 +83,48 @@ func upgradeNames() []string {
 // Commands is the canonical command table, in help order.
 var Commands = []Command{
 	{Name: "install", Summary: "install packages from repositories", UsageArgs: "PKG...", Args: RequiredArgs, Group: GroupTransaction,
-		Flags: commandFlags("install")},
+		Binaries: []string{"install", "query"},
+		Flags:    commandFlags("install")},
 	{Name: "remove", Aliases: []string{"uninstall"}, Summary: "remove installed packages", UsageArgs: "PKG...", Args: RequiredArgs, Group: GroupTransaction,
-		Flags: commandFlags("remove")},
+		Binaries: []string{"remove", "query"},
+		Flags:    commandFlags("remove")},
 	{Name: "purge", Summary: "remove packages and their configuration files", UsageArgs: "PKG...", Args: RequiredArgs, Group: GroupTransaction,
-		Flags: commandFlags("purge")},
+		Binaries: []string{"remove", "query"},
+		Flags:    commandFlags("purge")},
 	{Name: "autoremove", Summary: "remove orphaned packages", Group: GroupTransaction,
-		Flags: commandFlags("autoremove")},
+		Binaries: []string{"remove", "query"},
+		Flags:    commandFlags("autoremove")},
 	{Name: "autopurge", Summary: "remove orphaned packages and their configuration files", Group: GroupTransaction,
-		Flags: commandFlags("autopurge")},
+		Binaries: []string{"remove", "query"},
+		Flags:    commandFlags("autopurge")},
 	{Name: "upgrade", UndocumentedAliases: []string{"up", "dist-up"}, Summary: "upgrade all installed packages", Group: GroupTransaction,
-		Flags: commandFlags("upgrade")},
+		Binaries: []string{"install", "query"},
+		Flags:    commandFlags("upgrade")},
 	{Name: "full-upgrade", Aliases: []string{"dist-upgrade"}, Summary: "upgrade all installed packages (same as upgrade)", Group: GroupTransaction,
-		Flags: commandFlags("full-upgrade")},
+		Binaries: []string{"install", "query"},
+		Flags:    commandFlags("full-upgrade")},
 	{Name: "safe-upgrade", Summary: "upgrade all installed packages (same as upgrade)", Group: GroupTransaction,
-		Flags: commandFlags("safe-upgrade")},
-	{Name: "update", Summary: "refresh the repository index", Group: GroupTransaction},
-	{Name: "download", Summary: "download package archives into the current directory", UsageArgs: "PKG...", Args: RequiredArgs, Group: GroupTransaction},
-	{Name: "clean", Summary: "clean the package cache", Group: GroupTransaction, Flags: []string{"lists", "fetch"}},
+		Binaries: []string{"install", "query"},
+		Flags:    commandFlags("safe-upgrade")},
+	{Name: "update", Summary: "refresh the repository index", Group: GroupTransaction,
+		Binaries: []string{"install"}},
+	{Name: "download", Summary: "download package archives into the current directory", UsageArgs: "PKG...", Args: RequiredArgs, Group: GroupTransaction,
+		Binaries: []string{"install", "query"}},
+	{Name: "clean", Summary: "clean the package cache", Group: GroupTransaction, Flags: []string{"lists", "fetch"},
+		Binaries: []string{"remove"}},
+
 	{Name: "list", Summary: "list packages matching the given globs", UsageArgs: "[PKG...]", Args: OptionalArgs, Group: GroupDiscovery,
-		Flags: []string{"all-versions", "all-arches", "installed", "upgradable", "virtual", "description", "summary", "machine"}},
+		Binaries: []string{"query"},
+		Flags:    []string{"all-versions", "all-arches", "installed", "upgradable", "virtual", "description", "summary", "machine"}},
 	{Name: "search", Summary: "search package names and descriptions", UsageArgs: "PATTERN...", Args: RequiredArgs, Group: GroupDiscovery,
-		Flags: []string{"all-versions", "all-arches", "installed", "upgradable", "virtual", "description", "summary", "machine", "names"}},
+		Binaries: []string{"query"},
+		Flags:    []string{"all-versions", "all-arches", "installed", "upgradable", "virtual", "description", "summary", "machine", "names"}},
 	{Name: "show", Aliases: []string{"info"}, Summary: "show package details", UsageArgs: "PKG...", Args: RequiredArgs, Group: GroupDiscovery,
-		Flags: []string{"all-versions", "all-arches", "machine"}},
+		Binaries: []string{"query"},
+		Flags:    []string{"all-versions", "all-arches", "machine"}},
 	{Name: "policy", Summary: "show repository precedence and pinned packages", UsageArgs: "[PKG...]", Args: OptionalArgs, Group: GroupDiscovery,
-		Flags: []string{"machine"}},
+		Binaries: []string{"query"},
+		Flags:    []string{"machine"}},
 	{Name: "history", Summary: "list, inspect, undo, redo or clear transaction history", UsageArgs: "[ID|last|info|show|undo|redo|clear]", Args: OptionalArgs, Group: GroupHistory,
 		Flags: []string{"all"}},
 	{Name: "undo", Summary: "revert a recorded transaction", UsageArgs: "[ID|last]", Args: OptionalArgs, Group: GroupHistory},

@@ -9,87 +9,8 @@ import (
 
 	"github.com/soubarnak/xbpretty/internal/config"
 	"github.com/soubarnak/xbpretty/internal/hints"
-	"github.com/soubarnak/xbpretty/internal/summary"
 	"github.com/soubarnak/xbpretty/internal/xbps"
 )
-
-// runTransaction drives one command from the plan through the prompt to the
-// real execution, and returns xbpretty's exit code.
-func (st *state) runTransaction(cmd string, opts *options) int {
-	install := st.binaryFor(cmd)
-
-	// FR-006: update is index sync only, streamed, with no summary and no
-	// prompt.
-	if cmd == "update" {
-		args := []string{}
-		if st.sync && !opts.noSync {
-			args = append(args, "-S")
-		}
-		args = append(args, opts.args...)
-		args = append(args, opts.passthru...)
-		if euidFn() != 0 {
-			fmt.Fprintln(st.stderr, "xbpretty: update needs root; rerun with doas or sudo")
-			return exitRuntime
-		}
-		return st.execute(cmd, install, args)
-	}
-
-	// Everything else previews first.
-	wantSync := false
-	rows, code := st.plan(cmd, opts, &wantSync)
-	if code >= 0 {
-		return code
-	}
-	planSynced := wantSync
-
-	if len(rows) == 0 {
-		// FR-015: nothing to do is not an error.
-		fmt.Fprintln(st.stdout, "Nothing to do.")
-		return exitNothingToDo
-	}
-
-	sum := st.planToSummary(rows)
-	isPlain := !isTTY(st.stdout)
-	termWidth := terminalWidth(st.stdout)
-	if err := (summary.Renderer{
-		Color:       st.color,
-		Plain:       isPlain,
-		Width:       termWidth,
-		BoxStyle:    st.boxStyle,
-		ProgressBar: st.progressBar,
-		Unit:        st.unit,
-	}).Render(st.stdout, sum); err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
-		return exitRuntime
-	}
-
-	if opts.dryRun {
-		// FR-005 / AC-005: the plan is the whole run.
-		return exitOK
-	}
-
-	// FR-010: never block on a pipe.
-	stdinIsPipe := !isTTY(st.stdin)
-	autoAccept := st.assumeYes
-	if stdinIsPipe && !autoAccept {
-		fmt.Fprintln(st.stderr, "xbpretty: stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed")
-		return exitRuntime
-	}
-	// FR-016: only root may execute.
-	if euidFn() != 0 {
-		st.privHint(cmd, opts)
-		return exitRuntime
-	}
-	if !autoAccept {
-		if !st.prompt() {
-			// FR-009 / AC-003: declining is not an error.
-			return exitOK
-		}
-	}
-
-	args := st.realCommand(cmd, opts, planSynced)
-	return st.execute(cmd, install, args, rows...)
-}
 
 // execute streams one xbps command live (FR-014) and handles its outcome.
 func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {

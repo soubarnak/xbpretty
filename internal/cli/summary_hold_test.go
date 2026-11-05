@@ -24,7 +24,7 @@ func capturedSummary(t *testing.T, capture, command, color string) string {
 	e := newEnv(t)
 	e.root = true
 	e.set("XB_STUB_STDOUT", planCapture(t, capture))
-	code, out, errs := e.run("xbpretty", command, "-n", "--color="+color)
+	code, out, errs := e.run("xbpretty", command, "--dry-run", "--color="+color)
 	if code != 0 {
 		t.Fatalf("%s: exit = %d, want 0\n%s", capture, code, errs)
 	}

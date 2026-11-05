@@ -2,7 +2,7 @@
 # Stub xbps-query: records how it was called and answers from the fixture
 # variables. Queries succeed on their own terms - the transaction's exit
 # code never applies to them, matching real xbps.
-printf '%s\n' "$*" >> "${XB_STUB_LOG:-/dev/null}"
+printf '%s %s\n' "${0##*/}" "$*" >> "${XB_STUB_LOG:-/dev/null}"
 if [ -n "${XB_STUB_ENV_LOG:-}" ]; then
   printf 'LC_ALL=%s\n' "${LC_ALL:-}" >> "$XB_STUB_ENV_LOG"
 fi
@@ -57,6 +57,16 @@ case "$*" in
     exit "${XB_STUB_SHOW_EXIT:-0}" ;;
   *installed_size*)
     printf '%s' "${XB_STUB_OLD:-}"
+    exit 0 ;;
+  "-p pkgver "*)
+    # The installed-database check FR-007/FR-008 make before a transaction.
+    # Every package is installed unless the test names it in
+    # XB_STUB_NOT_INSTALLED (space-separated).
+    name="${3}"
+    case " ${XB_STUB_NOT_INSTALLED:-} " in
+      *" $name "*) exit 2 ;;
+    esac
+    printf '%s\n' "${name}-1.0_1"
     exit 0 ;;
   *)
     printf '%s' "${XB_STUB_QUERY:-}"

@@ -134,6 +134,11 @@ func commandsFromLog(t *testing.T, path string) []string {
 	}
 	var out []string
 	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		// The shared stub log prefixes each call with the binary name
+		// (see #62); discovery asserts argument vectors only.
+		if i := strings.IndexByte(line, ' '); i > 0 && strings.HasPrefix(line, "xbps-") {
+			line = line[i+1:]
+		}
 		if line != "" {
 			out = append(out, line)
 		}

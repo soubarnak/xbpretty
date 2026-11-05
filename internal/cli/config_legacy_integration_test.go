@@ -27,7 +27,7 @@ func migrationFixture(t *testing.T, name string) (original, copyPath string) {
 
 func legacyArguments(t *testing.T) []string {
 	t.Helper()
-	return []string{"install", "-n", "--no-sync", "figlet"}
+	return []string{"install", "--dry-run", "--no-sync", "figlet"}
 }
 
 func TestLegacyAllTenKeysRunWarnAndAreNeverRewritten(t *testing.T) {

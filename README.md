@@ -43,7 +43,7 @@ Built in pure Go with zero external dependencies, `xbpretty` compiles to a singl
 - **Live Framed Progress Widget**: Real-time 5-line terminal widget tracking download speeds, ETA, cyan-over-red progress bars, and unpack/configure spinners powered by a hybrid PTY/pipe execution engine.
 - **Dynamic Resize Support**: Automatically adapts progress box width when the terminal window is resized (`SIGWINCH`).
 - **Zero Dependencies & Blazing Fast**: Pure Go standard library VT100/ANSI rendering engine. No heavy third-party TUI frameworks, sub-2ms startup overhead, and offline packaging friendly.
-- **Script & Pipeline Friendly**: Automatically drops container borders, ANSI escape codes, and interactive widgets when piped (`xbp upgrade -n | grep pkg`) or when `NO_COLOR` is set.
+- **Script & Pipeline Friendly**: Automatically drops container borders, ANSI escape codes, and interactive widgets when piped (`xbp upgrade --dry-run | grep pkg`) or when `NO_COLOR` is set.
 - **Humanized Error Hints**: Translates cryptic xbps errors (missing packages, stale indexes, locked databases, and reverse dependencies via `xbps-query -X`) into clear, actionable advice.
 - **Transaction History**: Appends every successful change to `$XDG_STATE_HOME/xbpretty/transactions.log`, queryable at any time with `xbp log`.
 - **Kernel Reboot Reminders**: Automatically prompts a reboot reminder whenever an upgrade touches the Linux kernel or glibc.
@@ -139,7 +139,8 @@ One binary, six names. `xbp` is the primary shorthand; the `xbp-*` commands are 
 
 | Flag | Description |
 |---|---|
-| `-n`, `--dry-run` | Preview the transaction plan and summary without making any changes |
+| `--dry-run` | Preview the transaction plan and summary without making any changes |
+| `-n`, `--assume-no` | Refuse at the confirmation prompt (exit 1) without changing anything |
 | `-y`, `--yes` | Proceed automatically without confirmation prompt |
 | `-v`, `--verbose` | Print raw command lines and stream unbuffered xbps output directly |
 | `--box-style=STYLE` | Select container border style: `rounded` (default), `classic`, or `ascii` |
@@ -154,10 +155,10 @@ One binary, six names. `xbp` is the primary shorthand; the `xbp-*` commands are 
 
 ### Workflow & Privileges
 
-- **Interactive Root**: Runs `xbps` in dry-run mode (`-n`), renders the summary table, and prompts `[Y/n]` on stderr. Answering `y` proceeds with execution using the live progress widget.
+- **Interactive Root**: Runs `xbps` in dry-run mode (`--dry-run`), renders the summary table, and prompts `[Y/n]` on stderr. Answering `y` proceeds with execution using the live progress widget.
 - **Unprivileged User**: Running install/upgrade commands without root shows the transaction plan and exits with a reminder to execute under `sudo` or `doas`.
 - **Non-Interactive / Scripting**: If stdin is not a TTY and neither `-y` nor `--dry-run` is provided, `xbpretty` prints the summary and exits 1 with a reminder to provide `-y`.
-- **Piping & Grep**: When output is redirected or piped (`xbp upgrade -n | grep pkg`), box characters and ANSI codes are automatically stripped to guarantee clean plaintext parsing.
+- **Piping & Grep**: When output is redirected or piped (`xbp upgrade --dry-run | grep pkg`), box characters and ANSI codes are automatically stripped to guarantee clean plaintext parsing.
 
 ---
 

@@ -3,12 +3,14 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/soubarnak/xbpretty/internal/hints"
@@ -121,7 +123,10 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
-	defer signal.Stop(winch)
+	defer func() {
+		signal.Stop(winch)
+		close(winch)
+	}()
 	if f, ok := r.stdinReader().(*os.File); ok {
 		_ = inheritPtySize(f, master)
 	}
@@ -142,7 +147,10 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigs)
+	defer func() {
+		signal.Stop(sigs)
+		close(sigs)
+	}()
 	go func() {
 		for s := range sigs {
 			if cmd.Process != nil {
@@ -205,14 +213,7 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 	err = cmd.Wait()
 	r.lastStdout = rawStdout.String()
 	r.lastStderr = rawStderr.String()
-	if err == nil {
-		return 0, nil
-	}
-	code, ok := exitCode(err)
-	if !ok {
-		return 1, fmt.Errorf("waiting for %s: %w", name, err)
-	}
-	return code, nil
+	return waitCode(cmd, err, name)
 }
 
 func (r *runner) streamDirect(name string, args ...string) (int, error) {
@@ -230,7 +231,10 @@ func (r *runner) streamDirect(name string, args ...string) (int, error) {
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigs)
+	defer func() {
+		signal.Stop(sigs)
+		close(sigs)
+	}()
 	go func() {
 		for s := range sigs {
 			if cmd.Process != nil {
@@ -241,14 +245,85 @@ func (r *runner) streamDirect(name string, args ...string) (int, error) {
 
 	err := cmd.Wait()
 	r.lastStderr = tee.String()
+	return waitCode(cmd, err, name)
+}
+
+// streamStderr runs a diagnostic xbps step with both streams displayed on
+// stderr, forwards SIGINT/SIGTERM to the child, and returns its exit code plus
+// the two captured streams separately for the hint table. The index sync uses
+// it so its output is never durable stdout and an interrupt still reaches the
+// child (FR-013, FR-074). ADR-0006 needs the streams kept apart even though
+// both are displayed on stderr.
+func (r *runner) streamStderr(name string, args ...string) (int, hints.Output, error) {
+	r.echo(name, args)
+	cmd := exec.Command(name, args...)
+	cmd.Env = r.env()
+	cmd.Stdin = r.stdinReader()
+	// stdout and stderr are copied by two goroutines; display them through
+	// one serialized writer so a non-*os.File sink (a test buffer, for
+	// example) never sees concurrent writes.
+	display := &serializedWriter{w: r.stderrWriter()}
+	outTee := &teeWriter{w: display}
+	errTee := &teeWriter{w: display}
+	cmd.Stdout = outTee
+	cmd.Stderr = errTee
+	if err := cmd.Start(); err != nil {
+		return 1, hints.Output{}, fmt.Errorf("starting %s: %w", name, err)
+	}
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	defer func() {
+		signal.Stop(sigs)
+		close(sigs)
+	}()
+	go func() {
+		for s := range sigs {
+			if cmd.Process != nil {
+				_ = cmd.Process.Signal(s)
+			}
+		}
+	}()
+	err := cmd.Wait()
+	output := hints.Output{Stdout: outTee.String(), Stderr: errTee.String()}
+	code, waitErr := waitCode(cmd, err, name)
+	if waitErr != nil {
+		return 1, output, waitErr
+	}
+	return code, output, nil
+}
+
+// waitCode turns exec.Cmd.Wait's error into the code a shell would see. A
+// copy goroutine that fails with EPIPE (because stdout or stderr is a closed
+// pipe) must not hide the child's real status: FR-074 keeps the run's code.
+func waitCode(cmd *exec.Cmd, err error, name string) (int, error) {
 	if err == nil {
 		return 0, nil
 	}
-	code, ok := exitCode(err)
-	if !ok {
-		return 1, fmt.Errorf("waiting for %s: %w", name, err)
+	if code, ok := exitCode(err); ok {
+		return code, nil
 	}
-	return code, nil
+	if isBrokenPipe(err) || errors.Is(err, io.ErrClosedPipe) {
+		if code, ok := processExitCode(cmd.ProcessState); ok {
+			return code, nil
+		}
+	}
+	return 1, fmt.Errorf("waiting for %s: %w", name, err)
+}
+
+// processExitCode reads the child's own status when Wait returned a copy
+// error rather than an *exec.ExitError.
+func processExitCode(ps *os.ProcessState) (int, bool) {
+	if ps == nil {
+		return 0, false
+	}
+	if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return 128 + int(ws.Signal()), true
+	}
+	code := ps.ExitCode()
+	if code < 0 {
+		return 0, false
+	}
+	return code, true
 }
 
 // runner executes xbps commands, honouring the verbose flag and the
@@ -284,6 +359,18 @@ func exitCode(err error) (int, bool) {
 		return 128 + int(ws.Signal()), true
 	}
 	return ee.ExitCode(), true
+}
+
+// serializedWriter makes a single writer safe for two copy goroutines.
+type serializedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *serializedWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 // teeWriter writes to the underlying writer and remembers everything it saw.

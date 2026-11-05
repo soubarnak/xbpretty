@@ -63,7 +63,8 @@ type state struct {
 	stdin       io.Reader
 	r           *runner
 	color       bool
-	sync        bool
+	autoUpdate  bool
+	showPkgs    bool
 	log         bool
 	boxStyle    string
 	progressBar bool
@@ -84,6 +85,9 @@ func Main(argv []string) int {
 // Run executes xbpretty with the specified arguments, standard input,
 // standard output, and standard error streams, returning the exit code.
 func Run(argv []string, in io.Reader, out, err io.Writer) int {
+	// FR-074: a closed stdout pipe must not kill the run before it can keep
+	// its transaction and exit code.
+	ignoreSIGPIPE()
 	if in == nil {
 		in = stdinFn()
 	}
@@ -109,8 +113,15 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		}
 		return exitUsage
 	}
+	// FR-018 points --print-uris at §3.3.7, which #71 owns. Until it lands the
+	// flag must be refused before config resolution, any child and any
+	// prompt, so it can never fall through to a real transaction.
+	if opts.printURIs {
+		fmt.Fprintln(err, "xbpretty: --print-uris is not implemented in this build")
+		return exitRuntime
+	}
 
-	st := &state{stdout: out, stderr: err, stdin: in}
+	st := &state{stdout: newResilientWriter(out), stderr: err, stdin: in}
 
 	// moo is hidden and never touches config or xbps.
 	if opts.command == "moo" {
@@ -161,7 +172,8 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 	st.simple = resolved.simple
 	st.full = resolved.full
 	st.historyDir = resolved.historyDir
-	st.sync = resolved.sync
+	st.autoUpdate = resolved.sync
+	st.showPkgs = resolved.showPkgs
 	st.log = resolved.log
 	st.color = wantColor(resolved.color, opts)
 	st.boxStyle = "rounded"
@@ -185,10 +197,6 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 	if opts.command == "log" {
 		return st.runLog(opts)
 	}
-	if resolveErr := cfg.Resolve(); resolveErr != nil {
-		fmt.Fprintf(err, "xbpretty: %v\n", resolveErr)
-		return exitRuntime
-	}
 	return st.dispatch(opts)
 }
 
@@ -207,7 +215,7 @@ func (st *state) dispatch(opts *options) int {
 	switch opts.command {
 	case "log":
 		return st.runLog(opts)
-	case "install", "remove", "upgrade", "autoremove", "update":
+	case "install", "remove", "purge", "autoremove", "autopurge", "upgrade", "update":
 		return st.runTransaction(opts.command, opts)
 	case "full-upgrade", "safe-upgrade":
 		// The upgrade family is an equivalence in FR-011.
@@ -220,8 +228,13 @@ func (st *state) dispatch(opts *options) int {
 		return st.runShow(opts)
 	case "fetch":
 		return st.runFetch(opts)
-	case "purge", "autopurge", "download", "clean",
-		"policy", "history", "undo", "redo":
+	case "download":
+		// TODO(#72): the download command's archive fetch belongs to #72.
+		return st.runUnimplemented(opts.command, opts)
+	case "clean":
+		// TODO(#64): cache and repodata cleaning belongs to #64.
+		return st.runUnimplemented(opts.command, opts)
+	case "policy", "history", "undo", "redo":
 		return st.runUnimplemented(opts.command, opts)
 	}
 	fmt.Fprintf(st.stderr, "xbpretty: unknown command %q\n", opts.command)
