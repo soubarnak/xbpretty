@@ -16,6 +16,7 @@ type settings struct {
 	assumeYes  bool
 	autoRemove bool
 	sync       bool
+	showPkgs   bool
 	simple     bool
 	full       bool
 	log        bool
@@ -36,6 +37,7 @@ func resolveSettings(cfg config.Config, opts *options) settings {
 		assumeYes:  cfg.Nala.AssumeYes,
 		autoRemove: cfg.Nala.AutoRemove,
 		sync:       cfg.Nala.AutoUpdate,
+		showPkgs:   cfg.Nala.UpdateShowPackages,
 		simple:     cfg.Nala.Simple,
 		full:       cfg.Nala.FullUpgrade,
 		log:        cfg.Xbps.TransactionLog,

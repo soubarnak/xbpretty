@@ -14,7 +14,7 @@ type options struct {
 	// Transaction state kept from rev 5 and used by the transaction core.
 	dryRun      bool
 	yes         bool
-	assumeNo    bool // --assume-no; -n is its rev 6 short form
+	assumeNo    bool // --assume-no; -n is its short form
 	verbose     bool
 	noSync      bool
 	noUpdate    bool
@@ -418,12 +418,10 @@ func applyFlag(o *options, f spec.Flag, occ occurrence) error {
 		o.dryRun = true
 		o.explicit["dry-run"] = true
 	case "assume-no":
+		// FR-015: -n is --assume-no only; the dry run is the long-only
+		// --dry-run, so the two can be combined to print the plan and stop.
 		o.assumeNo = true
 		o.explicit["assume_no"] = true
-		// Compatibility until the transaction core (#62) implements the
-		// refusal: rev 5 callers used -n for the dry run, so -n still selects
-		// the plan while rev 6's meaning is recorded for #62.
-		o.dryRun = true
 	case "yes":
 		o.yes = true
 		o.explicit["yes"] = true

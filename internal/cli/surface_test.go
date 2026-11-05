@@ -240,7 +240,7 @@ func TestSurfaceGlobalFlagsBeforeAndAfterCommandAndConflicts(t *testing.T) {
 		t.Errorf("fetch -c IN did not reach discovery: %d\n%s", code, errs)
 	}
 	// A flag on the wrong command is a usage error.
-	for _, args := range [][]string{{"list", "--fix-broken"}, {"list", "-y"}, {"install", "figlet", "--limit", "2"}, {"fetch", "-n"}, {"fetch", "--simple"}, {"fetch", "--update"}} {
+	for _, args := range [][]string{{"list", "--fix-broken"}, {"list", "-y"}, {"install", "figlet", "--limit", "2"}, {"fetch", "--assume-yes"}, {"fetch", "--simple"}, {"fetch", "--update"}} {
 		if code, _, _ := surfaceRun(t, bin, env, args...); code != 2 {
 			t.Errorf("%v exit = %d, want 2", args, code)
 		}
@@ -312,7 +312,7 @@ func TestSurfaceNoOpNegativesAddNothingToArgv(t *testing.T) {
 		"XB_STUB_LOG":     logPath,
 		"XB_STUB_STDOUT":  planFixture,
 		"NO_COLOR":        "1",
-	}, "install", "figlet", "-n", "--no-fix-broken", "--no-install-recommends", "--no-install-suggests")
+	}, "install", "figlet", "--dry-run", "--no-fix-broken", "--no-install-recommends", "--no-install-suggests")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\nstderr:\n%s", code, errs)
 	}
