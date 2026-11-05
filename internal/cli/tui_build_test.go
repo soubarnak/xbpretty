@@ -39,6 +39,8 @@ func TestZeroDependencyBuild(t *testing.T) {
 	build([]string{"CGO_ENABLED=0"}, "./...")
 	// The non-Linux termios stub must compile even though the cli's own
 	// terminal probe is Linux-only (a pre-existing platform boundary).
-	build([]string{"CGO_ENABLED=0", "GOOS=darwin", "GOARCH=amd64"}, "./internal/term")
-	build([]string{"CGO_ENABLED=0", "GOOS=darwin", "GOARCH=amd64"}, "./internal/tui")
+	for _, goos := range []string{"darwin", "windows"} {
+		build([]string{"CGO_ENABLED=0", "GOOS=" + goos, "GOARCH=amd64"}, "./internal/term")
+		build([]string{"CGO_ENABLED=0", "GOOS=" + goos, "GOARCH=amd64"}, "./internal/tui")
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -136,13 +137,32 @@ func (c *capture) String() string {
 	return c.buf.String()
 }
 
+// syncBuffer is a stderr sink the exec goroutine can write while a test reads
+// it (the failure paths inspect it before Wait), so -race stays clean.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
 // ptyRun is one live binary on a real pty.
 type ptyRun struct {
 	master *os.File
 	slave  *os.File
 	cmd    *exec.Cmd
 	cap    *capture
-	stderr bytes.Buffer
+	stderr *syncBuffer
 	wait   chan error
 	before term.State
 }
@@ -164,8 +184,8 @@ func startPty(t *testing.T, bin string, env map[string]string, args []string, co
 	if err != nil {
 		t.Fatalf("GetState before start: %v", err)
 	}
-	r := &ptyRun{master: master, slave: slave, cmd: cmd, cap: &capture{}, wait: make(chan error, 1), before: before}
-	cmd.Stderr = &r.stderr
+	r := &ptyRun{master: master, slave: slave, cmd: cmd, cap: &capture{}, stderr: &syncBuffer{}, wait: make(chan error, 1), before: before}
+	cmd.Stderr = r.stderr
 	t.Cleanup(func() {
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
@@ -248,6 +268,23 @@ func goldenBytes(t *testing.T, name string) []byte {
 	return raw
 }
 
+var ansiFrame = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
+
+// assertFrameGrid proves the captured frame carries the checked-in cell grid,
+// so the .txt golden is used alongside the byte golden.
+func assertFrameGrid(t *testing.T, frame string, golden []byte) {
+	t.Helper()
+	stripped := ansiFrame.ReplaceAllString(frame, "")
+	for _, line := range strings.Split(string(golden), "\n") {
+		if line == "" {
+			continue
+		}
+		if !strings.Contains(stripped, line) {
+			t.Errorf("captured frame is missing grid row %q", line)
+		}
+	}
+}
+
 // TestS1FrameBytesAndCancel is AC-050's PTY frame half plus AC-054's normal
 // exit: the real binary on an 80x24 pty paints the golden SGR payload and a q
 // refusal restores the alternate screen, cursor, mouse, paste and termios.
@@ -268,6 +305,13 @@ func TestS1FrameBytesAndCancel(t *testing.T) {
 	frame := snap[start : start+len(golden)]
 	if string(frame) != string(golden) {
 		t.Errorf("S1 frame bytes differ from the golden\n--- got ---\n%q\n--- want ---\n%q", frame, golden)
+	}
+	assertFrameGrid(t, frame, goldenBytes(t, "s1-upgrade-80x24.txt"))
+	// No extra draw may follow the first frame: a second repaint would mean
+	// the session is not idle after its initial draw.
+	time.Sleep(50 * time.Millisecond)
+	if got := len(r.cap.String()); got != start+len(golden) {
+		t.Errorf("capture has %d trailing bytes after the frame", got-(start+len(golden)))
 	}
 	for _, seq := range []string{term.AltEnter, term.CursorHide, term.MouseOn, term.PasteOn} {
 		if !strings.Contains(snap, seq) {
@@ -333,6 +377,39 @@ func TestS1ConfirmStartsTransaction(t *testing.T) {
 	}
 	if !after.Equal(r.before) {
 		t.Errorf("termios flags not restored after confirm")
+	}
+}
+
+// TestS1ImplicitDeclineKeepsPrimaryResult is FR-016 through two screens: y
+// confirms the primary transaction, then q declines the implicit autoremove
+// screen and the primary success (exit 0) stands, with no refusal line.
+func TestS1ImplicitDeclineKeepsPrimaryResult(t *testing.T) {
+	bin := buildTuiBinary(t)
+	dir := t.TempDir()
+	query := tuiOldQuery(t, dir)
+	env := tuiScreenEnv(t, dir, query)
+	// Give the orphan transaction its own non-empty plan so a second S1 opens.
+	env["XB_STUB_REMOVE_STDOUT"] = "nano-9.2_1 remove x86_64 https://repo-default.voidlinux.org/current 3145728\n"
+	golden := goldenBytes(t, "s1-upgrade-80x24.sgr")
+
+	r := startPty(t, bin, env, []string{"upgrade"}, 80, 24)
+	waitCapture(t, r, "the primary frame", func(s string) bool {
+		i := strings.Index(s, term.ClearAll)
+		return i >= 0 && len(s) >= i+len(golden)
+	})
+	r.send(t, "y")
+	waitCapture(t, r, "the implicit autoremove frame", func(s string) bool {
+		return strings.Contains(frameTail(s), "xbpretty Autoremove")
+	})
+	r.send(t, "q")
+	if code := r.exitCode(t); code != 0 {
+		t.Errorf("declining the implicit autoremove screen exit = %d, want 0 (primary result)\nstderr:\n%s", code, r.stderr.String())
+	}
+	if strings.Contains(r.stderr.String(), "user refused confirmation") {
+		t.Errorf("implicit decline printed a refusal line:\n%s", r.stderr.String())
+	}
+	if got := strings.Count(r.cap.String(), term.AltEnter); got != 2 {
+		t.Errorf("alternate-screen entries = %d, want 2 (two screens)", got)
 	}
 }
 
@@ -528,6 +605,23 @@ func TestS1GateMatrixPTY(t *testing.T) {
 			args: []string{"install", "fixture", "--dry-run"},
 			cols: 80, rows: 24, wantExit: 0,
 		},
+		{
+			name: "Plain mode falls back",
+			mode: "Plain",
+			cols: 80, rows: 24, wantExit: 1, send: "n\n",
+		},
+		{
+			name: "--tui opens from Auto",
+			mode: "Auto",
+			args: []string{"upgrade", "--tui"},
+			cols: 80, rows: 24, wantScreen: true, wantExit: 1, send: "q",
+		},
+		{
+			name: "--no-tui demotes Tui",
+			mode: "Tui",
+			args: []string{"upgrade", "--no-tui"},
+			cols: 80, rows: 24, wantExit: 1, send: "n\n",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -562,28 +656,68 @@ func TestS1GateMatrixPTY(t *testing.T) {
 			if strings.Contains(out, term.AltEnter) {
 				t.Errorf("an excluded gate opened the alternate screen: %q", out)
 			}
+			if !strings.Contains(out, "Total download size:") {
+				t.Errorf("the text fallback did not render the summary:\n%q", out)
+			}
 		})
 	}
 }
 
-// TestUpdateNeverOpensAReleaseScreen is AC-053: Tui mode and an interactive
-// update never enter the alternate screen and never read a key.
-func TestUpdateNeverOpensAReleaseScreen(t *testing.T) {
+// TestS1NonTTYFallsBack is the non-TTY cell of AC-049: no screen and the
+// normal text summary, then the existing stdin refusal.
+func TestS1NonTTYFallsBack(t *testing.T) {
 	bin := buildTuiBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	env := tuiScreenEnv(t, dir, query)
-	// update's count plan is empty, so it finishes without a prompt.
-	env["XB_STUB_STDOUT"] = ""
+	code, out, errs := surfaceRun(t, bin, env, "upgrade")
+	if code != 1 {
+		t.Errorf("non-TTY exit = %d, want 1\nstderr:\n%s", code, errs)
+	}
+	if strings.Contains(out, term.AltEnter) {
+		t.Errorf("non-TTY opened the alternate screen: %q", out)
+	}
+	if !strings.Contains(out, "Total download size:") {
+		t.Errorf("non-TTY text summary missing:\n%s", out)
+	}
+	if !strings.Contains(errs, "stdin is not a terminal") {
+		t.Errorf("non-TTY refusal missing:\n%s", errs)
+	}
+}
 
-	r := startPty(t, bin, env, []string{"update"}, 80, 24)
-	if code := r.exitCode(t); code != 0 {
-		t.Errorf("update exit = %d, want 0\nstderr:\n%s", code, r.stderr.String())
-	}
-	if out := r.cap.String(); strings.Contains(out, term.AltEnter) {
-		t.Errorf("update entered the alternate screen: %q", out)
-	}
-	if strings.Contains(r.stderr.String(), "Accept these changes") {
-		t.Errorf("update opened a release-info prompt:\n%s", r.stderr.String())
+// TestUpdateNeverOpensAReleaseScreen is AC-053: Tui mode and an interactive
+// update never enter the alternate screen and never read a key, both for an
+// unchanged (empty) and a changed (non-empty) repodata plan.
+func TestUpdateNeverOpensAReleaseScreen(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		plan     string
+		wantText string
+	}{
+		{"empty repodata", "", ""},
+		{"changed repodata", tuiScreenPlan, "package(s) can be upgraded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := buildTuiBinary(t)
+			dir := t.TempDir()
+			query := tuiOldQuery(t, dir)
+			env := tuiScreenEnv(t, dir, query)
+			env["XB_STUB_STDOUT"] = tc.plan
+
+			r := startPty(t, bin, env, []string{"update"}, 80, 24)
+			if code := r.exitCode(t); code != 0 {
+				t.Errorf("update exit = %d, want 0\nstderr:\n%s", code, r.stderr.String())
+			}
+			out := r.cap.String()
+			if strings.Contains(out, term.AltEnter) {
+				t.Errorf("update entered the alternate screen: %q", out)
+			}
+			if strings.Contains(r.stderr.String(), "Accept these changes") {
+				t.Errorf("update opened a release-info prompt:\n%s", r.stderr.String())
+			}
+			if tc.wantText != "" && !strings.Contains(out, tc.wantText) {
+				t.Errorf("update output missing %q:\n%s", tc.wantText, out)
+			}
+		})
 	}
 }

@@ -97,11 +97,19 @@ type Decoder struct {
 	f       *os.File
 	reader  io.Reader
 	pending []byte
+	// cancel makes a blocking tty read abandonable: the screen closes this
+	// channel before waiting for the decoder goroutine, so no surface can
+	// keep consuming stdin after Close (FR-072).
+	cancel <-chan struct{}
 }
 
 // NewDecoder wraps a tty.
-func NewDecoder(f *os.File) *Decoder {
-	d := &Decoder{f: f, reader: f}
+func NewDecoder(f *os.File) *Decoder { return NewDecoderWithCancel(f, nil) }
+
+// NewDecoderWithCancel wraps a tty and abandons a blocking read when cancel
+// is closed. The zero-timeout poll is bounded by pollIntervalMS.
+func NewDecoderWithCancel(f *os.File, cancel <-chan struct{}) *Decoder {
+	d := &Decoder{f: f, reader: f, cancel: cancel}
 	if f != nil {
 		d.fd = f.Fd()
 	}
@@ -129,11 +137,30 @@ func (d *Decoder) readKey() (Key, error) {
 	return d.controlOrRune(b)
 }
 
+// pollIntervalMS bounds how long a blocking read waits before re-checking the
+// cancel channel.
+const pollIntervalMS = 50
+
+func (d *Decoder) cancelled() bool {
+	if d.cancel == nil {
+		return false
+	}
+	select {
+	case <-d.cancel:
+		return true
+	default:
+		return false
+	}
+}
+
 func (d *Decoder) nextByte(timeoutMS int) (byte, bool, error) {
 	if len(d.pending) > 0 {
 		b := d.pending[0]
 		d.pending = d.pending[1:]
 		return b, true, nil
+	}
+	if d.cancelled() {
+		return 0, false, io.EOF
 	}
 	if d.f == nil {
 		var buf [1]byte
@@ -149,27 +176,45 @@ func (d *Decoder) nextByte(timeoutMS int) (byte, bool, error) {
 	if timeoutMS < 0 {
 		var buf [1]byte
 		for {
-			n, err := readFD(d.fd, buf[:])
+			if d.cancelled() {
+				return 0, false, io.EOF
+			}
+			ready, err := waitReadable(d.fd, pollIntervalMS)
+			if err != nil {
+				return 0, false, err
+			}
+			if !ready {
+				continue
+			}
+			if d.cancelled() {
+				return 0, false, io.EOF
+			}
+			n, err := readFD(d.f, buf[:])
 			if n == 1 {
 				return buf[0], true, nil
 			}
 			if err == nil {
-				return 0, false, io.EOF
+				continue
 			}
-			if err == os.ErrDeadlineExceeded {
-				return 0, false, nil
+			if isRetryableRead(err) {
+				continue
 			}
-			// EINTR/EAGAIN: retry the blocking read.
-			continue
+			return 0, false, err
 		}
 	}
 	ready, err := waitReadable(d.fd, timeoutMS)
 	if err != nil || !ready {
 		return 0, false, nil
 	}
+	if d.cancelled() {
+		return 0, false, io.EOF
+	}
 	var chunk [256]byte
-	n, _ := readFD(d.fd, chunk[:])
+	n, readErr := readFD(d.f, chunk[:])
 	if n <= 0 {
+		if readErr != nil && !isRetryableRead(readErr) {
+			return 0, false, readErr
+		}
 		return 0, false, io.EOF
 	}
 	d.pending = append(d.pending, chunk[:n]...)
@@ -332,6 +377,9 @@ func (d *Decoder) discardPaste() {
 	var window []byte
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
+		if d.cancelled() {
+			return
+		}
 		b, ok, _ := d.nextByte(100)
 		if !ok {
 			return

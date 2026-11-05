@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -135,6 +136,93 @@ func TestScreenRestoresOnPanic(t *testing.T) {
 	}
 	if !after.Equal(before) {
 		t.Errorf("termios not restored after a screen panic")
+	}
+}
+
+// TestScreenCloseStopsDecoder proves Close joins the input goroutine: after
+// it returns, a key written to the terminal is still there for the next
+// reader, and a second screen can be opened on the same tty.
+func TestScreenCloseStopsDecoder(t *testing.T) {
+	master, slave := openTestPty(t)
+	s, err := Open(slave, slave, false, false)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	s.Close()
+
+	if _, err := master.WriteString("j\n"); err != nil {
+		t.Fatalf("writing the probe key: %v", err)
+	}
+	type result struct {
+		b   []byte
+		err error
+	}
+	read := make(chan result, 1)
+	go func() {
+		buf := make([]byte, 8)
+		n, err := slave.Read(buf)
+		read <- result{buf[:n], err}
+	}()
+	select {
+	case r := <-read:
+		if !strings.Contains(string(r.b), "j") {
+			t.Fatalf("read %q, want the probe key", r.b)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a closed screen's decoder consumed stdin")
+	}
+
+	second, err := Open(slave, slave, false, false)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	if _, err := master.WriteString("k"); err != nil {
+		t.Fatal(err)
+	}
+	ev := waitEvent(t, second, EventKey)
+	if ev.Key.Type != term.KeyRune || ev.Key.Rune != 'k' {
+		t.Fatalf("second screen decoded %+v, want rune k", ev.Key)
+	}
+	second.Close()
+}
+
+// TestScreenConcurrentClose stresses the done channel and the decoder join
+// under -race.
+func TestScreenConcurrentClose(t *testing.T) {
+	master, slave := openTestPty(t)
+	s, err := Open(slave, slave, false, false)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	go func() {
+		for i := 0; i < 20; i++ {
+			_, _ = master.WriteString("j")
+		}
+	}()
+	s.Close()
+}
+
+// TestLocateAnchorKeepsStray proves the DSR handshake replays bytes typed
+// during the query window instead of dropping them.
+func TestLocateAnchorKeepsStray(t *testing.T) {
+	master, slave := openTestPty(t)
+	// Raw mode keeps the reply and the stray key out of the canonical line
+	// buffer.
+	g := term.NewGuard(slave, slave)
+	if err := g.EnterFullscreen(false); err != nil {
+		t.Fatalf("raw mode: %v", err)
+	}
+	defer g.Restore()
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_, _ = master.WriteString("j\x1b[12;5R")
+	}()
+	a := LocateAnchor(slave, slave, time.Second)
+	if !a.OK || a.Row != 12 || a.Col != 5 {
+		t.Fatalf("anchor = %+v, want 12;5", a)
+	}
+	if string(a.Stray) != "j" {
+		t.Errorf("Stray = %q, want the typed byte", a.Stray)
 	}
 }
 

@@ -1,0 +1,24 @@
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  xbpretty Upgrade  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Held                                                                         ┃
+┃ ━━━━                                                                         ┃
+┃ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┏━┓ ┃
+┃ ┃   Package:    Old Version:    New Version:      Reason:        Size:  ┃┃█┃ ┃
+┃ ┃   bash           5.2_1           5.2_2        Manual hold      1 MiB  ┃┃ ┃ ┃
+┃ ┃❯  tzdata        2025a_1         2025a_1       Manual hold    100 KiB  ┃┃ ┃ ┃
+┃ ┃   openssl       3.3.1_1         3.3.2_1       Manual hold      4 MiB  ┃┃ ┃ ┃
+┃ ┃                                                                       ┃┃ ┃ ┃
+┃ ┃                                                                       ┃┃ ┃ ┃
+┃ ┃                                                                       ┃┃ ┃ ┃
+┃ ┃                                                                       ┃┃ ┃ ┃
+┃ ┃                                                                       ┃┃ ┃ ┃
+┃ ┃                                                                       ┃┃ ┃ ┃
+┃ ┃                                                                       ┃┃ ┃ ┃
+┃ ┃                                                                       ┃┃ ┃ ┃
+┃ ┃                                                                       ┃┃ ┃ ┃
+┃ ┃                                                                       ┃┃ ┃ ┃
+┃ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━┛ ┃
+┃ Held:                3 Pkgs           (↑) move up | (↓) move down            ┃
+┃                                     (→) next tab | (←) previous tab          ┃
+┃ Total download size:2.0 MiB (s) package info | (q) quit | (y) start upgrade  ┃
+┃ Disk space required:1.5 MiB                                                  ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛

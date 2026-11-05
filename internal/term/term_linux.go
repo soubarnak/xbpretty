@@ -104,8 +104,14 @@ func ioctl(fd uintptr, req uintptr, arg unsafe.Pointer) error {
 	return nil
 }
 
+// maxSelectFD is the highest descriptor syscall.FdSet can represent.
+const maxSelectFD = 8 * int(unsafe.Sizeof(syscall.FdSet{}.Bits)) * 8
+
 // waitReadable waits until fd is readable or the timeout expires.
 func waitReadable(fd uintptr, timeoutMS int) (bool, error) {
+	if fd >= uintptr(maxSelectFD) {
+		return false, errors.New("term: file descriptor exceeds FdSet capacity")
+	}
 	var set syscall.FdSet
 	set.Bits[fd/64] |= 1 << (fd % 64)
 	tv := syscall.Timeval{Sec: int64(timeoutMS / 1000), Usec: int64((timeoutMS % 1000) * 1000)}
@@ -119,7 +125,13 @@ func waitReadable(fd uintptr, timeoutMS int) (bool, error) {
 	return n > 0, nil
 }
 
-// readFD reads whatever is available from fd.
-func readFD(fd uintptr, buf []byte) (int, error) {
-	return syscall.Read(int(fd), buf)
+// readFD reads whatever is available from f.
+func readFD(f *os.File, buf []byte) (int, error) {
+	return syscall.Read(int(f.Fd()), buf)
+}
+
+// isRetryableRead reports the two errors a blocking tty read may transiently
+// return. Anything else is a real failure and must not spin.
+func isRetryableRead(err error) bool {
+	return errors.Is(err, syscall.EINTR) || errors.Is(err, syscall.EAGAIN)
 }

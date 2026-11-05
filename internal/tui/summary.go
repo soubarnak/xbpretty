@@ -99,18 +99,30 @@ func (m *SummaryModel) SetSelection(row int) {
 	m.Sel = row
 }
 
-func headersFor(t Tab) []string {
+// tabHasVersionDiff reports whether a tab's rows include a changed version.
+// Upgrade always has the two-version shape; Held only when at least one row
+// differs, so every cell in the section keeps the same column count.
+func tabHasVersionDiff(t Tab) bool {
+	if t.Label == "Upgrade" {
+		return true
+	}
+	if t.Label != "Held" {
+		return false
+	}
+	for _, r := range t.Rows {
+		if r.Old != r.New {
+			return true
+		}
+	}
+	return false
+}
+
+func headersFor(t Tab, hasDiff bool) []string {
 	switch t.Label {
 	case "Upgrade":
 		return []string{"Package:", "Old Version:", "New Version:", "Size:"}
 	case "Held":
-		diff := false
-		for _, r := range t.Rows {
-			if r.Old != r.New {
-				diff = true
-			}
-		}
-		if diff {
+		if hasDiff {
 			return []string{"Package:", "Old Version:", "New Version:", "Reason:", "Size:"}
 		}
 		return []string{"Package:", "Version:", "Reason:", "Size:"}
@@ -118,12 +130,14 @@ func headersFor(t Tab) []string {
 	return []string{"Package:", "Version:", "Size:"}
 }
 
-func cellsFor(t Tab, r PkgRow) []string {
+// cellsFor always returns the section's header shape: a mixed Held section
+// lists the same five (or four) columns on every row.
+func cellsFor(t Tab, r PkgRow, hasDiff bool) []string {
 	switch t.Label {
 	case "Upgrade":
 		return []string{r.Name, r.Old, r.New, r.Size}
 	case "Held":
-		if r.Old != r.New {
+		if hasDiff {
 			return []string{r.Name, r.Old, r.New, r.Reason, r.Size}
 		}
 		return []string{r.Name, r.Old, r.Reason, r.Size}
@@ -151,9 +165,10 @@ func roleFor(label string) Role {
 	switch label {
 	case "Remove", "AutoRemove", "Purge", "AutoPurge":
 		return RoleError
-	case "Install", "Upgrade", "ReInstall":
+	case "Install", "Upgrade":
 		return RoleSecondary
 	}
+	// ReInstall, Configure and Held names are Notice (ADR-0012).
 	return RoleNotice
 }
 
@@ -353,13 +368,14 @@ func RenderSummary(m *SummaryModel, w, h int, t Theme) *Buffer {
 
 	tab := m.cur()
 	if tab != nil {
-		headers := headersFor(*tab)
+		hasDiff := tabHasVersionDiff(*tab)
+		headers := headersFor(*tab, hasDiff)
 		natural := make([]int, len(headers))
 		for i, hd := range headers {
 			natural[i] = term.StringWidth(hd)
 		}
 		for _, r := range tab.Rows {
-			cells := cellsFor(*tab, r)
+			cells := cellsFor(*tab, r, hasDiff)
 			for i, c := range cells {
 				if i < len(natural) && term.StringWidth(c) > natural[i] {
 					natural[i] = term.StringWidth(c)
@@ -368,7 +384,7 @@ func RenderSummary(m *SummaryModel, w, h int, t Theme) *Buffer {
 		}
 		total := tableW - 2
 		available := total - 2
-		cols := spaceAround(natural, available)
+		offsets, widths := columnLayout(natural, available)
 		tableInteriorX := bx + 1
 		headerY := tableY + 1
 		visible := tableH - 3
@@ -382,8 +398,8 @@ func RenderSummary(m *SummaryModel, w, h int, t Theme) *Buffer {
 
 		aligns := alignsFor(len(headers))
 		for i, hd := range headers {
-			cx := tableInteriorX + 2 + cols[i]
-			drawAligned(buf, cx, headerY, natural[i], hd, t.style(RoleRegular), aligns[i])
+			cx := tableInteriorX + 2 + offsets[i]
+			drawAligned(buf, cx, headerY, widths[i], hd, t.style(RoleRegular), aligns[i])
 		}
 		for i := 0; i < visible && scroll+i < len(tab.Rows); i++ {
 			r := tab.Rows[scroll+i]
@@ -392,20 +408,20 @@ func RenderSummary(m *SummaryModel, w, h int, t Theme) *Buffer {
 			for x := tableInteriorX; x < tableInteriorX+total; x++ {
 				buf.Set(x, y, ' ', t.Regular)
 			}
-			cells := cellsFor(*tab, r)
+			cells := cellsFor(*tab, r, hasDiff)
 			for ci := range cells {
-				cx := tableInteriorX + 2 + cols[ci]
+				cx := tableInteriorX + 2 + offsets[ci]
 				st := t.style(RoleRegular)
 				if selected {
 					st = t.style(RolePrimary)
 				} else if ci == 0 {
 					st = t.style(roleFor(tab.Label))
 				}
-				if !selected && tab.Label == "Upgrade" && ci == 2 && len(r.NewSpans) > 0 {
-					drawSpansAligned(buf, cx, y, natural[ci], r.NewSpans, t, aligns[ci])
+				if !selected && (tab.Label == "Upgrade" || tab.Label == "Held") && ci == 2 && len(r.NewSpans) > 0 {
+					drawSpansAligned(buf, cx, y, widths[ci], r.NewSpans, t, aligns[ci])
 					continue
 				}
-				drawAligned(buf, cx, y, natural[ci], cells[ci], st, aligns[ci])
+				drawAligned(buf, cx, y, widths[ci], cells[ci], st, aligns[ci])
 			}
 			if selected {
 				buf.Set(tableInteriorX, y, '❯', t.style(RolePrimary))
@@ -479,6 +495,48 @@ func RenderSummary(m *SummaryModel, w, h int, t Theme) *Buffer {
 // TooSmall is FR-071's notice, centred in the body.
 func TooSmall(w, h int) string {
 	return "Terminal too small (60x18 minimum; now " + itoa(w) + "x" + itoa(h) + ")"
+}
+
+// columnLayout returns each column's offset and draw width inside the table
+// interior. When the natural widths fit, SpaceAround spreads them. When they
+// do not (the 60x18 floor with realistic names), it shrinks deterministically
+// from the left, reserving one cell for every remaining column, so columns
+// never overlap or paint over the gutter.
+func columnLayout(natural []int, total int) (offsets, widths []int) {
+	n := len(natural)
+	offsets = make([]int, n)
+	widths = make([]int, n)
+	if n == 0 {
+		return offsets, widths
+	}
+	content := 0
+	for _, w := range natural {
+		content += w
+	}
+	if content <= total {
+		copy(widths, natural)
+		return spaceAround(natural, total), widths
+	}
+	remaining := total
+	for i := 0; i < n; i++ {
+		reserve := n - 1 - i
+		maxWidth := remaining - reserve
+		if maxWidth < 1 {
+			maxWidth = 1
+		}
+		w := natural[i]
+		if w > maxWidth {
+			w = maxWidth
+		}
+		widths[i] = w
+		remaining -= w
+	}
+	pos := 0
+	for i := 0; i < n; i++ {
+		offsets[i] = pos
+		pos += widths[i]
+	}
+	return offsets, widths
 }
 
 // spaceAround is FR-068's deterministic replacement for SpaceAround.

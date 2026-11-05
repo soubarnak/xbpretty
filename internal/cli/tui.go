@@ -68,9 +68,18 @@ const (
 	screenUnavailable screenOutcome = iota
 	// screenConfirmed means y/Y accepted the transaction.
 	screenConfirmed
-	// screenExited means the caller must return immediately (refusal, signal).
+	// screenRefused means the user declined; the caller decides the exit code
+	// (1 for the primary transaction, "primary result stands" for #64's
+	// implicit orphan transaction).
+	screenRefused
+	// screenExited means a signal or an unrecoverable render failure; the
+	// caller returns the supplied code.
 	screenExited
 )
+
+// screenPanic is a test-only seam: the production binary never sets it. It
+// lets the CLI loop exercise its panic restore path directly.
+var screenPanic = func() bool { return false }
 
 // maybeRunSummaryScreen opens S1 when every gate and the entry floor pass. It
 // returns the outcome; the caller keeps the text path when it is unavailable.
@@ -120,8 +129,14 @@ func (st *state) runSummaryScreen(out *os.File, model *tui.SummaryModel) (screen
 	}
 	w, h := scr.Size()
 	if err := draw(w, h); err != nil {
+		// Restore before warning: on the alternate screen the line would be
+		// wiped when the guard leaves it.
+		scr.Close()
 		fmt.Fprintf(st.stderr, "xbpretty: full-screen interface failed (%v); showing the text summary\n", err)
 		return screenUnavailable, -1
+	}
+	if screenPanic() {
+		panic("injected full-screen panic")
 	}
 
 	for {
@@ -130,7 +145,9 @@ func (st *state) runSummaryScreen(out *os.File, model *tui.SummaryModel) (screen
 		case tui.EventResize:
 			if err := draw(ev.Width, ev.Height); err != nil {
 				// FR-067: a failed render warns once and lets the text path
-				// finish the transaction with its own exit code.
+				// finish the transaction with its own exit code. Restore
+				// first so the warning is visible.
+				scr.Close()
 				fmt.Fprintf(st.stderr, "xbpretty: full-screen interface failed (%v); showing the text summary\n", err)
 				return screenUnavailable, -1
 			}
@@ -142,8 +159,7 @@ func (st *state) runSummaryScreen(out *os.File, model *tui.SummaryModel) (screen
 			return screenExited, exitRuntime
 		case tui.EventEOF:
 			scr.Close()
-			st.refuseScreen()
-			return screenExited, exitRuntime
+			return screenRefused, -1
 		case tui.EventKey:
 			switch {
 			case ev.Key.Type == term.KeyRune && (ev.Key.Rune == 'y' || ev.Key.Rune == 'Y'):
@@ -154,15 +170,10 @@ func (st *state) runSummaryScreen(out *os.File, model *tui.SummaryModel) (screen
 			case ev.Key.Type == term.KeyRune && strings.ContainsRune("qQnN", ev.Key.Rune),
 				ev.Key.Type == term.KeyEsc, ev.Key.Type == term.KeyCtrlC:
 				scr.Close()
-				st.refuseScreen()
-				return screenExited, exitRuntime
+				return screenRefused, -1
 			}
 		}
 	}
-}
-
-func (st *state) refuseScreen() {
-	fmt.Fprintln(st.stderr, "xbpretty: user refused confirmation")
 }
 
 // planToTui converts the grouping and lookups the text summary already needs
@@ -189,15 +200,15 @@ func tuiModelFromSummary(sum *summary.Summary, command string, unit summary.Size
 		model.Tabs = append(model.Tabs, tab)
 	}
 	if sum.Download > 0 {
-		model.Download = summary.WidgetSize(sum.Download)
+		model.Download = summary.WidgetUnit(sum.Download, unit)
 	}
 	delta := sum.NetDiskBytes()
 	if delta >= 0 {
 		model.DiskLabel = "Disk space required:"
-		model.Disk = summary.WidgetSize(uint64(delta))
+		model.Disk = summary.WidgetUnit(uint64(delta), unit)
 	} else {
 		model.DiskLabel = "Disk space to free:"
-		model.Disk = summary.WidgetSize(uint64(-delta))
+		model.Disk = summary.WidgetUnit(uint64(-delta), unit)
 	}
 	return model
 }

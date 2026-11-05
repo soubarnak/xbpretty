@@ -171,6 +171,74 @@ func TestGuardRestoresAfterPanic(t *testing.T) {
 	}
 }
 
+// TestEnterInlineKeepsISIGAndOPOST is FR-072's cbreak shape for the inline
+// viewport (#79): no canonical/echo/IEXTEN, but ISIG and OPOST stay on.
+func TestEnterInlineKeepsISIGAndOPOST(t *testing.T) {
+	_, slave := openPty(t)
+	before, err := GetState(slave)
+	if err != nil {
+		t.Fatalf("GetState: %v", err)
+	}
+	g := NewGuard(slave, slave)
+	if err := g.EnterInline(); err != nil {
+		t.Fatalf("EnterInline: %v", err)
+	}
+	during, err := GetState(slave)
+	if err != nil {
+		t.Fatalf("GetState during: %v", err)
+	}
+	if during.t.Lflag&syscall.ISIG == 0 {
+		t.Error("cbreak turned ISIG off")
+	}
+	if during.t.Oflag&syscall.OPOST == 0 {
+		t.Error("cbreak turned OPOST off")
+	}
+	if during.t.Lflag&(syscall.ICANON|syscall.ECHO|syscall.IEXTEN) != 0 {
+		t.Errorf("cbreak Lflag = %#x, want ICANON/ECHO/IEXTEN off", during.t.Lflag)
+	}
+	g.Restore()
+	after, _ := GetState(slave)
+	if !after.Equal(before) {
+		t.Error("cbreak restore did not return the original flags")
+	}
+}
+
+// TestWaitReadableRejectsHighFD guards the syscall.FdSet capacity.
+func TestWaitReadableRejectsHighFD(t *testing.T) {
+	if _, err := waitReadable(1<<20, 1); err == nil {
+		t.Fatal("waitReadable accepted an fd outside FdSet")
+	}
+}
+
+// TestRestoreIsBestEffortAfterAWriteFailure proves a failed entry (or a broken
+// output) does not suppress the restore sequences: Restore still attempts them
+// and always restores the termios, even with the dead flag set.
+func TestRestoreIsBestEffortAfterAWriteFailure(t *testing.T) {
+	_, slave := openPty(t)
+	before, err := GetState(slave)
+	if err != nil {
+		t.Fatalf("GetState: %v", err)
+	}
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = pr.Close()
+	g := NewGuard(slave, pw)
+	if err := g.EnterFullscreen(false); err == nil {
+		t.Fatal("EnterFullscreen succeeded with a broken output")
+	}
+	g.Restore()
+	after, err := GetState(slave)
+	if err != nil {
+		t.Fatalf("GetState after: %v", err)
+	}
+	if !after.Equal(before) {
+		t.Errorf("restore after write failure did not restore the termios")
+	}
+	pw.Close()
+}
+
 // TestGuardRestoresOnSecondCall proves Restore is idempotent; a signal path
 // and a deferred path may both call it.
 func TestGuardRestoresOnSecondCall(t *testing.T) {

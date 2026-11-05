@@ -4,7 +4,6 @@ import (
 	"os"
 	"os/signal"
 	"sync"
-	"syscall"
 
 	"github.com/soubarnak/xbpretty/internal/term"
 )
@@ -45,16 +44,13 @@ type Screen struct {
 	prev *Buffer
 	w, h int
 
+	wg        sync.WaitGroup
 	closeOnce sync.Once
 }
 
 // Open enters raw mode and the alternate screen. The caller must Close it on
 // every path; Run additionally restores on panic.
 func Open(in, out *os.File, color bool, mouse bool) (*Screen, error) {
-	guard := term.NewGuard(in, out)
-	if err := guard.EnterFullscreen(mouse); err != nil {
-		return nil, err
-	}
 	w, h, err := term.Size(out)
 	if err != nil {
 		w, h = 80, 24
@@ -63,14 +59,23 @@ func Open(in, out *os.File, color bool, mouse bool) (*Screen, error) {
 		In:    in,
 		Out:   out,
 		Color: color,
-		guard: guard,
 		sigs:  make(chan os.Signal, 4),
 		done:  make(chan struct{}),
 		event: make(chan Event, 16),
 		w:     w,
 		h:     h,
 	}
-	signal.Notify(s.sigs, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	// Register the signal handlers before raw mode/alternate screen: a
+	// SIGTERM in the gap must unwind through the guard, not kill the process
+	// with the terminal still raw.
+	signal.Notify(s.sigs, eventSignals...)
+	guard := term.NewGuard(in, out)
+	if err := guard.EnterFullscreen(mouse); err != nil {
+		signal.Stop(s.sigs)
+		return nil, err
+	}
+	s.guard = guard
+	s.wg.Add(2)
 	go s.watchSignals()
 	go s.readKeys()
 	return s, nil
@@ -121,12 +126,17 @@ func (s *Screen) Run(loop func(*Screen) error) (err error) {
 	return loop(s)
 }
 
-// Close restores the terminal exactly once.
+// Close stops the signal watcher and the input decoder, waits for both, and
+// only then restores the terminal. The wait is what guarantees a closed screen
+// can no longer consume stdin ahead of the next surface or the xbps child.
 func (s *Screen) Close() {
 	s.closeOnce.Do(func() {
 		signal.Stop(s.sigs)
 		close(s.done)
-		s.guard.Restore()
+		s.wg.Wait()
+		if s.guard != nil {
+			s.guard.Restore()
+		}
 	})
 }
 
@@ -143,12 +153,13 @@ func (s *Screen) send(ev Event) bool {
 }
 
 func (s *Screen) watchSignals() {
+	defer s.wg.Done()
 	for {
 		select {
 		case <-s.done:
 			return
 		case sig := <-s.sigs:
-			if sig == syscall.SIGWINCH {
+			if isResizeSignal(sig) {
 				w, h, err := term.Size(s.Out)
 				if err != nil {
 					continue
@@ -170,7 +181,8 @@ func (s *Screen) watchSignals() {
 }
 
 func (s *Screen) readKeys() {
-	dec := term.NewDecoder(s.In)
+	defer s.wg.Done()
+	dec := term.NewDecoderWithCancel(s.In, s.done)
 	for {
 		key, err := dec.ReadKey()
 		if err != nil {

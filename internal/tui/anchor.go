@@ -18,13 +18,17 @@ const DefaultAnchorTimeout = 100 * time.Millisecond
 type Anchor struct {
 	Row, Col int
 	OK       bool
+	// Stray holds bytes read while looking for the DSR reply (keys typed
+	// during the timeout window). The caller must replay them into the input
+	// decoder instead of dropping user input.
+	Stray []byte
 }
 
 // LocateAnchor sends the DSR query and waits up to timeout. A timeout is a
 // normal outcome for test harnesses, multiplexers and dumb terminals.
 func LocateAnchor(in, out *os.File, timeout time.Duration) Anchor {
 	res := term.QueryCursor(in, out, timeout)
-	return Anchor{Row: res.Row, Col: res.Col, OK: res.OK}
+	return Anchor{Row: res.Row, Col: res.Col, OK: res.OK, Stray: append([]byte(nil), res.Stray...)}
 }
 
 // BeginSequence is what an inline surface writes before its first draw. With

@@ -30,9 +30,11 @@ type Guard struct {
 func NewGuard(in, out *os.File) *Guard { return &Guard{In: in, Out: out} }
 
 func (g *Guard) write(s string) {
-	if g.dead || g.Out == nil {
+	if g.Out == nil {
 		return
 	}
+	// Never short-circuit on a previous failure: a restore is best-effort and
+	// must attempt every sequence even after an earlier write errored.
 	if _, err := g.Out.WriteString(s); err != nil {
 		g.dead = true
 	}
@@ -190,7 +192,7 @@ func QueryCursor(in, out *os.File, timeout time.Duration) DSRResult {
 			return res
 		}
 		var chunk [256]byte
-		n, readErr := readFD(in.Fd(), chunk[:])
+		n, readErr := readFD(in, chunk[:])
 		if n <= 0 {
 			res.TimedOut = true
 			res.Stray = buf
@@ -198,9 +200,12 @@ func QueryCursor(in, out *os.File, timeout time.Duration) DSRResult {
 			return res
 		}
 		buf = append(buf, chunk[:n]...)
-		if row, col, consumed, ok := ParseDSR(buf); ok {
+		if row, col, start, end, ok := parseDSRLocated(buf); ok {
 			res.Row, res.Col, res.OK = row, col, true
-			res.Stray = append([]byte(nil), buf[consumed:]...)
+			// Preserve every non-reply byte: keys typed before the reply and
+			// anything trailing it must reach the decoder, not be dropped.
+			res.Stray = append([]byte(nil), buf[:start]...)
+			res.Stray = append(res.Stray, buf[end:]...)
 			return res
 		}
 		if len(buf) > 64 {
@@ -211,13 +216,18 @@ func QueryCursor(in, out *os.File, timeout time.Duration) DSRResult {
 	}
 }
 
-// ParseDSR finds ESC[row;colR in b and returns the consumed length. Bytes
-// before the reply are returned in Stray, never discarded.
+// ParseDSR finds ESC[row;colR in b and returns the consumed length. Callers
+// that read the stream themselves must preserve the prefix too.
 func ParseDSR(b []byte) (row, col, consumed int, ok bool) {
-	return parseDSR(b)
+	row, col, _, consumed, ok = parseDSRLocated(b)
+	return row, col, consumed, ok
 }
 
-func parseDSR(b []byte) (row, col, consumed int, ok bool) {
+func parseDSR(b []byte) (row, col, consumed int, ok bool) { return ParseDSR(b) }
+
+// parseDSRLocated is ParseDSR plus the reply's start index, so the caller can
+// keep both the prefix and the suffix as stray bytes.
+func parseDSRLocated(b []byte) (row, col, start, end int, ok bool) {
 	for i := 0; i < len(b); i++ {
 		if b[i] != 0x1b || i+1 >= len(b) || b[i+1] != '[' {
 			continue
@@ -242,7 +252,7 @@ func parseDSR(b []byte) (row, col, consumed int, ok bool) {
 		if !seen || j >= len(b) || b[j] != 'R' {
 			continue
 		}
-		return r, c, j + 1, true
+		return r, c, i, j + 1, true
 	}
-	return 0, 0, 0, false
+	return 0, 0, 0, 0, false
 }

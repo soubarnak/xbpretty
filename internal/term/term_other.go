@@ -40,10 +40,6 @@ type Winsize struct {
 
 func waitReadable(fd uintptr, timeoutMS int) (bool, error) { return false, errUnsupported }
 
-func readFD(fd uintptr, buf []byte) (int, error) {
-	f := os.NewFile(fd, "term-input")
-	if f == nil {
-		return 0, errUnsupported
-	}
-	return f.Read(buf)
-}
+func readFD(f *os.File, buf []byte) (int, error) { return f.Read(buf) }
+
+func isRetryableRead(err error) bool { return false }

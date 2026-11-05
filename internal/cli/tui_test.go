@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/soubarnak/xbpretty/internal/config"
@@ -47,6 +48,30 @@ func TestSummaryScreenGateMatrix(t *testing.T) {
 		if summaryScreenAllowed(g) {
 			t.Errorf("%s opened S1", c.name)
 		}
+	}
+}
+
+// TestTuiFooterUsesTheConfiguredUnit proves the S1 footer honours [Ui] unit;
+// the ADR golden is the Binary rendering of the same totals.
+func TestTuiFooterUsesTheConfiguredUnit(t *testing.T) {
+	sum := &summary.Summary{
+		Command: "upgrade",
+		Upgrade: []summary.Row{
+			{Name: "libfoo", Version: "1.3_1", Action: "update", InstalledSize: 2 * 1024 * 1024, HasInstalled: true, DownloadSize: 1024 * 1024, HasDownload: true},
+		},
+		Download: 2 * 1024 * 1024,
+		AddBytes: 4 * 1024 * 1024,
+	}
+	model := tuiModelFromSummary(sum, "upgrade", summary.SizeDecimal)
+	if !strings.Contains(model.Download, "MB") || strings.Contains(model.Download, "MiB") {
+		t.Errorf("Decimal footer download = %q, want MB units", model.Download)
+	}
+	if !strings.Contains(model.Disk, "MB") || strings.Contains(model.Disk, "MiB") {
+		t.Errorf("Decimal footer disk = %q, want MB units", model.Disk)
+	}
+	binary := tuiModelFromSummary(sum, "upgrade", summary.SizeBinary)
+	if !strings.Contains(binary.Download, "MiB") {
+		t.Errorf("Binary footer download = %q, want MiB units", binary.Download)
 	}
 }
 

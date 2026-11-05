@@ -230,11 +230,13 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	// full-screen summary. A refusal or a signal ends the run here; an
 	// unavailable screen leaves the normal text path untouched.
 	confirmedByScreen := false
-	if outcome, code := st.maybeRunSummaryScreen(opts, summaryCmd, rows); outcome != screenUnavailable {
-		if outcome == screenExited {
-			return code
-		}
+	switch outcome, code := st.maybeRunSummaryScreen(opts, summaryCmd, rows); outcome {
+	case screenConfirmed:
 		confirmedByScreen = true
+	case screenRefused:
+		return st.refuse()
+	case screenExited:
+		return code
 	}
 	if !confirmedByScreen {
 		if code := st.renderSummary(summaryCmd, rows); code >= 0 {
@@ -626,11 +628,13 @@ func (st *state) planImplicitAutoremove(cmd string, opts *options) ([]xbps.Row, 
 func (st *state) runOrphanOnly(cmd string, opts *options, rows []xbps.Row) int {
 	summaryCmd := orphanCommand(cmd, opts)
 	confirmedByScreen := false
-	if outcome, code := st.maybeRunSummaryScreen(opts, summaryCmd, rows); outcome != screenUnavailable {
-		if outcome == screenExited {
-			return code
-		}
+	switch outcome, code := st.maybeRunSummaryScreen(opts, summaryCmd, rows); outcome {
+	case screenConfirmed:
 		confirmedByScreen = true
+	case screenRefused:
+		return st.refuse()
+	case screenExited:
+		return code
 	}
 	if !confirmedByScreen {
 		if code := st.renderSummary(summaryCmd, rows); code >= 0 {
@@ -682,11 +686,15 @@ func (st *state) runImplicitAutoremoveAfterSuccess(cmd string, opts *options) in
 	}
 	summaryCmd := orphanCommand(cmd, opts)
 	confirmedByScreen := false
-	if outcome, code := st.maybeRunSummaryScreen(opts, summaryCmd, rows); outcome != screenUnavailable {
-		if outcome == screenExited {
-			return code
-		}
+	switch outcome, code := st.maybeRunSummaryScreen(opts, summaryCmd, rows); outcome {
+	case screenConfirmed:
 		confirmedByScreen = true
+	case screenRefused:
+		// FR-016: declining the implicit transaction leaves the primary
+		// result untouched, including its success exit code.
+		return -1
+	case screenExited:
+		return code
 	}
 	if !confirmedByScreen {
 		if code := st.renderSummary(summaryCmd, rows); code >= 0 {

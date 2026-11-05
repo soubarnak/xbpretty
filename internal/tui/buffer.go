@@ -254,7 +254,10 @@ func (b *Buffer) Flush(prev *Buffer, color bool) []byte {
 }
 
 func sgr(s Style) string {
-	var params []string
+	// Always emit a full state: reset first, then every attribute. Without
+	// the reset a default-fg Highlight (e.g. the title) would inherit the
+	// previous cell's bright-green foreground.
+	params := []string{"0"}
 	for _, m := range []struct {
 		bit term.Mods
 		n   string
@@ -268,9 +271,6 @@ func sgr(s Style) string {
 	}
 	params = append(params, colorParams(s.FG, true)...)
 	params = append(params, colorParams(s.BG, false)...)
-	if len(params) == 0 {
-		return "\x1b[0m"
-	}
 	return "\x1b[" + join(params, ";") + "m"
 }
 

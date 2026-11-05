@@ -65,7 +65,7 @@ func TestNoColorRemovesOnlySGR(t *testing.T) {
 		}
 	}
 	colored := string(buf.Flush(nil, true))
-	if !strings.Contains(colored, "\x1b[1;92m") {
+	if !strings.Contains(colored, "\x1b[0;1;92m") {
 		t.Errorf("coloured frame is missing the Primary SGR: %q", colored[:min(len(colored), 120)])
 	}
 }
