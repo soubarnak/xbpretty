@@ -696,3 +696,28 @@ func TestFetchReusedArchiveFetchesMissingSignature(t *testing.T) {
 		t.Errorf("signature = %q", got)
 	}
 }
+
+// TestFetchStopsAfterTenRedirects pins FR-038's redirect budget: a redirect
+// loop is final, not retried four times.
+func TestFetchStopsAfterTenRedirects(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, r.URL.Path, http.StatusFound)
+	}))
+	defer srv.Close()
+	target := targetFor(t, srv.URL+"/current", []byte("archive"), sha256Hex([]byte("archive")))
+	var attempts atomic.Int32
+	engine := New(Options{
+		DestDir: t.TempDir(),
+		Mode:    ModeDownload,
+		Log: func(format string, args ...any) {
+			attempts.Add(1)
+		},
+	})
+	results := engine.Fetch(context.Background(), []Target{target})
+	if results[0].Err == nil || !strings.Contains(results[0].Err.Error(), "stopped after 10 redirects") {
+		t.Fatalf("redirect loop error = %v", results[0].Err)
+	}
+	if attempts.Load() != 1 {
+		t.Errorf("attempts = %d, want 1 (a redirect budget is not retried)", attempts.Load())
+	}
+}
