@@ -216,7 +216,7 @@ func TestUsageIsGeneratedAndHidesMoo(t *testing.T) {
 			t.Errorf("usage does not list %q", cmd.Name)
 		}
 	}
-	if strings.Contains(text, "\n  moo") {
+	if strings.Contains(text, "moo") {
 		t.Error("usage advertises the hidden moo command")
 	}
 	for _, want := range []string{"--help", "--version", "--color", "--config", "--tui", "--no-tui"} {

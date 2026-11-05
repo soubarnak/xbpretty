@@ -422,6 +422,9 @@ func TestRev6CompletionSurface(t *testing.T) {
 					t.Errorf("%s script offers the N/A flag %q", shell, banned)
 				}
 			}
+			if strings.Contains(script, "moo") {
+				t.Errorf("%s script advertises the hidden moo command", shell)
+			}
 		})
 	}
 }

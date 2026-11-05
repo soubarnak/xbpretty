@@ -295,7 +295,7 @@ func applyOccurrences(o *options, occurrences []occurrence) error {
 // V and n change meaning with the command, exactly as FR-004 and FR-027 say.
 func resolveOccurrence(command string, occ occurrence) (spec.Flag, error) {
 	if occ.flag.Long != "" {
-		if !spec.Accepts(command, occ.flag.Long) {
+		if !spec.Accepts(command, occ.flag.Long) && !mooAccepts(command, occ.flag.Long) {
 			if occ.flag.Long == "country" && command != "fetch" {
 				return spec.Flag{}, &usageError{
 					msg:  "unknown flag --country",
@@ -342,6 +342,12 @@ func resolveOccurrence(command string, occ occurrence) (spec.Flag, error) {
 		}
 	}
 	return spec.Flag{}, fmt.Errorf("unknown flag -%c", c)
+}
+
+// mooAccepts keeps the hidden moo easter egg's two joke flags out of the
+// shared table's advertised command lists.
+func mooAccepts(command, long string) bool {
+	return command == "moo" && (long == "update" || long == "no-update")
 }
 
 // applyFlag folds one validated flag into options.

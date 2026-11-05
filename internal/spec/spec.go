@@ -112,7 +112,7 @@ var Commands = []Command{
 	{Name: "link", Summary: "create the six xbp symlinks in a directory", UsageArgs: "[DIR]", Args: OptionalArgs, Group: GroupTooling},
 	{Name: "log", Summary: "print the transaction log", UsageArgs: "[PKG...]", Args: OptionalArgs, Group: GroupTooling,
 		Flags: []string{"limit"}},
-	{Name: "moo", Summary: "moo.", Hidden: true, Group: GroupTooling, Flags: []string{"update", "no-update"}},
+	{Name: "moo", Summary: "moo.", Hidden: true, Group: GroupTooling},
 }
 
 func commandFlags(name string) []string {
@@ -155,8 +155,8 @@ var Flags = []Flag{
 	{Long: "assume-no", Short: 'n', Kind: BoolFlag, Summary: "refuse at the prompt", Commands: transactionNames()},
 	{Long: "download-only", Short: 'd', Kind: BoolFlag, Summary: "download the plan's archives and stop", Commands: transactionNames()},
 	{Long: "simple", Kind: BoolFlag, Summary: "print the simple summary", Commands: transactionNames()},
-	{Long: "update", Kind: BoolFlag, Summary: "refresh the repository index first", Commands: append(transactionNames(), "moo")},
-	{Long: "no-update", Kind: BoolFlag, Summary: "do not refresh the repository index", Commands: append(transactionNames(), "moo")},
+	{Long: "update", Kind: BoolFlag, Summary: "refresh the repository index first", Commands: transactionNames()},
+	{Long: "no-update", Kind: BoolFlag, Summary: "do not refresh the repository index", Commands: transactionNames()},
 	{Long: "no-sync", Kind: BoolFlag, Summary: "do not refresh the repository index", Commands: transactionNames()},
 	{Long: "purge", Kind: BoolFlag, Summary: "also remove configuration files", Commands: transactionNames()},
 	{Long: "reinstall", Kind: BoolFlag, Summary: "reinstall packages that are already installed", Commands: transactionNames()},
