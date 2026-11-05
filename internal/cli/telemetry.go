@@ -318,6 +318,7 @@ type StreamParser struct {
 	OnDownloadComplete func(comp DownloadComplete)
 	OnPhaseChange      func(phase string)
 	OnPackageEvent     func(event PackageEvent)
+	OnRepoUpdate       func(url string)
 	OnSummary          func(sum TransactionSummary)
 }
 
@@ -402,6 +403,20 @@ func (p *StreamParser) FeedStderr(line string) {
 // FeedStdout parses one line from child stdout.
 func (p *StreamParser) FeedStdout(line string) {
 	p.mu.Lock()
+
+	if m := repoSyncRegex.FindStringSubmatch(cleanLine(line)); len(m) >= 2 {
+		p.state.Phase = "RepoSync"
+		phaseCB := p.OnPhaseChange
+		repoCB := p.OnRepoUpdate
+		p.mu.Unlock()
+		if phaseCB != nil {
+			phaseCB("RepoSync")
+		}
+		if repoCB != nil {
+			repoCB(m[1])
+		}
+		return
+	}
 
 	if phase, ok := ParsePhaseHeader(line); ok {
 		p.state.Phase = phase

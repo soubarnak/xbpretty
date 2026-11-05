@@ -3,521 +3,626 @@ package cli
 import (
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/soubarnak/xbpretty/internal/summary"
+	"github.com/soubarnak/xbpretty/internal/fetch"
 	"github.com/soubarnak/xbpretty/internal/xbps"
 )
 
+// plainLineWidth is FR-065's fixed 40-cell bar.
+const plainLineWidth = 40
+
+// flushInterval is FR-041/FR-064's coalescing window: live redraws happen at
+// most once per 150 ms, with an immediate redraw for completion, cache-hit,
+// failure and phase-change events.
+const flushInterval = 150 * time.Millisecond
+
+// progressModel turns the xbps telemetry callbacks into the five fixed views.
+// It is the only place the spec's formulas live.
+type progressModel struct {
+	op    string
+	start time.Time
+	now   func() time.Time
+
+	// Download state. Archives are keyed by package name, the same key
+	// packageNameFromFilename produces for a tick or completion.
+	archives       map[string]uint64
+	totalArchives  int
+	totalBytes     uint64
+	completed      map[string]bool
+	completedBytes uint64
+	completedCount int
+	lastCompleted  string
+	inFlight       map[string]uint64
+
+	// Install state: U = 2·A units, unpack and configure each count once.
+	installTotal int
+	unpacked     map[string]bool
+	configured   map[string]bool
+	removed      map[string]bool
+	removeTotal  int
+	currentPkg   string
+	status       string
+
+	// Update and MirrorScore state.
+	reposDone, reposTotal int
+	repoURL               string
+	mirrorDone            int
+	mirrorTotal           int
+	mirrorURL             string
+	mirrorElapsed         time.Duration
+
+	kind      progressKind
+	verifying bool
+}
+
+// newProgressModel seeds the download counters from the exact plan bytes
+// (never the humanised tick sizes) and chooses the first view for cmd.
+func newProgressModel(op string, rows []xbps.Row, now func() time.Time) *progressModel {
+	if now == nil {
+		now = time.Now
+	}
+	m := &progressModel{
+		op:         op,
+		start:      now(),
+		now:        now,
+		archives:   map[string]uint64{},
+		completed:  map[string]bool{},
+		inFlight:   map[string]uint64{},
+		unpacked:   map[string]bool{},
+		configured: map[string]bool{},
+		removed:    map[string]bool{},
+	}
+	switch op {
+	case "remove", "purge", "autoremove", "autopurge":
+		m.kind = viewRemove
+	case "update":
+		m.kind = viewUpdate
+	}
+	for _, row := range rows {
+		switch row.Action {
+		case xbps.ActionRemove:
+			m.removeTotal++
+		case xbps.ActionInstall, xbps.ActionUpdate, xbps.ActionReinstall, xbps.ActionConfigure:
+			m.installTotal++
+			if row.Action == xbps.ActionConfigure {
+				continue
+			}
+			key := row.Pkgver()
+			if _, seen := m.archives[key]; !seen {
+				m.archives[key] = row.DownloadSize
+				m.totalBytes += row.DownloadSize
+				m.totalArchives++
+			}
+		}
+	}
+	if m.kind != viewRemove && m.kind != viewUpdate {
+		if m.totalArchives > 0 {
+			m.kind = viewDownload
+		} else {
+			m.kind = viewInstall
+		}
+	}
+	return m
+}
+
+// elapsed is the wall clock since the model started. Tests replace now.
+func (m *progressModel) elapsed() time.Duration {
+	return m.now().Sub(m.start)
+}
+
+func (m *progressModel) elapsedSeconds() float64 {
+	return m.elapsed().Seconds()
+}
+
+// position is the sum of completed exact plan bytes and the in-flight
+// archive's plan bytes times its own percent, clamped to total.
+func (m *progressModel) position() uint64 {
+	position := m.completedBytes
+	for _, bytes := range m.inFlight {
+		position += bytes
+	}
+	if m.totalBytes > 0 && position > m.totalBytes {
+		position = m.totalBytes
+	}
+	return position
+}
+
+func (m *progressModel) downloadSpeed() uint64 {
+	return ceilRate(m.position(), m.elapsedSeconds())
+}
+
+// DownloadTick applies one live tick. A .sig2 signature file never moves the
+// Packages, Data, Speed or Remaining counters.
+func (m *progressModel) downloadTick(tick DownloadTick) {
+	if strings.HasSuffix(tick.Filename, ".sig2") {
+		return
+	}
+	name := packageNameFromFilename(tick.Filename)
+	size, ok := m.archives[name]
+	if !ok || m.completed[name] {
+		return
+	}
+	m.inFlight[name] = uint64(float64(size) * float64(tick.FilePercent) / 100.0)
+}
+
+// downloadDone applies one archive completion. Completion lines are the cache
+// hit too: an archive that finished without a tick still counts its exact plan
+// bytes.
+func (m *progressModel) downloadDone(done DownloadComplete) {
+	if strings.HasSuffix(done.Filename, ".sig2") {
+		return
+	}
+	name := packageNameFromFilename(done.Filename)
+	if m.completed[name] {
+		return
+	}
+	size, ok := m.archives[name]
+	if !ok {
+		return
+	}
+	m.completed[name] = true
+	m.completedBytes += size
+	m.completedCount++
+	m.lastCompleted = done.Filename
+	delete(m.inFlight, name)
+}
+
+// phase applies an xbps phase header. Verification snaps the Download view to
+// 100% for exactly one rendered frame; the following phase switches views.
+func (m *progressModel) phase(phase string) {
+	switch phase {
+	case "Verifying":
+		if m.kind == viewDownload {
+			m.verifying = true
+		}
+	case "Unpacking", "Configuring", "Collecting":
+		if m.kind == viewDownload {
+			if m.removeTotal > 0 {
+				m.kind = viewRemove
+			} else if m.installTotal > 0 {
+				m.kind = viewInstall
+			}
+		}
+	}
+}
+
+func (m *progressModel) packageEvent(event PackageEvent) {
+	switch event.Action {
+	case "unpacking", "updating":
+		m.kind = viewInstall
+		m.currentPkg = event.Package
+		m.status = "Unpacking"
+		m.unpacked[event.Package] = true
+	case "configuring":
+		m.kind = viewInstall
+		m.currentPkg = event.Package
+		m.status = "Configuring"
+		m.configured[event.Package] = true
+	case "removing":
+		m.kind = viewRemove
+		m.currentPkg = event.Package
+		m.status = "Removing"
+	case "removed":
+		m.kind = viewRemove
+		m.removed[event.Package] = true
+	}
+}
+
+// repository records one `[*] Updating repository '<url>' ...` line. xbps
+// does not announce the repository count first, so the total grows as the
+// lines arrive (and can be seeded from the xbps.d scan by the caller).
+func (m *progressModel) repository(url string) {
+	m.reposDone++
+	m.repoURL = url
+	if m.reposTotal < m.reposDone {
+		m.reposTotal = m.reposDone
+	}
+}
+
+func (m *progressModel) setRepositoryTotal(total int) {
+	if total > m.reposTotal {
+		m.reposTotal = total
+	}
+}
+
+func (m *progressModel) mirrorEvent(finished string, done, total int, elapsed time.Duration) {
+	m.kind = viewMirrorScore
+	m.mirrorDone = done
+	m.mirrorTotal = total
+	if finished != "" {
+		m.mirrorURL = finished
+	}
+	m.mirrorElapsed = elapsed
+}
+
+// ratio is the fraction each view draws. Install is the two-unit model:
+// (unpacked + configured) / (2·A).
+func (m *progressModel) ratio() float64 {
+	switch m.kind {
+	case viewDownload:
+		if m.totalBytes == 0 {
+			return 0
+		}
+		return float64(m.position()) / float64(m.totalBytes)
+	case viewInstall:
+		if m.installTotal == 0 {
+			return 0
+		}
+		return float64(len(m.unpacked)+len(m.configured)) / float64(2*m.installTotal)
+	case viewRemove:
+		if m.removeTotal == 0 {
+			return 0
+		}
+		return float64(len(m.removed)) / float64(m.removeTotal)
+	case viewUpdate:
+		if m.reposTotal == 0 {
+			return 0
+		}
+		return float64(m.reposDone) / float64(m.reposTotal)
+	case viewMirrorScore:
+		if m.mirrorTotal == 0 {
+			return 0
+		}
+		return float64(m.mirrorDone) / float64(m.mirrorTotal)
+	}
+	return 0
+}
+
+func (m *progressModel) elapsedText() string {
+	return widgetTime(ceilSeconds(m.elapsedSeconds()))
+}
+
+// view builds the renderable frame. It consumes the one verification frame:
+// the first call after a Verifying header draws the Download view at 100%,
+// and later calls draw the Install view.
+func (m *progressModel) view() progressView {
+	if m.verifying {
+		m.verifying = false
+		ratio := 1.0
+		m.kind = viewInstall
+		if m.removeTotal > 0 {
+			m.kind = viewRemove
+		}
+		return progressView{
+			kind:      viewDownload,
+			msgHeader: "Last completed",
+			msgText:   m.lastCompleted,
+			msgRole:   rolePrimary,
+			left:      []progressInfo{{"Packages", pairCount(m.totalArchives, m.totalArchives)}, {"Remaining", "0s"}},
+			right: []progressInfo{
+				{"Data", widgetSize(m.totalBytes) + "/" + widgetSize(m.totalBytes)},
+				{"Speed", widgetSize(m.downloadSpeed()) + "/s"},
+			},
+			ratio: ratio,
+		}
+	}
+	switch m.kind {
+	case viewDownload:
+		position := m.position()
+		rate := m.downloadSpeed()
+		remaining := "—"
+		if eta, ok := etaSeconds(position, m.totalBytes, rate); ok {
+			remaining = widgetTime(eta)
+		}
+		return progressView{
+			kind:      viewDownload,
+			msgHeader: "Last completed",
+			msgText:   m.lastCompleted,
+			msgRole:   rolePrimary,
+			left: []progressInfo{
+				{"Packages", pairCount(m.completedCount, m.totalArchives)},
+				{"Remaining", remaining},
+			},
+			right: []progressInfo{
+				{"Data", widgetSize(position) + "/" + widgetSize(m.totalBytes)},
+				{"Speed", widgetSize(rate) + "/s"},
+			},
+			ratio: m.ratio(),
+		}
+	case viewInstall:
+		return progressView{
+			kind:      viewInstall,
+			msgHeader: "Status",
+			msgText:   strings.TrimSpace(m.status + " " + m.currentPkg),
+			msgRole:   rolePrimary,
+			left:      []progressInfo{{"Package", m.currentPkg}},
+			right:     []progressInfo{{"Elapsed", m.elapsedText()}},
+			ratio:     m.ratio(),
+		}
+	case viewRemove:
+		text := strings.TrimSpace(m.status + " " + m.currentPkg)
+		return progressView{
+			kind:      viewRemove,
+			msgHeader: "Status",
+			msgText:   text,
+			msgRole:   rolePrimary,
+			left:      []progressInfo{{"Package", m.currentPkg}},
+			right:     []progressInfo{{"Elapsed", m.elapsedText()}},
+			ratio:     m.ratio(),
+		}
+	case viewUpdate:
+		return progressView{
+			kind:      viewUpdate,
+			msgHeader: "Updating",
+			msgText:   m.repoURL,
+			msgRole:   roleRegular,
+			left:      []progressInfo{{"Repositories", pairCount(m.reposDone, m.reposTotal)}},
+			right:     []progressInfo{{"Elapsed", m.elapsedText()}},
+			ratio:     m.ratio(),
+		}
+	case viewMirrorScore:
+		return progressView{
+			kind:      viewMirrorScore,
+			msgHeader: "Finished",
+			msgText:   m.mirrorURL,
+			msgRole:   rolePrimary,
+			left:      []progressInfo{{"Mirrors", pairCount(m.mirrorDone, m.mirrorTotal)}},
+			right:     []progressInfo{{"Elapsed", widgetTime(ceilSeconds(m.mirrorElapsed.Seconds()))}},
+			ratio:     m.ratio(),
+		}
+	}
+	return progressView{kind: m.kind, msgHeader: "Status", msgText: "Working...", msgRole: rolePrimary, ratio: m.ratio()}
+}
+
+// plainState is the 40-cell fallback's data. Its grammar is byte-for-byte
+// nala's PlainProgress line (FR-065).
+type plainState struct {
+	ratio       float64
+	message     string
+	hasTransfer bool
+	position    uint64
+	total       uint64
+	rate        uint64
+	hasItem     bool
+	item        string
+	hasItems    bool
+	itemsDone   int
+	itemsTotal  int
+	hasRepos    bool
+	reposDone   int
+	reposTotal  int
+	hasMirrors  bool
+	mirrorDone  int
+	mirrorTotal int
+}
+
+func (m *progressModel) plain() plainState {
+	state := plainState{ratio: m.ratio()}
+	switch m.kind {
+	case viewDownload:
+		state.message = "Working..."
+		if m.lastCompleted != "" {
+			state.message = "Last completed: " + m.lastCompleted
+		}
+		position := m.position()
+		rate := m.downloadSpeed()
+		state.hasTransfer = true
+		state.position = position
+		state.total = m.totalBytes
+		state.rate = rate
+		state.hasItems = true
+		state.itemsDone = m.completedCount
+		state.itemsTotal = m.totalArchives
+	case viewInstall:
+		state.message = strings.TrimSpace(m.status + " " + m.currentPkg)
+		if state.message == "" {
+			state.message = "Working..."
+		}
+		state.hasItem = true
+		state.item = m.currentPkg
+	case viewRemove:
+		state.message = strings.TrimSpace(m.status + " " + m.currentPkg)
+		if state.message == "" {
+			state.message = "Working..."
+		}
+		state.hasItem = true
+		state.item = m.currentPkg
+	case viewUpdate:
+		state.message = "Updating: " + m.repoURL
+		state.hasRepos = true
+		state.reposDone = m.reposDone
+		state.reposTotal = m.reposTotal
+	case viewMirrorScore:
+		state.message = "Finished: " + m.mirrorURL
+		state.hasMirrors = true
+		state.mirrorDone = m.mirrorDone
+		state.mirrorTotal = m.mirrorTotal
+	}
+	if state.message == "" {
+		state.message = "Working..."
+	}
+	return state
+}
+
+// renderPlainLine reproduces nala's PlainProgress grammar: a 40-cell bar of
+// `=`, the truncated `%3d` percent, the message, then the view's filters.
+func renderPlainLine(state plainState) string {
+	filled := widgetFill(plainLineWidth, state.ratio)
+	var b strings.Builder
+	b.WriteByte('[')
+	b.WriteString(strings.Repeat("=", filled))
+	b.WriteString(strings.Repeat(" ", plainLineWidth-filled))
+	b.WriteString("] ")
+	b.WriteString(fmt.Sprintf("%3d", widgetPercent(state.ratio)))
+	b.WriteString("% ")
+	b.WriteString(state.message)
+	if state.hasTransfer {
+		b.WriteString(" " + widgetSize(state.position) + "/" + widgetSize(state.total))
+		b.WriteString(" " + widgetSize(state.rate) + "/s")
+	}
+	if state.hasItem {
+		b.WriteString(" | Package: " + state.item)
+	}
+	if state.hasItems {
+		b.WriteString(" | Packages: " + pairCount(state.itemsDone, state.itemsTotal))
+	}
+	if state.hasRepos {
+		b.WriteString(" | Repositories: " + pairCount(state.reposDone, state.reposTotal))
+	}
+	if state.hasMirrors {
+		b.WriteString(" | Mirrors: " + pairCount(state.mirrorDone, state.mirrorTotal))
+	}
+	return b.String()
+}
+
+// liveMode is the suppression matrix's outcome for one execution.
+type liveMode int
+
 const (
-	resetSeq    = "\x1b[0m"
-	boldSeq     = "\x1b[1m"
-	dimSeq      = "\x1b[2m"
-	redSeq      = "\x1b[1;31m"
-	greenSeq    = "\x1b[1;32m"
-	blueSeq     = "\x1b[1;34m"
-	cyanSeq     = "\x1b[1;36m"
-	redTrackSeq = "\x1b[31m"
+	liveOff liveMode = iota
+	liveWidgetMode
+	livePlainMode
 )
 
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+// liveProgress draws either the rounded widget or the 40-cell line, in place,
+// at most once per flushInterval unless an event forces a redraw.
+type liveProgress struct {
+	out    io.Writer
+	color  bool
+	mode   liveMode
+	width  int
+	model  *progressModel
+	mu     sync.Mutex
+	drawn  int
+	closed bool
 
-func progressBar(percent float64, width int, color bool, boxStyle string) string {
-	if width < 5 {
-		width = 20
-	}
-	filledCount := int(float64(width) * (percent / 100.0))
-	if filledCount > width {
-		filledCount = width
-	}
-	if filledCount < 0 {
-		filledCount = 0
-	}
-	unfilledCount := width - filledCount
-
-	var fillChar, emptyChar string
-	if boxStyle == "ascii" {
-		fillChar = "#"
-		emptyChar = "-"
-	} else {
-		fillChar = "━"
-		emptyChar = "─"
-	}
-
-	if !color {
-		return strings.Repeat(fillChar, filledCount) + strings.Repeat(emptyChar, unfilledCount)
-	}
-	// Cyan fill over red track (Nala signature)
-	return cyanSeq + strings.Repeat(fillChar, filledCount) + resetSeq +
-		redTrackSeq + strings.Repeat(emptyChar, unfilledCount) + resetSeq
+	lastDraw time.Time
+	timer    *time.Timer
+	now      func() time.Time
+	after    func(time.Duration, func()) *time.Timer
 }
 
-// ProgressWidget manages an in-place 5-line framed execution progress widget.
-type ProgressWidget struct {
-	mu sync.Mutex
-
-	out      io.Writer
-	boxStyle string
-	color    bool
-	width    int
-
-	// State
-	phase           string // "Downloading", "Unpacking", "Configuring", "Removing"
-	currentPackage  string
-	totalPackages   int
-	packageIndex    int
-	downloadedBytes int64
-	totalDownload   int64
-	downloadRate    string
-	timeRemaining   string
-	downloadPercent float64
-
-	// Action phase tracking
-	completedActions int
-	totalActions     int
-	activeAction     string
-
-	// Spinner
-	spinIdx    int
-	stopTicker chan struct{}
-	tickerDone chan struct{}
-
-	// Lifecycle
-	started      bool
-	renderedOnce bool
-	cleared      bool
-	startTime    time.Time
-	summary      *TransactionSummary
+// newLiveProgress constructs the renderer. Width is clamped by the renderer
+// through widgetWidth.
+func newLiveProgress(out io.Writer, color bool, width int, mode liveMode, model *progressModel) *liveProgress {
+	return &liveProgress{
+		out:   out,
+		color: color && mode == liveWidgetMode,
+		mode:  mode,
+		width: width,
+		model: model,
+		now:   time.Now,
+		after: time.AfterFunc,
+	}
 }
 
-// NewProgressWidget constructs a new ProgressWidget.
-func NewProgressWidget(out io.Writer, boxStyle string, color bool, width int, totalPackages int, totalDownloadBytes int64) *ProgressWidget {
-	if width <= 0 {
-		width = 80
-	}
-	totalActions := totalPackages * 2
-	if totalActions <= 0 {
-		totalActions = 1
-	}
-	w := &ProgressWidget{
-		out:           out,
-		boxStyle:      boxStyle,
-		color:         color,
-		width:         width,
-		totalPackages: totalPackages,
-		totalDownload: totalDownloadBytes,
-		totalActions:  totalActions,
-		timeRemaining: "-:--:--",
-		downloadRate:  "0.0 B/s",
-		startTime:     time.Now(),
-		stopTicker:    make(chan struct{}),
-		tickerDone:    make(chan struct{}),
-	}
-	if totalDownloadBytes > 0 {
-		w.phase = "Downloading"
-	} else {
-		w.phase = "Unpacking"
-	}
-	return w
-}
-
-// Start begins the background spinner ticker for live animation during unpack/configure.
-func (w *ProgressWidget) Start() {
-	w.mu.Lock()
-	if w.started {
-		w.mu.Unlock()
+// SetWidth applies a SIGWINCH width change; the next redraw uses it.
+func (l *liveProgress) SetWidth(columns int) {
+	if columns <= 0 {
 		return
 	}
-	w.started = true
-	w.renderLocked()
-	w.mu.Unlock()
-
-	go func() {
-		defer close(w.tickerDone)
-		ticker := time.NewTicker(80 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-w.stopTicker:
-				return
-			case <-ticker.C:
-				w.mu.Lock()
-				if !w.cleared && w.isActionPhase() {
-					w.spinIdx++
-					w.renderLocked()
-				}
-				w.mu.Unlock()
-			}
-		}
-	}()
+	l.mu.Lock()
+	l.width = columns
+	l.mu.Unlock()
 }
 
-// IsRendered reports whether the widget box has been rendered at least once.
-func (w *ProgressWidget) IsRendered() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.renderedOnce
+// Request redraws now on a forced event, otherwise coalesces to one draw per
+// flushInterval.
+func (l *liveProgress) Request(force bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.requestLocked(force)
 }
 
-// SetWidth updates the progress widget width dynamically (e.g. on terminal resize / SIGWINCH).
-func (w *ProgressWidget) SetWidth(width int) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if width > 0 {
-		w.width = width
-	}
-}
-
-// Stop stops the background ticker if started.
-func (w *ProgressWidget) Stop() {
-	w.mu.Lock()
-	if !w.started {
-		w.mu.Unlock()
+func (l *liveProgress) requestLocked(force bool) {
+	if l.closed {
 		return
 	}
-	w.started = false
-	close(w.stopTicker)
-	w.mu.Unlock()
-	<-w.tickerDone
-}
-
-func (w *ProgressWidget) isActionPhase() bool {
-	switch w.phase {
-	case "RepoSync", "Verifying", "Collecting", "Unpacking", "Configuring", "Removing":
-		return true
-	default:
-		return false
-	}
-}
-
-// AttachToParser registers ProgressWidget listener callbacks on the StreamParser.
-func (w *ProgressWidget) AttachToParser(p *StreamParser) {
-	p.OnDownloadTick = func(tick DownloadTick) {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		w.phase = "Downloading"
-		w.currentPackage = tick.Filename
-		if tick.Rate != "" {
-			w.downloadRate = tick.Rate
+	now := l.now()
+	if !force && l.drawn > 0 && now.Sub(l.lastDraw) < flushInterval {
+		if l.timer == nil {
+			wait := flushInterval - now.Sub(l.lastDraw)
+			l.timer = l.after(wait, func() {
+				l.mu.Lock()
+				defer l.mu.Unlock()
+				l.timer = nil
+				l.drawLocked()
+			})
 		}
-		if tick.ETA != "" {
-			w.timeRemaining = tick.ETA
-		}
-		st := p.State()
-		w.packageIndex = st.PackageIndex
-		if st.TotalPackages > w.totalPackages {
-			w.totalPackages = st.TotalPackages
-		}
-		w.downloadedBytes = st.DownloadedBytes
-		if st.TotalDownload > 0 {
-			w.totalDownload = st.TotalDownload
-		}
-		w.downloadPercent = st.Percent
-		w.renderLocked()
-	}
-
-	p.OnDownloadComplete = func(comp DownloadComplete) {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		st := p.State()
-		w.downloadedBytes = st.DownloadedBytes
-		w.currentPackage = comp.Filename
-		if comp.AvgRate != "" {
-			w.downloadRate = comp.AvgRate
-		}
-		w.renderLocked()
-	}
-
-	p.OnPhaseChange = func(phase string) {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		w.phase = phase
-		w.activeAction = phase
-		w.renderLocked()
-	}
-
-	p.OnPackageEvent = func(event PackageEvent) {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		switch event.Action {
-		case "unpacking", "updating":
-			w.phase = "Unpacking"
-			w.activeAction = "Unpacking"
-			w.completedActions++
-		case "configuring":
-			w.phase = "Configuring"
-			w.activeAction = "Configuring"
-			w.completedActions++
-		case "removing":
-			w.phase = "Removing"
-			w.activeAction = "Removing"
-			w.completedActions++
-		}
-		if w.completedActions > w.totalActions {
-			w.totalActions = w.completedActions
-		}
-		w.currentPackage = event.Package
-		w.renderLocked()
-	}
-
-	p.OnSummary = func(sum TransactionSummary) {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		w.summary = &sum
-	}
-}
-
-func (w *ProgressWidget) buildTopBorder(title string, chars summary.BoxChars, colorSeq string) string {
-	maxTitleW := w.width - 4
-	if maxTitleW < 0 {
-		maxTitleW = 0
-	}
-	title = summary.TruncateVisible(title, maxTitleW)
-	titleWidth := summary.VisibleWidth(title)
-	fillWidth := w.width - titleWidth - 4
-	if fillWidth < 0 {
-		fillWidth = 0
-	}
-	if !w.color {
-		return chars.TopLeft + strings.Repeat(chars.Horizontal, 2) + title + strings.Repeat(chars.Horizontal, fillWidth) + chars.TopRight
-	}
-	return colorSeq + chars.TopLeft + strings.Repeat(chars.Horizontal, 2) + resetSeq +
-		boldSeq + title + resetSeq +
-		colorSeq + strings.Repeat(chars.Horizontal, fillWidth) + chars.TopRight + resetSeq
-}
-
-func (w *ProgressWidget) buildBottomBorder(chars summary.BoxChars, colorSeq string) string {
-	fillWidth := w.width - 2
-	if fillWidth < 0 {
-		fillWidth = 0
-	}
-	if !w.color {
-		return chars.BottomLeft + strings.Repeat(chars.Horizontal, fillWidth) + chars.BottomRight
-	}
-	return colorSeq + chars.BottomLeft + strings.Repeat(chars.Horizontal, fillWidth) + chars.BottomRight + resetSeq
-}
-
-func (w *ProgressWidget) frameLine(content string, chars summary.BoxChars, colorSeq string) string {
-	innerW := w.width - 2
-	if innerW < 0 {
-		innerW = 0
-	}
-	content = summary.TruncateVisible(content, innerW)
-	padded := summary.PadRight(content, innerW)
-	if !w.color {
-		return chars.Vertical + padded + chars.Vertical
-	}
-	return colorSeq + chars.Vertical + resetSeq + padded + colorSeq + chars.Vertical + resetSeq
-}
-
-func (w *ProgressWidget) buildDownloadLine1() string {
-	pkgLabel := "Total Packages:"
-	if w.color {
-		pkgLabel = greenSeq + pkgLabel + resetSeq
-	}
-	return fmt.Sprintf("  %s %d/%d", pkgLabel, w.packageIndex, w.totalPackages)
-}
-
-func (w *ProgressWidget) buildDownloadLine2() string {
-	dlLabel := "Downloading:"
-	if w.color {
-		dlLabel = greenSeq + dlLabel + resetSeq
-	}
-	pkgName := w.currentPackage
-	if pkgName == "" {
-		pkgName = "starting..."
-	}
-	return fmt.Sprintf("  %s %s", dlLabel, pkgName)
-}
-
-func (w *ProgressWidget) buildDownloadLine3() string {
-	pct := w.downloadPercent
-	innerW := w.width - 2
-	if innerW < 0 {
-		innerW = 0
-	}
-
-	dlStr := summary.Human(uint64(w.downloadedBytes))
-	var totStr string
-	if w.totalDownload > 0 {
-		totStr = summary.Human(uint64(w.totalDownload))
-	} else {
-		totStr = dlStr
-	}
-
-	rate := w.downloadRate
-	if rate == "" {
-		rate = "0.0 B/s"
-	}
-	eta := w.timeRemaining
-	if eta == "" {
-		eta = "-:--:--"
-	}
-
-	label := "  Time Remaining: "
-	if w.width < 75 {
-		label = "  ETA: "
-	}
-
-	baseW := summary.VisibleWidth(label) + summary.VisibleWidth(eta) + 17 + summary.VisibleWidth(dlStr) + summary.VisibleWidth(totStr) + summary.VisibleWidth(rate)
-	barWidth := innerW - baseW
-	if barWidth > 20 {
-		barWidth = 20
-	}
-	if barWidth < 6 {
-		barWidth = 6
-	}
-	bar := progressBar(pct, barWidth, w.color, w.boxStyle)
-
-	if w.color {
-		return fmt.Sprintf("%s%s  [%s] %s%.1f%%%s • %s%s/%s%s • %s%s%s",
-			label, eta, bar, boldSeq+blueSeq, pct, resetSeq, boldSeq+greenSeq, dlStr, totStr, resetSeq, boldSeq+greenSeq, rate, resetSeq)
-	}
-	return fmt.Sprintf("%s%s  [%s] %.1f%% • %s/%s • %s",
-		label, eta, bar, pct, dlStr, totStr, rate)
-}
-
-func (w *ProgressWidget) buildActionLine1() string {
-	sp := spinnerFrames[w.spinIdx%len(spinnerFrames)]
-	phase := w.activeAction
-	if phase == "" {
-		phase = w.phase
-	}
-	if phase == "" {
-		phase = "Unpacking"
-	}
-	if w.color {
-		return fmt.Sprintf("  Phase:           %s %s packages", cyanSeq+sp+resetSeq, boldSeq+phase+resetSeq)
-	}
-	return fmt.Sprintf("  Phase:           %s %s packages", sp, phase)
-}
-
-func (w *ProgressWidget) buildActionLine2() string {
-	target := w.currentPackage
-	if target == "" {
-		target = "starting..."
-	}
-	if w.color {
-		return fmt.Sprintf("  Current Target:  %s", boldSeq+target+resetSeq)
-	}
-	return fmt.Sprintf("  Current Target:  %s", target)
-}
-
-func (w *ProgressWidget) buildActionLine3() string {
-	var pct float64
-	if w.totalActions > 0 {
-		pct = (float64(w.completedActions) / float64(w.totalActions)) * 100.0
-	}
-	if pct > 100.0 {
-		pct = 100.0
-	}
-	if pct < 0.0 {
-		pct = 0.0
-	}
-	innerW := w.width - 2
-	if innerW < 0 {
-		innerW = 0
-	}
-	barWidth := innerW - 44
-	if barWidth > 24 {
-		barWidth = 24
-	}
-	if barWidth < 8 {
-		barWidth = 8
-	}
-	bar := progressBar(pct, barWidth, w.color, w.boxStyle)
-	if w.color {
-		return fmt.Sprintf("  Status:          [%s] %s%.1f%%%s • %d/%d actions",
-			bar, boldSeq+blueSeq, pct, resetSeq, w.completedActions, w.totalActions)
-	}
-	return fmt.Sprintf("  Status:          [%s] %.1f%% • %d/%d actions",
-		bar, pct, w.completedActions, w.totalActions)
-}
-
-func (w *ProgressWidget) renderLocked() {
-	if w.cleared {
 		return
 	}
-	if f, ok := w.out.(*os.File); ok {
-		if tw := terminalWidth(f); tw > 0 {
-			w.width = tw
-		}
+	if l.timer != nil {
+		l.timer.Stop()
+		l.timer = nil
 	}
-	var lines [5]string
-	chars := summary.BoxCharacterSet(w.boxStyle)
+	l.drawLocked()
+}
 
-	if w.isActionPhase() {
-		lines[0] = w.buildTopBorder(" Running xbps... ", chars, blueSeq)
-		lines[1] = w.frameLine(w.buildActionLine1(), chars, blueSeq)
-		lines[2] = w.frameLine(w.buildActionLine2(), chars, blueSeq)
-		lines[3] = w.frameLine(w.buildActionLine3(), chars, blueSeq)
-		lines[4] = w.buildBottomBorder(chars, blueSeq)
+func (l *liveProgress) drawLocked() {
+	if l.closed {
+		return
+	}
+	if l.mode == livePlainMode {
+		fmt.Fprintf(l.out, "\r\x1b[2K%s", renderPlainLine(l.model.plain()))
+		l.drawn = 1
 	} else {
-		lines[0] = w.buildTopBorder(" Downloading... ", chars, greenSeq)
-		lines[1] = w.frameLine(w.buildDownloadLine1(), chars, greenSeq)
-		lines[2] = w.frameLine(w.buildDownloadLine2(), chars, greenSeq)
-		lines[3] = w.frameLine(w.buildDownloadLine3(), chars, greenSeq)
-		lines[4] = w.buildBottomBorder(chars, greenSeq)
-	}
-
-	if w.renderedOnce {
-		fmt.Fprintf(w.out, "\x1b[5A\r")
-	}
-	for i := 0; i < 5; i++ {
-		fmt.Fprintf(w.out, "%s\n", lines[i])
-	}
-	w.renderedOnce = true
-}
-
-func (w *ProgressWidget) formatCompletionSummary(rows []xbps.Row, cmd string) string {
-	elapsed := time.Since(w.startTime)
-	if w.summary != nil && (w.summary.Installed > 0 || w.summary.Updated > 0 || w.summary.Removed > 0) {
-		return fmt.Sprintf("%d installed, %d updated, %d removed in %.1fs",
-			w.summary.Installed, w.summary.Updated, w.summary.Removed, elapsed.Seconds())
-	}
-	if len(rows) > 0 {
-		var inst, up, rem int
-		for _, r := range rows {
-			switch r.Action {
-			case "install", "reinstall":
-				inst++
-			case "update":
-				up++
-			case "remove":
-				rem++
-			}
-		}
-		return fmt.Sprintf("%d installed, %d updated, %d removed in %.1fs",
-			inst, up, rem, elapsed.Seconds())
-	}
-	if cmd == "update" {
-		return fmt.Sprintf("updated repositories in %.1fs", elapsed.Seconds())
-	}
-	return fmt.Sprintf("in %.1fs", elapsed.Seconds())
-}
-
-// Finish cleans up the progress box and outputs the teardown summary or prepares for error output.
-func (w *ProgressWidget) Finish(exitCode int, rawStderr string, rows []xbps.Row, cmd string) {
-	w.Stop()
-
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.cleared = true
-
-	if w.renderedOnce {
-		fmt.Fprintf(w.out, "\x1b[5A\r\x1b[0J")
-		w.renderedOnce = false
-	}
-
-	if exitCode == 0 {
-		summaryText := w.formatCompletionSummary(rows, cmd)
-		if w.color {
-			fmt.Fprintf(w.out, "%s%s✔ Transaction complete:%s %s\n", boldSeq, greenSeq, resetSeq, summaryText)
+		lines := renderProgressView(l.model.view(), l.width, l.color)
+		if l.drawn == 0 {
+			fmt.Fprint(l.out, strings.Join(lines, "\n"))
 		} else {
-			fmt.Fprintf(w.out, "✔ Transaction complete: %s\n", summaryText)
+			var b strings.Builder
+			b.WriteString("\r")
+			if l.drawn > 1 {
+				fmt.Fprintf(&b, "\x1b[%dA", l.drawn-1)
+			}
+			for i, line := range lines {
+				b.WriteString("\x1b[K")
+				b.WriteString(line)
+				if i < len(lines)-1 {
+					b.WriteByte('\n')
+				}
+			}
+			b.WriteString("\x1b[J")
+			fmt.Fprint(l.out, b.String())
 		}
+		l.drawn = len(lines)
 	}
+	l.lastDraw = l.now()
+}
+
+// Finish tears the live surface down. Success clears without any completion
+// line (FR-064); failure also clears, leaving the caller to print the captured
+// child output. No ANSI is left on the line.
+func (l *liveProgress) Finish() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return
+	}
+	l.closed = true
+	if l.timer != nil {
+		l.timer.Stop()
+		l.timer = nil
+	}
+	if l.drawn == 0 {
+		return
+	}
+	if l.mode == livePlainMode {
+		fmt.Fprint(l.out, "\r\x1b[2K")
+		l.drawn = 0
+		return
+	}
+	var b strings.Builder
+	b.WriteString("\r")
+	if l.drawn > 1 {
+		fmt.Fprintf(&b, "\x1b[%dA", l.drawn-1)
+	}
+	b.WriteString("\x1b[J")
+	fmt.Fprint(l.out, b.String())
+	l.drawn = 0
+}
+
+// repositoryCount is the repository total the Update view can know before the
+// sync starts. xbps prints one `[*] Updating repository ...` line per repo and
+// never announces the count, so the xbps.d scan seeds it where possible; when
+// the scan fails the model grows the total as lines arrive.
+func repositoryCount() int {
+	cfg, err := fetch.DiscoverRepositories(fetchXBPSDDirs)
+	if err != nil {
+		return 0
+	}
+	return len(cfg.Lines)
 }

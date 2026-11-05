@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/soubarnak/xbpretty/internal/config"
@@ -96,14 +98,42 @@ func (st *state) runFetch(opts *options) int {
 		}
 	}
 
-	report := fetch.ProbeAll(context.Background(), fetch.ProbeOptions{
+	// FR-064's Testing Mirrors view is fed from #73's ProgressEvent stream.
+	// Ctrl-C cancels the round: xbpretty owns these requests, so it tears the
+	// view down, prints the interruption and exits 130 (FR-072).
+	var live *liveProgress
+	progress := mirrorScoreEvents
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	if mode := st.mirrorLiveMode(opts); mode != liveOff {
+		model := newProgressModel("mirror", nil, nil)
+		live = newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode, model)
+		st.r.live = true
+		st.r.liveProgress = live
+		progress = func(event fetch.ProgressEvent) {
+			mirrorScoreEvents(event)
+			model.mirrorEvent(event.Finished, event.Done, event.Total, event.Elapsed)
+			live.Request(true)
+		}
+		live.Request(true)
+	}
+	report := fetch.ProbeAll(ctx, fetch.ProbeOptions{
 		Client:      client,
 		Mirrors:     mirrors,
 		PrimaryPath: repos.Primary,
 		Arch:        arch,
 		UserAgent:   userAgent,
-		Progress:    mirrorScoreEvents,
+		Progress:    progress,
 	})
+	if live != nil {
+		live.Finish()
+		st.r.live = false
+		st.r.liveProgress = nil
+	}
+	if ctx.Err() != nil {
+		fmt.Fprintln(st.stderr, "xbpretty: interrupted")
+		return exitInterrupted
+	}
 	if len(report.Failures) > 0 {
 		if st.r != nil && st.r.verbose {
 			for _, failure := range report.Failures {
@@ -280,4 +310,13 @@ func runtimeXBPSArch() string {
 	default:
 		return runtime.GOARCH
 	}
+}
+
+// mirrorLiveMode applies the suppression matrix to the fetch probe: the
+// MirrorScore view is part of a real run, not a dry run.
+func (st *state) mirrorLiveMode(opts *options) liveMode {
+	if opts.dryRun {
+		return liveOff
+	}
+	return st.liveMode()
 }

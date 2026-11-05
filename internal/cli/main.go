@@ -20,6 +20,7 @@ const (
 	exitRuntime     = 1
 	exitUsage       = 2
 	exitNothingToDo = 0
+	exitInterrupted = 130
 )
 
 // isTerminalFn reports whether a file is a terminal. Tests replace it to
@@ -47,8 +48,9 @@ type runner struct {
 	stdout io.Writer
 	stderr io.Writer
 	stdin  io.Reader
-	parser *StreamParser
-	widget *ProgressWidget
+	parser       *StreamParser
+	live         bool
+	liveProgress *liveProgress
 
 	// verboseMu serialises the verbose line written by the discovery worker
 	// pool, where several xbps-query children run at once.

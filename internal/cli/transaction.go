@@ -116,7 +116,17 @@ func (st *state) wantsSync(cmd string, opts *options) bool {
 // of 0 continues to the dry run (FR-013). It returns -1 when the policy allows
 // the caller to continue.
 func (st *state) syncStep() int {
-	code, output, err := st.r.streamStderr(st.r.cfg.Xbps.InstallPath, "-S")
+	// The update command owns the inline Updating Package Lists view
+	// (FR-064, FR-071); every other sync call leaves it off.
+	var code int
+	var output hints.Output
+	var err error
+	if st.r.live && st.r.liveProgress != nil {
+		code, err = st.r.stream(st.r.cfg.Xbps.InstallPath, "-S")
+		output = hints.Output{Stdout: st.r.lastStdout, Stderr: st.r.lastStderr}
+	} else {
+		code, output, err = st.r.streamStderr(st.r.cfg.Xbps.InstallPath, "-S")
+	}
 	if err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
 		return exitRuntime
@@ -393,9 +403,18 @@ func (st *state) runUpdate(opts *options) int {
 	}
 	// update never nests a sync: this is its one index step, whatever the
 	// --update/--no-update flags say.
+	live := st.beginUpdateLive()
 	if code := st.syncStep(); code >= 0 {
+		st.endLive(live)
+		// The live view swallowed the sync's output; a failed sync prints
+		// it now, before the hint path returns.
+		if code != 0 {
+			fmt.Fprint(st.stderr, st.r.lastStdout)
+			fmt.Fprint(st.stderr, st.r.lastStderr)
+		}
 		return code
 	}
+	st.endLive(live)
 	rows, code := st.planTransaction("upgrade", opts, nil)
 	if code >= 0 {
 		return code
@@ -736,4 +755,36 @@ func asFile(v any) (*os.File, bool) {
 // relativeDir is the directory used when resolving a link target.
 func relativeDir(path string) string {
 	return filepath.Dir(path)
+}
+
+// beginUpdateLive starts the adapted Updating Package Lists view when the
+// suppression matrix allows a live surface.
+func (st *state) beginUpdateLive() *liveProgress {
+	mode := st.liveMode()
+	if mode == liveOff {
+		return nil
+	}
+	model := newProgressModel("update", nil, nil)
+	model.setRepositoryTotal(repositoryCount())
+	live := newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode, model)
+	parser := NewStreamParser(0, 0)
+	parser.OnRepoUpdate = func(url string) {
+		model.repository(url)
+		live.Request(true)
+	}
+	st.r.parser = parser
+	st.r.live = true
+	st.r.liveProgress = live
+	live.Request(true)
+	return live
+}
+
+// endLive tears a live surface down and restores the forwarding state.
+func (st *state) endLive(live *liveProgress) {
+	if live == nil {
+		return
+	}
+	live.Finish()
+	st.r.live = false
+	st.r.liveProgress = nil
 }
