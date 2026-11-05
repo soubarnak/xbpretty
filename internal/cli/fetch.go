@@ -28,9 +28,14 @@ var (
 	fetchHTTPClient    = fetch.NewHTTPClient
 	fetchArch          = runtimeXBPSArch()
 	fetchPreviousHosts = func() []string { return fetch.ManifestMirrorURLs(fetchManifestPath) }
-	// pickMirror is #78's picker seam. Nil means the non-TTY top-3 shortlist,
-	// which is also the documented fallback while the picker is unbuilt.
+	// pickMirror is #78's picker seam. Nil means the real enhanced-gate
+	// picker; the non-TTY top-3 shortlist is the fallback below the floor or
+	// when the screen cannot open.
 	pickMirror func(ranked []fetch.Result) (int, bool)
+	// fetchRankedHook is a test-only seam (xbpretty_testroot): the PTY golden
+	// needs deterministic latency/speed/score columns. Release builds leave it
+	// nil, so Rank's real ordering always reaches the picker.
+	fetchRankedHook func([]fetch.Result) []fetch.Result
 	// mirrorScoreEvents receives the MirrorScore progress events. #66 renders
 	// them; this ticket owns only the emission.
 	mirrorScoreEvents = func(fetch.ProgressEvent) {}
@@ -173,6 +178,9 @@ func (st *state) runFetch(opts *options) int {
 	}
 
 	ranked := fetch.Rank(report.Results)
+	if fetchRankedHook != nil {
+		ranked = fetchRankedHook(ranked)
+	}
 	if len(ranked) == 0 {
 		fmt.Fprintln(st.stderr, "xbpretty: no mirrors responded")
 		return exitRuntime
@@ -183,12 +191,9 @@ func (st *state) runFetch(opts *options) int {
 		suffixes = appendUnique(suffixes, fetch.NonFreeSuffixes(repos.Suffixes)...)
 	}
 
-	allowPicker := !opts.dryRun && !opts.explicit["auto"] && euidFn() == 0 &&
-		isTTY(st.stdin) && isTTY(st.stdout) && st.mode != config.ModePlain &&
-		!strings.EqualFold(os.Getenv("TERM"), "dumb") && utf8Locale()
-	chosen, ok := st.chooseMirror(client, ranked, suffixes, arch, userAgent, opts, allowPicker)
+	chosen, code, ok := st.chooseMirror(client, ranked, suffixes, arch, userAgent, opts, st.fetchPickerAllowed(opts))
 	if !ok {
-		return exitRuntime
+		return code
 	}
 
 	if err := fetch.RenderTable(st.stdout, ranked, chosen.URL); err != nil {
@@ -230,10 +235,25 @@ func (st *state) runFetch(opts *options) int {
 	return code
 }
 
+// fetchPickerAllowed is FR-067's S3 gate: the enhanced gate (mode != Plain,
+// TTY stdout, TERM != dumb) plus a TTY stdin, a UTF-8 locale, root and no
+// --auto/--dry-run. --no-tui demotes Tui to Auto, where the picker still
+// appears; Plain never does.
+func (st *state) fetchPickerAllowed(opts *options) bool {
+	return !opts.dryRun && !opts.explicit["auto"] &&
+		euidFn() == 0 &&
+		isTTY(st.stdin) && isTTY(st.stdout) &&
+		st.mode != config.ModePlain &&
+		!strings.EqualFold(os.Getenv("TERM"), "dumb") &&
+		utf8Locale()
+}
+
 // chooseMirror implements FR-045's shortlist rule. --auto N validates the N
-// fastest in rank order; without it the top 3 are tried. The picker seam, when
-// #78 installs one, returns a single index whose choice is validated once.
-func (st *state) chooseMirror(client *http.Client, ranked []fetch.Result, suffixes []string, arch, userAgent string, opts *options, allowPicker bool) (fetch.Result, bool) {
+// fastest in rank order. Without --auto the picker returns one index (or, when
+// the screen is unavailable, the top-3 shortlist runs); the picked row is
+// validated once: a failed validation is an error, never a silent second
+// choice.
+func (st *state) chooseMirror(client *http.Client, ranked []fetch.Result, suffixes []string, arch, userAgent string, opts *options, allowPicker bool) (fetch.Result, int, bool) {
 	validate := func(candidate fetch.Result) error {
 		return fetch.Validate(context.Background(), fetch.ValidationOptions{
 			Client:    client,
@@ -244,23 +264,44 @@ func (st *state) chooseMirror(client *http.Client, ranked []fetch.Result, suffix
 		})
 	}
 
-	if pickMirror != nil && allowPicker {
-		index, ok := pickMirror(ranked)
-		if !ok {
-			return fetch.Result{}, false
-		}
+	validatePick := func(index int) (fetch.Result, int, bool) {
 		if index < 0 || index >= len(ranked) {
 			fmt.Fprintln(st.stderr, "xbpretty: no candidate mirror serves all configured repositories")
-			return fetch.Result{}, false
+			return fetch.Result{}, exitRuntime, false
 		}
 		if err := validate(ranked[index]); err != nil {
 			if st.r != nil && st.r.verbose {
 				fmt.Fprintf(st.stderr, "verbose: %s: %v\n", ranked[index].URL, err)
 			}
 			fmt.Fprintln(st.stderr, "xbpretty: no candidate mirror serves all configured repositories")
-			return fetch.Result{}, false
+			return fetch.Result{}, exitRuntime, false
 		}
-		return ranked[index], true
+		return ranked[index], exitOK, true
+	}
+
+	if allowPicker && pickMirror != nil {
+		index, ok := pickMirror(ranked)
+		if !ok {
+			fmt.Fprintln(st.stderr, "xbpretty: no mirror was selected")
+			return fetch.Result{}, exitRuntime, false
+		}
+		return validatePick(index)
+	}
+	if allowPicker && pickMirror == nil {
+		index, ok, code := st.runFetchPicker(ranked)
+		switch {
+		case code < 0:
+			// The screen could not open or the terminal is below the floor.
+			// Warn (if any) already printed; fall through to the shortlist.
+		case !ok:
+			if code > 0 {
+				return fetch.Result{}, code, false
+			}
+			fmt.Fprintln(st.stderr, "xbpretty: no mirror was selected")
+			return fetch.Result{}, exitRuntime, false
+		default:
+			return validatePick(index)
+		}
 	}
 
 	depth := 3
@@ -277,10 +318,10 @@ func (st *state) chooseMirror(client *http.Client, ranked []fetch.Result, suffix
 			}
 			continue
 		}
-		return candidate, true
+		return candidate, exitOK, true
 	}
 	fmt.Fprintln(st.stderr, "xbpretty: no candidate mirror serves all configured repositories")
-	return fetch.Result{}, false
+	return fetch.Result{}, exitRuntime, false
 }
 
 // writeRepositoryConfiguration is #74's single write seam: one same-basename

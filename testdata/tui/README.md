@@ -24,3 +24,14 @@ Provenance:
 To re-cut a golden after an intentional renderer change, render the same model
 in a throwaway test and overwrite the file; the golden test prints a got/want
 diff. These are engineering fixtures, not captured terminal output.
+
+- `fetch-80x24`, `fetch-60x18` and `fetch-120x30` are the FR-070/AC-052
+  picker frames cut from the four-mirror rev 6 fixture with the plain-data
+  model in `internal/tui/fetch_test.go`; the 120-column frame is the Location
+  threshold, the 60x18 frame exercises C1's Region drop and 24-cell URL floor.
+  The selected URL and Score carry Secondary+REVERSED, which is why the SGR
+  bytes changed from the prototype.
+- `fetch-pty-80x24` is the same picker through the built binary and a
+  four-mirror HTTP fixture. Its URL host carries the fixed-width placeholder
+  `127.0.0.1:00000`; the PTY test substitutes the live five-digit port before
+  comparing bytes, so the frame stays exact without pinning a port.
