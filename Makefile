@@ -1,7 +1,7 @@
 GO ?= go
 BIN := xbpretty
 
-.PHONY: build test vet fmt completions clean
+.PHONY: build test vet fmt completions clean parity check
 
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -o $(BIN) ./cmd/xbpretty
@@ -22,6 +22,16 @@ completions:
 	$(GO) run ./cmd/xbpretty completion bash > completions/xbpretty.bash
 	$(GO) run ./cmd/xbpretty completion zsh  > completions/_xbpretty
 	$(GO) run ./cmd/xbpretty completion fish > completions/xbpretty.fish
+
+# The two parity TSVs are the only source. This regenerates Appendix A.2-A.4
+# of the spec and docs/parity/matrix.md; the checker refuses a stale rendering.
+parity:
+	$(GO) run ./tools/parity -write
+
+# Full gate: the parity test rides `go test ./...`, then the explicit check
+# proves the committed renderings are current.
+check: test
+	$(GO) run ./tools/parity -check
 
 clean:
 	rm -f $(BIN) xbp

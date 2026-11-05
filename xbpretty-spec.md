@@ -1,137 +1,688 @@
-# xbpretty — Lite Spec (rev 5)
+# xbpretty — Lite Spec (rev 6)
 
-**Status:** Approved, 2026-10-22 (supersedes rev 4)
+**Status:** Approved, 2026-11-05 (supersedes rev 5). Approval is delegated by the repository owner; the pull request is the review trail. This revision is the contract an implementer builds from: it decides every open question and records every nala v0.18.2 surface as an equivalent xbps behaviour or an explicit, tested N/A.
+
+**Parity reference:** nala v0.18.2 (`volitank/nala`, commit `2b7ff05`), adapted exclusively to xbps on Void Linux.
+
+**Normative companions:** Appendix A (parity matrix rules and register), Appendix B (decision and rev-5 crosswalks), `docs/adr/0012`–`docs/adr/0020` (rationale), `GLOSSARY.md` (vocabulary), `docs/parity/matrix.md` (generated full table), `testdata/parity/*.tsv` (the only matrix source), `docs/migration-rev6.md` and `docs/config.toml.example` (migration).
+
+> Reading order for implementers: §3 is the requirement set; §5 is the acceptance set; §9 is the build order; Appendix A is the coverage proof. A requirement is normative iff it has an `FR-`, `NFR-` or `AC-` id. Prose explains; it does not add requirements.
+
+## Contents
+
+1. Purpose
+2. Scope
+3. Functional requirements
+   - 3.1 Invocation, dispatch, aliases and global flags
+   - 3.2 Transaction commands and shared flags
+   - 3.3 Discovery and machine output
+   - 3.4 History and replay
+   - 3.5 Downloads
+   - 3.6 Fetch
+   - 3.7 Configuration
+   - 3.8 Inline output and visuals
+   - 3.9 Full-screen TUI
+   - 3.10 Errors, privileges, streams and exit codes
+   - 3.11 Superset extensions
+   - 3.12 Tooling, packaging and the parity matrix
+4. Non-functional requirements
+5. Acceptance criteria
+6. Constraints and dependencies
+7. Risks
+8. Open questions
+9. Implementation route
+- Appendix A — Parity matrix
+- Appendix B — Crosswalks
 
 ## 1. Purpose
-A Go wrapper around the xbps CLIs for Void Linux that adds a rich, multicolored transaction summary, version diff highlighting, and live framed progress widgets in the style of nala (`volitank/nala`), with a confirmation prompt. Project: Bongbetic.
+
+xbpretty is a Go wrapper around the xbps command-line tools for Void Linux. It previews a transaction, prints a nala-faithful summary, asks once, and then runs xbps. It adds a replayable history store, parallel predownload, Void mirror fetch, discovery commands with machine output, a full-screen TUI in the nala style, and xbpretty's own extensions (error hints, `xbp link`, the audit log, the reboot hint).
+
+Rev 6 exists to make **parity with nala v0.18.2 complete and checkable**: every user-visible nala surface is either reproduced on xbps or recorded in Appendix A as an explicit N/A with an exact user-visible proof. The previous revision scoped several nala features out; rev 6 reverses those exclusions by decision, not by drift.
 
 ## 2. Scope
+
 **In scope**
-- Wrapping `install`, `remove`, `upgrade`, `autoremove`, `update` over `xbps-install` / `xbps-remove`
-- Dry-run preview, Nala-style rounded boxed summary tables with sizes, aligned columns, and a counts footer, `[Y/n]` prompt
-- Package version diff highlighting for upgrades (differentiating changed revision or upstream version components in ANSI 202 orange)
-- Real-time 5-line framed execution progress widget (download counters/speed/ETA, unpack/configure live spinner) driven by hybrid PTY/pipe streaming
-- Non-TTY plaintext graceful degradation for scripting/piping (`| grep`) and `NO_COLOR` support
-- Transaction log and post-run reboot hint
-- User config file for default flags and visual preferences (`box_style`, `progress_bar`)
-- argv[0] aliases (`xbp`, `xbp-install`, etc.) and a `link` helper
-- Flag passthrough to xbps, verbose mode, shell completions, `--version`
-- xbps-src template for native packaging
 
-**Out of scope (v1)**
-- Parallel downloads (reimplementing xbps networking)
-- Undo / redo (the log in FR-013 records transactions but cannot replay them)
-- Mirror speed-test and selection (`nala fetch`)
-- Formatted `search` / `show`
-- libxbps CGO bindings (CLI wrapping only)
-- `/etc` config layer
-- Auto-retry or auto-elevation
+- The full nala v0.18.2 command surface adapted to xbps: `install`, `remove`/`uninstall`, `purge`, `autoremove`, `autopurge`, the upgrade family (`upgrade`, `full-upgrade`/`dist-upgrade`, `safe-upgrade`), `update`, `download`, `clean`, `list`, `search`, `show`/`info`, `policy`, `history` (list, detail, `undo`, `redo`, `clear`), `fetch`, plus `completion`, `link`, `log`, `moo` (hidden), `help`/`--version`.
+- nala's TOML configuration schema (`[Nala]`, `[Ui]`, `[Color]`, `[Color.theme]`) plus the xbps-only `[Xbps]` table.
+- nala v0.18.2 inline visuals: borderless tables, ASCII `=` rules, the nine theme roles, the version diff, the five rounded progress views, the 40-cell plain line.
+- The full-screen TUI: operation-tabbed transaction summary (opt-in), read-only history detail, single-select fetch picker, inline progress viewport in TUI mode. APT's release-info screen is an explicit N/A.
+- Replayable history (`undo`/`redo`), parallel predownload, `xbp download`, Void mirror `fetch` with `clean --fetch`, NDJSON machine output (schema 1), and `upgrade --print-uris`.
+- xbpretty's superset: error hints, `xbp link`, the append-only transaction log, the reboot hint, `NO_COLOR`, clean EPIPE, the six `argv[0]` aliases.
+- The parity matrix process (two TSVs, generated Appendix A, checker, release gate).
 
-## 3. Functional Requirements
+**Out of scope (rev 6)**
 
-### 3.1 Dispatch and commands
+- libxbps CGO bindings. xbpretty wraps the CLIs and stays a single static binary.
+- Translations or any i18n beyond English. Recorded as N/A (`P-BEH-029`).
+- Non-Void targets: Debian, Ubuntu, Devuan, Arch, multi-suite PPAs, apt repositories. Recorded as N/A.
+- Reimplementing apt semantics xbps does not have: pin priorities, recommends/suggests metadata, essential-package protection, `config_files_only`, `-o` APT options, apt auth. Each is an explicit N/A.
+- Writing an `/etc/xbpretty/config.toml` or any `conf_files` entry. The system layer is optional and admin-created; `fetch` writes `/etc/xbps.d` as package-manager state, not xbpretty config.
+- Implementation inside this map. Rev 6 is the specification; §9 lists the implementation slices and §9 states that no issues are created by this ticket.
+## 3. Functional requirements
+
+Priorities: **M** must, **S** should, **C** could. `Src` names the decision ticket that owns the requirement; Appendix B carries the full crosswalk.
+
+### 3.1 Invocation, dispatch, aliases and global flags
+
+| ID | Pri | Src | Requirement |
+|---|---|---|---|
+| FR-001 | M | #55 | Ship one binary. The package installs the binary `xbpretty` plus exactly six alias names: `xbp`, `xbp-install`, `xbp-remove`, `xbp-upgrade`, `xbp-autoremove`, `xbp-update`. `argv[0]` selects the command: `xbp <command>` dispatches any command; each `xbp-<verb>` fixes that verb and treats the remaining arguments as its own. The set is **closed**: no `xbp-history`, `xbp-fetch`, `xbp-undo`, `xbp-redo`, `xbp-policy`, `xbp-list`, `xbp-clean`, `xbp-purge`, `xbp-log`. A new alias needs a new spec revision. |
+| FR-002 | M | #43, #44, #54 | Canonical command names: `install`, `remove`, `purge`, `autoremove`, `autopurge`, `upgrade`, `full-upgrade`, `safe-upgrade`, `update`, `download`, `clean`, `list`, `search`, `show`, `policy`, `history`, `undo`, `redo`, `fetch`, `completion`, `link`, `log`, `moo` (hidden). Aliases: `uninstall` → `remove`; `info` → `show`; `dist-upgrade` → `full-upgrade`; undocumented `up` and `dist-up` remain extensions. `clean` no longer aliases `autoremove`. No command name other than these resolves. `history undo`/`history redo` are accepted aliases of the top-level verbs; `clear` exists only as `history clear`. |
+| FR-003 | M | #43, #49 | Global flags are parsed before or after the subcommand (before `--`): `-h/--help`, `-V/--version`, `-v/--verbose`, `--debug`, `--config FILE`, `--color auto\|always\|never`, `--no-color`, `--tui`, `--no-tui`, hidden `--history-dir DIR`. `-c/--country` is fetch-only. Flags are accepted only on the commands that declare them; a flag on the wrong command is a usage error (exit 2). Conflicts: `--color`/`--no-color`, `--tui`/`--no-tui`, `-y`/`-n`, `--update`/`--no-update`/`--no-sync`, `--auto-remove`/`--no-auto-remove` (exit 2). `--full`/`--no-full` are not a conflict; `--no-full` wins. Single-valued flags are last-wins; duplicates of a boolean are idempotent. |
+| FR-004 | M | #55 | `-h/--help` prints the generated command table on stdout and exits 0. `-V/--version` prints `xbpretty <version>` and one detected xbps line on stdout and exits 0; the binary's default version is `dev`, release builds are stamped from `srcpkgs/xbpretty/template`. At the root, `-V` means `--version`; after `list` or `search`, `-V` means `--virtual` and `--version` remains the long form. `--help`, `--version`, `completion` and `link` do not load config. |
+| FR-005 | S | #55 | `xbpretty completion bash\|zsh\|fish` prints a static completion script generated from the shared command table. Scripts complete the visible commands, the six alias names, per-command flags, `--color auto always never`, `completion bash zsh fish`, package names for package-taking commands, installed names for remove/purge/policy/log, and history ids plus `last`. `-V` completes as `--version` at the root and as `--virtual` after `list`/`search`. N/A flags are never offered. `make completions` regenerates the committed files; a Go test fails with `completion scripts are stale: run make completions` when they drift. Install paths: bash `/usr/share/bash-completion/completions/xbpretty`, zsh `/usr/share/zsh/site-functions/_xbpretty`, fish `/usr/share/fish/vendor_completions.d/xbpretty.fish`. |
+| FR-006 | C | #55 | `xbpretty link [DIR]` creates exactly the six names in `DIR` (default: the running binary's directory). It is silent on success, refuses to overwrite a conflicting file or link, prints `xbpretty: <path> already exists and points to <target>, not overwriting` or `xbpretty: cannot create <path>: <error>`, and exits 0 when all six are correct/created or 1 when any conflicts or fails. It creates no directories and does not touch completions or manpages. |
+
+### 3.2 Transaction commands and shared flags
+
+**Command construction.** xbpretty never passes its own flags to xbps. The dry run always uses xbps's `-n`; the real run always appends `-y`; the index sync is a separate `xbps-install -S` step, never part of transaction argv.
+
+| Command | Dry-run argv | Real argv | Notes |
+|---|---|---|---|
+| `install PKG…` | `xbps-install -n PKG…` | `xbps-install -y PKG…` | `--reinstall` adds `-f` after an installed guard. `--update` adds the sync step. No `-S`. |
+| `remove PKG…` / `uninstall` | `xbps-remove -n PKG…` | `xbps-remove -y PKG…` | Not-installed targets are reported and filtered before the dry run. |
+| `purge PKG…` / `remove --purge` | `xbps-remove -n -f PKG…` | `xbps-remove -y -f PKG…` | `-f` also deletes modified files; xbps already deletes unmodified conffiles. |
+| `autoremove` | `xbps-remove -n -o` | `xbps-remove -y -o` | No positionals. |
+| `autopurge` / `autoremove --purge` | `xbps-remove -n -o -f` | `xbps-remove -y -o -f` | `-f` applies to the shared orphan transaction. |
+| `upgrade`, `full-upgrade`, `dist-upgrade`, `safe-upgrade` | `xbps-install -n -u` | `xbps-install -y -u` | No positionals. Sync step by default. `--full`/`--no-full`/`--safe` are accepted no-ops; xbps's `-u` never removes packages. |
+| `update` | `xbps-install -S`, then `xbps-install -n -u` to count | — | Root; no summary or prompt; count/list line (§3.2.5). |
+| `download PKG…` | — | xbpretty-owned (§3.5.4) | No root, no summary, no prompt. |
+| `clean` | — | `xbps-remove -O` | Root; `--lists`/`--fetch`; no prompt; output streamed. |
+
+| ID | Pri | Src | Requirement |
+|---|---|---|---|
+| FR-007 | M | #43 | `install` uses the argv above. Before the dry run, `--reinstall` checks every named package is installed; a missing target prints `xbpretty: PKG is not installed, so it cannot be reinstalled` and exits 1. `install` does **not** sync by default; `--update` adds the sync step. |
+| FR-008 | M | #43 | `remove` uses the argv above. Not-installed targets are reported on stderr and filtered before the dry run; if no target remains, print `Nothing to do.` on stdout and exit 0. `uninstall` is an alias. |
+| FR-009 | M | #43 | `purge` uses `-f` on both dry and real runs; `remove --purge` is equivalent. `--purge` on `remove`/`purge`/`autoremove`/`autopurge` sets `-f`; on `install`/`upgrade` it is an accepted no-op. |
+| FR-010 | M | #43 | `autoremove` and `autopurge` use the argv above and take no positionals. |
+| FR-011 | M | #43 | The upgrade family all use `xbps-install -n -u` / `xbps-install -y -u` and take no positionals. `full-upgrade`/`dist-upgrade` and `safe-upgrade` are equivalences, not gaps. `--full`, `--no-full`, `--safe`, and `[Nala] full_upgrade` change no argv; `--no-full` wins over `--full`. |
+| FR-012 | M | #43 | `update` requires root and runs `xbps-install -S`; it then runs `xbps-install -n -u`, counts non-`hold` rows, and when the count is non-zero prints on stdout either `N package(s) can be upgraded. Run 'xbp list --upgradable' to see them.` (`update_show_packages = false`) or one `<name> <installed> -> <candidate>` line per package (`true`). At zero it prints nothing extra. `update` never nests a sync. |
+| FR-013 | M | #43 | **Sync step.** `--update` runs `xbps-install -S` as its own step before the dry run, root only, with output on stderr. Defaults: the upgrade family syncs (`[Nala] auto_update = true`); `install`, `remove`, `purge`, `autoremove`, `autopurge` do not sync unless `--update`. `--no-update` (alias `--no-sync`) suppresses; `--update` with either is exit 2. A non-root request prints the stale-index warning and continues against the cached index. A sync step runs even in a root `--dry-run` (it writes indexes, not packages). A non-zero sync exit aborts with that code and hints; xbps exits 0 when every fetch fails, so the run continues to the dry run. |
+| FR-014 | M | #43 | **Transaction order:** parse and N/A/conflict checks → config and binary resolution → sync step (if any) → dry run (forward the plan's stderr, hints, parse) → implicit-autoremove check when the plan is empty → `Nothing to do.` if still empty → render summary → `--dry-run` stop → `--download-only` stop after its checks → prompt/root/non-TTY checks → real transaction → hints/logging → implicit autoremove after success. |
+| FR-015 | M | #43 | **Prompt and refusal.** Prompt on stderr: `Do you want to continue? [Y/n] ` (one trailing space, no newline). Empty/`y`/`Y`/`yes` proceed; `n`/`N`/`no` refuse; anything else prints `xbpretty: '<answer>' is not a valid response` and exits 1 without re-prompting; EOF refuses. Refusal prints `xbpretty: user refused confirmation` and exits **1**. `-n/--assume-no` takes the refusal path with no prompt; `-y/--assume-yes`/`[Nala] assume_yes` skip the prompt. `--dry-run` and `--print-uris` never prompt. `--download-only` prompts like a real transaction. Non-TTY stdin without `-y`: summary, then `xbpretty: stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed`, exit 1; never block on a pipe. |
+| FR-016 | M | #43 | **Implicit autoremove.** After a successful real `install`, `remove`, `purge` or upgrade-family run, when `[Nala] auto_remove` is true and `assume_yes` is not in effect, plan `xbps-remove -n -o` (with `-f` when the primary command purged). If rows exist, render a normal summary, prompt, and run `xbps-remove -y -o [-f]`. When the primary plan is empty the orphan check still runs before `Nothing to do.`; `Nothing to do.` prints only when both plans are empty. `--no-auto-remove`/`--no-autoremove` disables; `--auto-remove`/`--autoremove` forces; both is exit 2. With `-y`/`assume_yes` the implicit run is skipped unless `--auto-remove` was explicit. A dry run and `--download-only` never run it. Declining the orphan prompt leaves the primary result and exits 0; if the primary plan was empty, a refusal is the normal exit-1 refusal. If the orphan transaction fails, its code becomes the run's code. The orphan transaction is a real transaction: summary, prompt, execution, history entry. |
+| FR-017 | M | #43 | An empty plan prints `Nothing to do.` on stdout, skips the prompt and exits 0. A hold-only plan prints the read-only summary, skips the prompt and exits 0. A plan with only `configure` rows is a real plan and is listed. |
+| FR-018 | M | #43 | **Shared flags.** `-d/--download-only` (six transaction commands) predownloads the plan and stops. `--simple` (six) selects §3.8.4. `--update`/`--no-update` (six) follow FR-013. `--allow-unauthenticated` is N/A. `-y`/`--yes`/`--assume-yes` and `-n`/`--assume-no` (six) follow FR-015. `--remove-essential` is N/A. `--purge` follows FR-009. `-f/--fix-broken` is N/A; `--no-fix-broken` is an accepted no-op. `--install-recommends`/`--install-suggests` are N/A; `--no-install-recommends`/`--no-install-suggests` are accepted no-ops. `--auto-remove`/`--no-auto-remove` follow FR-016. `--reinstall` follows FR-007. `-t/--target-release` is N/A. `--exclude` is N/A. `--full`, `--no-full`, `--safe` follow FR-011. `--print-uris` follows §3.3.7. `-o/--option` is N/A. |
+| FR-019 | M | #43, #48 | **N/A contract.** An N/A flag is accepted by the parser and refused before any child runs or any summary prints: one stderr line beginning `xbpretty: ` and exit **2**. The exact lines are in §3.2.3. Never a silent no-op. Three negative compatibility flags are the documented exception: `--no-fix-broken`, `--no-install-recommends`, `--no-install-suggests` are accepted and do nothing, because xbps has no corresponding state to change; their proof is the absence in Appendix A (`P-OPT-020`, `P-OPT-022`, `P-OPT-024`). |
+| FR-020 | M | #43, #48 | `clean` runs `xbps-remove -O` (root, no prompt) and streams xbps output. `clean --lists` deletes `*-repodata` files under `/var/db/xbps/*/` (keys stay), prints nothing; the next install/upgrade needs `xbp update`. `clean --fetch` follows FR-048. `--lists` wins if both are given. `clean` no longer aliases `autoremove`. |
+| FR-021 | M | #43 | `install`, `remove`, `purge` and `download` need at least one package: `xbpretty: <command> needs at least one package`, exit 1. The upgrade family, `autoremove`/`autopurge`, `update` and `clean` take no positionals; extras are usage errors (2). Arguments after `--` pass verbatim to both the dry and real xbps commands. `argv[0]` aliases only fix the command name, never the flag position. |
+
+#### 3.2.1 N/A flag lines
+
+Each line is prefixed `xbpretty: ` and exits 2 with no xbps child.
+
+| Flag | Message tail |
+|---|---|
+| `--allow-unauthenticated` | `--allow-unauthenticated is not available on xbps: xbps verifies repository signatures and has no unauthenticated mode.` |
+| `-o/--option` | `-o/--option is not available on xbps: apt configuration options have no xbps equivalent; repository settings live in /etc/xbps.d/*.conf.` |
+| `-f/--fix-broken` | `-f/--fix-broken is not available on xbps: xbps has no broken-dependency repair mode. Check the pkgdb with xbps-pkgdb --checks dependencies, or force a reinstall with xbp install -- -f PKG.` |
+| `-t/--target-release` | `-t/--target-release is not available on xbps: xbps has no default-release targeting; pin a repository with a repository= line in /etc/xbps.d.` |
+| `--install-recommends` | `--install-recommends is not available on xbps: xbps has no recommends metadata; every declared run_depends dependency is installed.` |
+| `--install-suggests` | `--install-suggests is not available on xbps: xbps has no suggests metadata.` |
+| `--remove-essential` | `--remove-essential is not available on xbps: xbps has no essential-package protection to override.` |
+| `--remove-config` | `--remove-config is not available on xbps: xbps has no config-files state; xbps-remove -f removes files, it does not create a config-only removal.` |
+| `--exclude` | `--exclude is not available on xbps: xbps has no upgrade exclusion; hold the package with xbps-pkgdb -m hold PKG (release with -m unhold).` |
+| fetch `--sources` | `--sources is not available: Void repositories contain no source packages` |
+| fetch `--debian`, `--ubuntu`, `--devuan` | `--<name> is not available: xbpretty targets Void Linux only` |
+
+#### 3.2.2 Accepted no-ops
+
+`--no-fix-broken`, `--no-install-recommends`, `--no-install-suggests` are accepted, do nothing, print nothing, add nothing to argv, and leave the exit code to the command. `-A/--all-arches` is the same class in discovery (§3.3).
+
+#### 3.2.3 Flow rules that are easy to get wrong
+
+- A successful plan still forwards xbps's stderr to stderr before the summary. `xbps-install -n xbps` exits 0 with an empty plan and `ERROR: Package 'xbps' already installed.`; `xbps-install -n xbps figlet` plans figlet while still printing that line. Hints print after the forwarded stderr.
+- `--dry-run` wins over `--download-only`: nothing is downloaded. `--print-uris` stops before both and downloads nothing. `--dry-run` with `-n` prints the plan and exits 0.
+- `--download-only` with `--dry-run` downloads nothing; with `-y` and root it runs the predownload and prints no completion line.
+- The sync step is never recorded as a transaction and never appears in argv.
+
+### 3.3 Discovery and machine output
+
+All four commands are read-only, root-free, never sync, never prompt, never write the log or history, and never take over the screen.
+
+| Command | Surface | Exit notes |
+|---|---|---|
+| `list [PKG…]` | `-a/--all-versions`, `-A/--all-arches` (silent no-op), `-i/--installed`, `-u/--upgradable`, `-V/--virtual`, `--description`, `--summary`, `-m/--machine` | 0 unless a child fails |
+| `search PATTERN…` | every `list` flag plus `-n/--names` (visible alias `--names-only`) | ≥1 pattern or exit 1 |
+| `show PKG…` (`info`) | `-a/--all-versions`, `-A` (silent no-op), `-m` | ≥1 package or exit 1; missing names are notices, exit 0 |
+| `policy [PKG…]` | `-m` | missing names are notices, exit 0 |
+
+| ID | Pri | Src | Requirement |
+|---|---|---|---|
+| FR-022 | M | #44 | **Fixed offline pass set.** One installed pass (`xbps-query -l`), one manual pass (`-m`), one repository pass (`-R -s ''`), one variants→repository pass (`-R -s '' -p repository`), plus `-p architecture` only for `-m`, `-p provides` only for `-V`, `long_desc` only for `--description`, the `-n -u` plan for `-u`/resolution, `-H`/`-O`/`--list-repolock-pkgs` for attributes, `-L`/`-L -v` for policy, and `-R -S`/`-S` for one record. Never `-M`, never `-R -o`, never a sync, never a repodata parse. Child stderr is forwarded verbatim. All calls use `LC_ALL=C`. |
+| FR-023 | M | #44 | **Row model.** The universe is installed names ∪ repository names. A variant is (repository, pkgver) ordered by repository precedence; installed state attaches to the variant with the installed pkgver or a synthetic `[local]` row. The default row is the plan candidate when the package appears in `xbps-install -n -u` with action `update`; otherwise the variant `xbps-query -R -S` resolves (batched over multi-variant names only); otherwise the first variant in precedence order; installed-only names get the installed row. `-a` shows the installed variant first then every other variant. `-i` keeps installed names but still shows the default/candidate row. `-u` rows come from the `-n -u` plan (actions `update` only; `hold` excluded) and carry exact sizes. `-V` replaces the universe with virtual names. If `-n -u` fails, forward stderr, omit `Upgradable from:`, exit 0. xbpretty never compares versions; xbps resolves. |
+| FR-024 | M | #44 | **Line format and filters.** `{name} ({version}) [{repository}] [{attributes}]`; repository is the URL with `http://`/`https://` stripped, or `[local]`; version is the version part of the pkgver; attributes in fixed order `Installed`, `Unpacked`, `Half-removed`, `Automatic`, `Auto-Removable`, `Held`, `Repolocked`, `Upgradable from: <installed version>`, `[]` when empty. Sort by name, C collation; variants by precedence; virtual rows `{virtual-name} (Virtual) [{providers}]`. `list` tokens: case-insensitive glob (`*`, `?`, `[...]`, `{a,b}`), `name=version`, trailing `:arch`, OR-ed; a token matching nothing prints `Notice: '<token>' was not found` and does not change the exit code. `search` tokens: case-insensitive RE2, name first, then `short_desc` unless `--names`; a token matching nothing prints no notice. `--summary`/`--description` print the description at column 0 on the next line; `--description` wins when both are given; absent text is `No Summary`/`No Description`. Notices to stderr, data to stdout. |
+| FR-025 | M | #44 | **`show`/`info`.** `Label: value` blocks, no indentation, one blank line between blocks. Field order: `Package`, `Version`, `Architecture`, `Installed-Size`, `Size`, `Maintainer`, `Homepage`, `License`, `SHA256`, `Repository`, `State`, `Install-Date`, `Automatic`, `Held`, `Repolocked`, `Provides`, `Depends`, `Required-Shlibs`, `Provided-Shlibs`, `Conflicts`, `Replaces`, `Alternatives`, `Description`, `Attributes`. Apt-only labels are dropped. Absent xbps properties omit their line; never `Unknown`. Sizes are xbps's humanised strings. Lists with ≤3 values join with `, `; more print one per line with four leading spaces. `State`/`Install-Date`/`Automatic: yes` only on installed blocks; `Held: yes`/`Repolocked: yes` only when set. Default block is the installed record when installed, else the resolved repository record. `-a` prints the installed block then every repository variant. When more blocks exist than printed: `Notice: There are N additional records. Please use the '-a' switch to see them.` A missing name prints `Notice: '<name>' was not found` and exits 0; all missing still exits 0; zero names exits 1 with `xbpretty: show needs at least one package`. |
+| FR-026 | M | #44 | **`policy`.** No names: `Package files:` listing each repository with 1-based `-L` precedence, `(RSA signed\|unsigned)`, `Signed-by:` and fingerprint for signed entries; then `Pinned packages:` with `name -> pkgver (hold\|repolock)`, sorted, heading always printed. With names: `Package:`, `Installed:` (`none` when absent), `Candidate:` (`none` when absent), `Version table:` with `***` on the candidate variant and three spaces otherwise; one line per variant plus the indented repository line with precedence. Missing names are notices, exit 0; supplying only missing names does not fall back to the global view. |
+| FR-027 | M | #44 | **Machine output, schema 1.** NDJSON: one compact object per line on stdout, every object carrying `"schema":1`. Ordering matches human output. Package row: `{"schema":1,"kind":"package","name","pkgver","version","revision","architecture","repository","installed","installed_version","automatic","held","repolocked","auto_removable","short_desc","installed_size","download_size"}`; `installed_version` omitted when not installed, `repository` omitted for `[local]`, exact sizes only on `-u` rows (else `null`), never launder humanised strings. Virtual row: `{"schema":1,"kind":"virtual","name","providers"}`. `show -m` adds a `"properties"` map; one object per block; `-a` emits one per variant. `policy -m` with names is the only array: `{"package","installed"\|null,"candidate"\|null,"versions":[{"version","precedence","installed","candidate","repositories":[{"precedence","repository"}]}]}`. `policy -m` without names: `{"package_files":[{"precedence","repository","signed","signed_by","fingerprint"}],"pinned_packages":[{"name","version","reason"}]}`. Machine JSON is never coloured, even with `--color=always`. |
+| FR-028 | S | #44 | **`upgrade --print-uris`.** Upgrade family only. Prints one NDJSON object per planned download: `{"schema":1,"package","pkgver","repository","url","signature_url","size","sha256"}` and stops: no summary, prompt, download, pkgdb write, root or sync. `url = <repository>/<pkgver>.<architecture>.xbps`; `signature_url = <url>.sig2`; `size` is the plan's exact download size; `sha256` comes from `filename-sha256` and is `null` when unavailable. Rows are the plan's downloading actions; `hold` excluded. Empty plan prints nothing, exit 0. With `--dry-run` or `--download-only` it is exit 2. |
+
+Discovery exit codes: 0 success, no matches, missing `show`/`policy` names, empty listing, `-u` with nothing upgradable, `--print-uris` with nothing to do; 1 zero patterns/names, malformed glob or regex, `xbpretty:` runtime errors; 2 unknown flags, conflicts, `--print-uris` with another stop flag, usage. A child that fails for a reason other than a missing `-S`/`-R -S` target passes its stderr and exit code through; a silent exit 2 from `-S`/`-R -S` is "not found" and becomes a notice.
+
+### 3.4 History and replay
+
+| ID | Pri | Src | Requirement |
+|---|---|---|---|
+| FR-029 | M | #46 | **History store.** Default `/var/lib/xbpretty/history/`; override order `--history-dir DIR` > `XBPRETTY_HISTORY_DIR` > default. One entry file `<dir>/<id>.json`, pretty JSON, two-space indent, one trailing newline; temp `<id>.json.tmp`; directory `0755 root:root`, file `0644 root:root`; never chowned to the invoking user. Only `<u32>.json` is an entry. No locking: xbps serialises transactions; ID allocation uses an exclusive-link loop. ID = max existing + 1; gaps and reuse after failure/clear are allowed. Write: serialize to `.tmp` with `O_CREAT\|O_EXCL`, fsync, `os.Link` to the final name (retry with id+1 on `EEXIST`), remove tmp, fsync the directory. Stale `.tmp` files are removed at the start of every mutating history operation, never by a read. Any unreadable/invalid entry fails the whole read with the file named; no partial listing; `history clear --all` bypasses parsing and is the escape hatch. Read requires `schema_version == 1`; a missing/invalid/future version is a hard error; unknown extra keys are ignored on read and never written; no forward migration. |
+| FR-030 | M | #46 | **Schema 1.** Top-level: `schema_version` (1), `id` (must equal the filename), `started_at`/`finished_at` (RFC 3339 UTC `Z`; started after the prompt, before xbps; finished after exit 0), `status` (`Applied`; `Unknown` accepted on read but never replayable), `requested_by` (`"<user> (<uid>)"`; `SUDO_USER`/`DOAS_USER` else `LOGNAME`/`USER` else `root`), `command` (argv without program name; flags and `--` kept), `requested_targets` (raw positionals, not deduped, `[]` for upgrade/autoremove/undo/redo), `implicit` (true only for the implicit-autoremove transaction), `replay_of` (u32 or null), `replay_kind` (`undo`/`redo`/null), `packages` (transitions). Transition: `name`, `arch`, `repository`, `size`, `installed_size`, `operation` (`Install`, `Upgrade`, `Downgrade`, `Reinstall`, `Remove`, `Purge`, `AutoRemove`, `AutoPurge`, `Configure`, `Held`), `before`/`after` `PackageState`, optional `held_reason` (only `ManualHold`). State: `version` (string or null), `auto_installed` (bool or null), `hold`, `repolock`. Operation is derived from snapshots (`before` absent → Install; present→absent without `-f` → Remove, with `-f` → Purge; versions differ → Upgrade/Downgrade by `xbps-uhelper cmpver`; equal and plan action `configure` → Configure; equal otherwise → Reinstall; plan `hold` → Held). `config_files_only` and `altered` are not stored (`altered` is derived as rows whose operation is not `Held`). |
+| FR-031 | M | #46 | **Recording.** Write the entry after the xbps child exits 0, after the after-state snapshot, before the line log, the reboot hint and any implicit autoremove. One row per non-hold plan row that changed something; hold rows are recorded with the entry but never replayed; an entry whose only rows are `Held` is not written. A non-zero xbps exit, dry run, `--download-only`, `update`, `clean`, `download`, `fetch`, empty/hold-only plan, declined prompt, non-TTY refusal and non-root write nothing. A post-commit trigger failure has no separate phase on xbps; a non-zero exit writes nothing. A replay writes one new entry with `replay_of`/`replay_kind` and the actual transitions. A write failure is a warning `xbpretty: history entry not saved: <err>` and never changes the run's exit code. `--no-log` does not disable history. |
+| FR-032 | M | #46 | **`history` list and detail.** `xbp history` lists ascending id with columns ID, Command, Date and Time, Requested-By, Altered; timestamps local `%Y-%m-%d %H:%M:%S %Z`, unparseable shown verbatim; read-only, root-free. Empty/missing store prints `No history entries found.` on stdout and exits 0; when the line log is non-empty and readable it also prints `xbpretty: earlier transactions are only in the line log and cannot be replayed; run 'xbp log' to read them` on stderr. `history <id\|last>` = `history info`; `info`/`show` require a selector and print ID, Status, Command, Requested-By, Started, Finished, Requested Targets (`None` when empty), Altered, and `Replay of: <id> (<kind>)`, then one table per non-empty operation group in fixed order Remove, AutoRemove, Purge, AutoPurge, Install, Reinstall, Upgrade, Downgrade, Configure, Held, with Name, Old Version, New Version and (Held) Reason. Bad selector `xbpretty: invalid history selector "<x>"; use an integer id or 'last'` (2); unknown id `xbpretty: history entry <id> not found` (1); `last` on empty `xbpretty: history is empty` (1); `info` without target `xbpretty: history info needs an entry id or 'last'` (2); positionals `xbpretty: history takes no package arguments` (2). |
+| FR-033 | M | #46 | **Undo.** `xbp undo [id\|last]` replays the entry's `before` state. Rows `Configure`/`Held` are not replayable; a no-row entry is `xbpretty: history entry <id> has no package changes to replay` (1); a `Reinstall` row is `xbpretty: history entry <id> contains a reinstall, which has no inverse; undo cannot continue` (1). `before.version == null` → remove if present (forced/purge); `before.version != null` and differs → restore that exact version; already equal → leave untouched including the automatic bit. A current state that differs from the recorded `after` prints `xbpretty: warning: <pkg> is <current> but history entry <id> recorded <recorded>; undo still restores <target>`. Preflight for every restore: look for `<name>-<version>.<arch>.xbps` in `/var/cache/xbps`; if absent ask `xbps-query -R -p pkgver <name>-<version>`; if neither route serves it, print one line per package `xbpretty: undo cannot restore <pkgver>.<arch>: not in /var/cache/xbps and no configured repository serves that version` and exit 1 **before any mutation**. Then restore phase (`xbps-install -y -f [-R <replay-repo>] <exact specs>`) then removal phase (`xbps-remove -y [-f] <names>`), one combined summary and one prompt; empty both → `Nothing to do.` exit 0; partial phase-2 failure prints `xbpretty: <undo\|redo> is partial: the restore phase completed and the removal phase failed` and exits xbps's code. A replay never syncs and never triggers implicit autoremove. |
+| FR-034 | M | #46 | **Replay repository and guarantees.** For cache-only restores: `os.MkdirTemp("/var/tmp", "xbpretty-replay-")`, link/copy the archives preserving `<pkgver>.<arch>.xbps`, run `xbps-rindex -a <dir>/*.xbps` (with `-f` when the index already has the entry), pass `-R <dir>` on top of the system repositories, remove the directory on exit, and sweep stale `/var/tmp/xbpretty-replay-*` older than a day on the next replay. One `-f` is mandatory for restores; `-f -f` is never used. After both phases, restore the recorded automatic-install bit with bulk `xbps-pkgdb -m auto\|manual <names...>`; a failure is `xbpretty: could not restore the automatic-install flag for <name>` (warning). Holds and repolocks are recorded but never changed. Local replay repositories verify only the SHA-256 computed from the cached file, not RSA; the archive was signature-verified when xbps downloaded it. Guaranteed on exit 0: every replayable package's installed pkgver equals the target; absent-before packages are removed; the automatic bit is restored best-effort; at most two xbps transactions; a new entry and one audit line on full success. Not guaranteed: filesystem exactness (one `-f` preserves modified conffiles), dependencies outside the entry, missing archives (fail closed), moved repositories, purged configuration, hold/repolock changes, partial commits, interrupted transactions. |
+| FR-035 | M | #46, #54 | **Redo, clear, and the line log.** Redo replays the entry's `after` state with the same algorithm and preflight: Install/Upgrade/Downgrade/Reinstall restore `after.version`; Remove/AutoRemove uninstall; Purge/AutoPurge uninstall with `-f`; Configure/Held are not replayable. Bare `undo` targets the newest entry; bare `redo` targets the source entry of the newest undo when it has `replay_kind = "undo"`, else the newest entry; explicit `redo last` always means the newest entry. `history clear <id\|last>` deletes one entry and prints `Cleared history entry <id>.`; `clear --all` deletes every numeric entry and stale tmp and prints `Cleared N history entries.`/`Cleared 1 history entry.`; both root-only. The append-only line log keeps its ADR-0008 shape; its `<command>` vocabulary extends with `purge`, `autopurge`, `undo`, `redo`; a replay writes one line after the whole command exits 0; a successful transaction that writes a history entry also appends its line; `update` keeps its package-less line. The line log is never imported into history: legacy lines lack old versions, operations, arch/repository, sizes, the automatic bit and snapshots, so synthesised entries would offer undo that cannot be honoured. `[Xbps] transaction_log = false` and `--no-log` stop only the line log. |
+### 3.5 Downloads
+
+Predownload is an accelerator, never the authority: xbps resolves, verifies and installs; xbpretty only fills the cache in parallel. A real transaction never changes behaviour or exit code because predownload failed. The two explicit-download surfaces (`download`, `--download-only`) have no xbps child to fall back to and fail closed.
+
+| ID | Pri | Src | Requirement |
+|---|---|---|---|
+| FR-036 | M | #47 | **Trigger, placement and download set.** Every real transaction with a non-empty download set predownloads: `install`, all four upgrade names, `remove`/`purge`/`autoremove`/`autopurge` (empty set), and `undo`/`redo` replays. Placement: after the prompt/root/non-TTY checks, before the child. `--dry-run` downloads nothing; `--print-uris` stops earlier; `update`, `clean`, discovery, `fetch`, `download` and the implicit-autoremove transaction never enter this path. The download set is plan rows with action `install`/`update`/`reinstall`/`download`, an `http://`/`https://` repository, and `DownloadSize > 0` (or a download action whose size was not reported). `hold`, `remove` and `configure` are excluded even when their size fields are non-zero. |
+| FR-037 | M | #47 | **URLs, hashes and transport.** Archive `<repository-without-trailing-slash>/<pkgver>.<arch>.xbps`, signature `<archive>.sig2`; `pkgver` includes the revision; `arch` includes `noarch`; never invent a mirror, path suffix or alternate filename; trim a trailing `/` only; reject `/`, `\`, `..` or NUL in a filename with `xbpretty: invalid package filename from repository metadata: <pkgver>` (1). One bulk offline `xbps-query -R -s '' -p filename-sha256` per run, parsed as `<pkgver>: <sha256> (<repository>)` keyed by `(repository, pkgver)`. `download` resolves each name with `xbps-query -R -S <name> -p pkgver,repository,architecture,filename-sha256` (4 lines = hash present, 3 = absent, fewer = resolution error). Local paths and `file://`: excluded from predownload (xbps does not cache local archives); `download` copies the archive and `.sig2` when present and verifies SHA-256. `ftp://`: excluded from predownload with one warning `<N> archive(s) from ftp:// repositories were not predownloaded; xbps will fetch them`; `download` fails that name with `<pkgver>: ftp:// repositories are not supported by xbp download`. Missing metadata hash: predownload fetches unverified with `<pkgver>: no SHA-256 in repository metadata; xbps will verify it at install`; `download` refuses with `<pkgver>: repository metadata has no SHA-256; refusing to write an unverifiable package`. Missing `.sig2` on a remote repo: predownload falls back; `download` fails with `<filename>.sig2: 404 Not Found; the repository no longer serves the signature`. |
+| FR-038 | M | #47 | **Concurrency, retry, verification, fallback.** One task per archive, signature first then archive, three concurrent transfers per URL host:port, no global cap, no mirror rotation or fairness (xbps resolves one URL per package), plan order as the queue. Go stdlib `net/http` only: proxy from `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`; system TLS roots, no `InsecureSkipVerify`; HTTP/2 attempted; compression disabled; dial/TLS 30 s; header 120 s; 120 s idle-body watchdog; 10 redirects, https→http refused; `User-Agent: xbpretty/<version>`; no resume; `<filename>.part` next to the destination with `O_TRUNC`; publish by fsync + atomic rename; cache files `0644 root:root`; disk preflight from plan sizes against `statvfs`. Four attempts per URL, no backoff; retry timeouts/reset/EOF and 408/429/5xx; 404, other 4xx, TLS failure, https→http, hash mismatch and malformed responses are not retried. SHA-256 always when metadata has it; mismatch deletes `.part` and fails the file with `xbpretty: <filename>: SHA-256 mismatch: expected <hex>, got <hex>`; RSA `.sig2` verification is deferred to xbps. Cache scan: both files present and hash matches → hit; archive present/signature missing → fetch signature; archive missing → fetch pair; hash mismatch → delete both and refetch; `.part` is truncated. A real transaction failure prints `xbpretty: predownload: <N> of <M> archives could not be fetched; xbps will download them` and continues; a metadata/cache/space failure prints the matching `predownload skipped: ...; xbps will download the archives` warning and continues. `--download-only`/`download` abort on the first exhausted file or hash mismatch, keep verified files, print per-file errors and exit 1. `-c`/`-r` passthrough to xbps disables predownload silently (verbose line only). |
+| FR-039 | M | #47 | **`xbp download PKG…`.** Named packages only, not the plan closure; no root, summary, prompt, sync, dry-run, `--print-uris`, implicit autoremove, log or history; reads the current index only. Names are deduplicated preserving first occurrence; each is resolved per FR-037. Destination is the current directory with `<pkgver>.<arch>.xbps[.sig2]`; an existing matching archive is reused, a mismatching one is overwritten by atomic rename; a missing remote `.sig2` is fetched even when the archive is reused. Missing names print `xbpretty: <name>: not found in any configured repository`, the others still download, and the run ends with `xbpretty: Some packages were not found.` exit 1. No repositories at all: `xbpretty: no repositories are configured; add one in /etc/xbps.d`, exit 1. Zero names: `xbpretty: download needs at least one package`, exit 1. On complete success print exactly `Downloads Complete:` then one `  <filename> was written to ./<filename>` per package on stdout; no block on a partial run. The guarantee is SHA-256 from authenticated repository metadata and the signature carried along, not an RSA check by xbpretty. |
+| FR-040 | M | #47 | **`--download-only` (`-d`).** Six transaction commands only. Flow: normal summary, the same prompt/root/non-TTY checks as a real transaction, predownload the plan's download set, then stop: no real xbps command, no pkgdb write, no implicit autoremove, no log, no history. Root is required (the cache is root-owned); non-root prints the summary and hint, exit 1. `-y` skips the prompt; `-n` refuses with exit 1; non-TTY without `-y` is the normal exit 1. `--dry-run` wins and downloads nothing. An empty set (remove/purge/autoremove, all local, all hold/configure) is a verified no-op, exit 0. All valid cached: no network, no output, exit 0. No completion line. Missing metadata hash is allowed (warning); missing `.sig2` or a hash mismatch is a failure, exit 1. |
+| FR-041 | S | #47 | **Download progress.** Feed the same 7-row `Downloading Packages` view from an event stream (`Start`, `CacheHit`, `FileStart`, `FileTick`, `FileDone`, `Retry`, `FileFailed`, `Finished`), coalesced to at most one redraw per 150 ms with an immediate redraw on cache hit/done/failed/phase change. `StreamParser` is seeded with predownload completions so xbps's own fallbacks continue the same counters. `.sig2` ticks/completions are ignored for Packages/Data/Speed/Remaining. `position = Σ completed plan sizes + in-flight bytes`, clamped to total; cached bytes count. `Speed = ceil(position/elapsed)`, `Remaining = ceil((total−position)/speed)`, `—` when position 0, done or speed 0. On `[*] Verifying package integrity`, snap to 100% for one frame then switch to Install. On success clear; no completion line. On failure clear, then print the captured errors. `-v` prints `verbose: GET <url> (attempt n/4)` and suppresses all progress. Ctrl-C cancels the context, removes `.part`, clears the box and exits 130. |
+
+### 3.6 Fetch
+
+`xbp fetch` scores every Void mirror against the user's real repository path and writes **exactly one** mirror into the managed `repository=` lines, proves the result with `xbps-install -S`, and reverts on failure.
+
+| ID | Pri | Src | Requirement |
+|---|---|---|---|
+| FR-042 | M | #48 | **Pipeline.** `xbp fetch` takes no arguments and no `--` passthrough. Order: flags/N-A checks → repository discovery → mirror list → country filter → probe/rank → select → validate → write → `xbps-install -S` → report. Root is required only at the write step; probing is read-only. `-R`/`-C`/`-r` do not apply. |
+| FR-043 | M | #48 | **Mirror list.** Source `https://xmirror.voidlinux.org/raw/mirrors.lst`, TSV `<region>\t<url>\t<location>\t<tier>`; trim all trailing `/`; skip blanks/`#`; require ≥4 tab fields, non-empty region, http(s) URL, positive integer tier; location may be empty (`—`); dedupe by normalised URL keeping the first. 10 s total timeout. On any failure print `xbpretty: mirror list unavailable; using the built-in snapshot from 2026-11-05` (warning) and use the embedded 33-row snapshot; if the snapshot is also empty print `xbpretty: no mirror list available`, exit 1. No runtime disk cache. |
+| FR-044 | M | #48 | **Probe and score.** For each candidate on the primary path: `GET {base}{primary}/{arch}-repodata`, `Range: bytes=0-262143`, `Accept-Encoding: identity`, `User-Agent: xbpretty/<version>`. Validate status 200/206, ≥4 body bytes and the zstd magic `28 B5 2F FD`; a server ignoring Range is read to 262 144 bytes and closed. `latency = max(1, round(TTFB ms))`; `score = max(1, round(total ms))`; `speed = bytes / max(1ms, tEnd−tFirst)`. One round, no retries. 10 concurrent probes; timeouts dial 2 s, TLS 2 s, whole probe 5 s. Sort score↑, latency↑, tier↑, URL↑; no tier weighting. Failed mirrors are counted and summarised `xbpretty: N of M mirrors did not respond` (warning); `-v` prints `verbose: <url>: <reason>`. |
+| FR-045 | M | #48 | **Selection and validation.** Write **one** mirror, never N (xbps is first-match, not load balancing; N would multiply syncs and silently mix package sets). `--auto [N]` (bare 3, range 1..255) validates the N fastest in rank order and writes the first that passes. Non-TTY without `--auto` takes the same top-3 shortlist, writes one and prints the table. Before writing, every required suffix must answer `HEAD {base}{suffix}/{arch}-repodata` (2 s; 405/501 falls back to `GET Range: bytes=0-0`). A candidate failing any suffix is skipped; none passing is `xbpretty: no candidate mirror serves all configured repositories`, exit 1. `--non-free` adds `/nonfree` and `/multilib/nonfree` to the validation set. The picker's choice is validated once; a failure errors, exit 1, no silent second choice. |
+| FR-046 | M | #48 | **Fetch flags.** `--auto [N]` (`xbpretty: --auto must be between 1 and 255`, 2); `-c/--country <V>` repeatable, case-insensitive exact match on the TSV region or a comma/space-delimited word of the location, union; empty result `xbpretty: no mirrors match the requested country or region`, 1; missing value `xbpretty: -c/--country needs a value`, 2. `--https-only` rewrites the probe scheme and writes the rewritten URL. `--non-free` manages derived `/nonfree` files. `--sources`, `--debian`, `--ubuntu`, `--devuan` are N/A per §3.2.1. `--dry-run` is an xbpretty extension: probe, table, chosen marker, no write, exit 0. `-y`, `-n`, `--simple`, `--update`, `--no-sync`, `--machine` are not accepted (2). |
+| FR-047 | M | #48 | **Write, backup, manifest.** One file per managed basename in `/etc/xbps.d/`, same basename as the system file it masks, mode `0644 root:root`, with a provenance header `# Written by xbpretty fetch on <RFC3339>; revert with 'xbp clean --fetch'.` then every original line with managed `repository=` values rewritten. Managed = host `repo-default.voidlinux.org`, a live-list mirror host, or the previous chosen host; every other line (local paths, `file://`, custom hosts, `ignorepkg`, `bestmatching`, `preserve`, `architecture`) is copied verbatim. A managed path suffix is copied exactly. A file with no rewritten line is not written. Atomic temp+rename, all-or-nothing. First write saves `<basename>.xbpretty-backup` (only if absent). Manifest `/var/lib/xbpretty/fetch.json`, schema 1, atomic, with `written_at`, `mirror`, `arch`, and per-file `path`, optional `backup`, `created`, `sha256`; untouched entries are carried over. |
+| FR-048 | M | #48 | **`clean --fetch`.** Reads the manifest and, for each current entry, restores `backup` when present else deletes `path`; then deletes the manifest; silent except `-v`. No manifest: `xbpretty: no repository configuration written by xbp fetch`, exit 1. Corrupt manifest: `xbpretty: reading /var/lib/xbpretty/fetch.json: <error>`, exit 1, touch nothing. An absent listed file is skipped and still succeeds. A file hand-edited after fetch prints `xbpretty: <path> was modified after fetch; restoring <backup>` (or `...; removing it`) as a warning, then reverts. Root only; non-root prints `hint: run with sudo to restore the repository configuration`, exit 1. No sync after revert. `--lists` wins when both flags are given. |
+| FR-049 | M | #48 | **Sync validation and revert.** After a successful write of all files and the manifest, run `xbps-install -S` (root, stdin inherited, stdout+stderr to stderr). xbps always exits 0 from `-S` even when every fetch fails, so scan the captured output for lines beginning `ERROR:`. If the line contains the URL of any repository written by this run, revert the files written by this run, keep the manifest if a revert step fails (`xbpretty: reverting /etc/xbps.d/<name>: <error>`), print `xbpretty: repository sync failed; previous configuration restored` and exit the child's non-zero code if any, else 1. `ERROR:` lines for repositories not written by this run are forwarded, followed by `xbpretty: repository sync reported errors; review the output above` (warning) and do not change the exit code. A non-zero `xbps-install` exit reverts and passes the child's code. |
+| FR-050 | M | #48 | **Rootless, dry-run, output.** Rootless: run the read-only pipeline, print the ranking table with `Chosen`, then `hint: run with sudo to write the repository configuration` on stderr, exit 1; touch nothing. Rootless or root with `--dry-run`: same table, then `Dry run: no repository configuration was written.` on stdout, exit 0. Root check is after probing and before the picker. The ranking table is borderless on stdout with columns `Mirror`, `Region`, `Location`, `Tier`, `Latency`, `Speed`, `Score`, `Chosen`; mirror/region/location left, the rest right; `Latency`/`Score` integer `ms`; `Speed` Binary precision 1 + `/s`; `Chosen` is `*` on the chosen row. `Sources have been written to <path>` once per written file on stdout. The picker is not shown with `--auto`, `--dry-run`, a non-TTY, `TERM=dumb`, `Plain`, non-UTF-8, or non-root. |
+
+Fetch progress is the 6-row `Testing Mirrors` view: message `Finished: <mirror URL>` (last successful), `Mirrors: done/total`, `Elapsed`, ratio `done/total`; plain fallback ` | Mirrors: cur/tot`; no completion line.
+
+### 3.7 Configuration
+
+The schema is nala's TOML exactly, plus one xbps-only table. The parser is a stdlib-only subset. Unknown keys and values are hard errors. Config errors exit 2.
+
+| ID | Pri | Src | Requirement |
+|---|---|---|---|
+| FR-051 | M | #49 | **Schema.** Exactly these tables, any order: `[Nala]` with six booleans `auto_remove` (true), `auto_update` (true), `update_show_packages` (false), `full_upgrade` (false), `simple` (false), `assume_yes` (false); `[Ui]` with `mode` (`Auto`, `Plain`, `Tui`; default `Auto`) and `unit` (`Binary`, `Decimal`; default `Binary`); `[Color]` with `mode` (`Auto`, `Always`, `Never`; default `Auto`); `[Color.theme]` with exactly nine PascalCase roles `Primary`, `Secondary`, `Highlight`, `Regular`, `ProgressFilled`, `ProgressUnfilled`, `Notice`, `Warning`, `Error`; `[Xbps]` with `install_path`, `remove_path`, `query_path`, `rindex_path`, `uhelper_path`, `pkgdb_path` (defaults `xbps-install`, `xbps-remove`, `xbps-query`, `xbps-rindex`, `xbps-uhelper`, `xbps-pkgdb`) and `transaction_log` (true). Aliases `[nala]`, `[ui]`, `[color]`, `[color.theme]`, `[xbps]`. No other table or key. `theme = { ... }` in `[Color]` and `[Color.theme.Primary]` subtables are rejected by name. A role is an inline table `{ fg, bg?, modifier? }`; `fg` required; modifier omitted means BOLD, `""`/`[]` means none; named/hex/0-255/`{Rgb=[r,g,b]}`/`{Indexed=n}` colour grammar; nine modifiers. |
+| FR-052 | M | #49 | **TOML subset.** Supported: blank lines, `#` comments, table headers, bare keys, `true`/`false`, decimal integers, one-line arrays (trailing comma allowed), one-line inline tables (no trailing comma), basic/literal strings with nala's escapes, LF/CRLF. Rejected with exact errors: floats, dates/times, multiline strings, dotted keys, arrays of tables, quoted keys, non-ASCII bare keys, hex/octal/binary integers, underscores in integers, BOM, invalid UTF-8, files over 1 MiB, lines over 1 MiB, duplicate key/table, alternate theme forms, multi-line array/table, missing `=`/value/text, unterminated constructs. Empty/comment-only/missing tables mean defaults. A table may appear once; `[Color.theme]` implicitly creates `[Color]`; a later explicit `[Color]` is allowed once. |
+| FR-053 | M | #49 | **Validation and errors.** Type errors name the table/key and the actual TOML type. Enums use exact casing and list the allowed values. Styles validate role, `fg`, unknown keys, colour and modifier with the exact messages of the resolution. `[Xbps]` paths: non-empty, no control characters, bare program name (no `/`) or absolute path; no arguments, no `~`/env expansion; existence is a runtime error (exit 1) checked only for the binaries the selected command uses. Error format `xbpretty: config <path>:<line>: <message>` (file-level `xbpretty: config <path>: <message>`), warnings `xbpretty: warning: config <path>:<line>: <message>`, all stderr. A missing default layer is silent; an existing invalid layer is a hard error; `--config` missing/unreadable/invalid is a hard error; `--config -` and `/dev/stdin` are rejected. `--help`, `--version`, `completion`, `link` bypass config. |
+| FR-054 | M | #49 | **Layers and selection.** System `/etc/xbpretty/config.toml` always read unless `--config`; user `$XDG_CONFIG_HOME/xbpretty/config.toml` when absolute, else `<home>/.config/xbpretty/config.toml`; `--config FILE` (relative to CWD, long-only, before/after the subcommand, last wins) replaces both. `<home>`: non-root `os.UserHomeDir`; root with `SUDO_USER` (wins) or `DOAS_USER` that user's passwd home; root with neither, root's home. When an invoking user is present, `XDG_CONFIG_HOME`/`XDG_STATE_HOME` are ignored. Each existing layer is parsed and validated independently; later wins per key; theme styles merge role-by-role. `XBPRETTY_CONFIG` is not supported. |
+| FR-055 | M | #49 | **Privileged path trust.** When euid is 0, a `[Xbps]` path key is honoured only if the supplying layer is a regular file owned by uid 0 with no group/world write bit, checked on the same opened descriptor that is read (owner, mode, regular; symlinks followed and judged on the target inode). An untrusted key is ignored, never executed, with one warning per key: `xbpretty: warning: config <path>: ignoring [Xbps] <key>: file is not owned by root or is group/world-writable (uid N, mode M)`. The layer's non-privileged keys still apply. The system layer is not automatically trusted. Non-root honours all layers. A legacy `xbps_*_path` is gated identically after alias resolution. |
+| FR-056 | M | #49, #54 | **Legacy keys and one-release window.** Rev 6 recognises ten rev-5 top-level flat keys before the first table header: `assume_yes`→`[Nala] assume_yes`, `sync`→`[Nala] auto_update`, `log`→`[Xbps] transaction_log`, `xbps_install_path`/`xbps_remove_path`/`xbps_query_path`→the three `[Xbps]` paths, `color`→`[Color] mode` with `auto/always/never`→`Auto/Always/Never`; `verbose`, `box_style`, `progress_bar` are retired and ignored. Aliases warn per key: `xbpretty: warning: config <path>:<line>: key '<k>' is deprecated; use <target> (legacy keys are removed in rev 7)` (retired variants: `key 'box_style' is retired and has no effect`, `key 'progress_bar' is retired; use [Ui] mode = "Plain"`, `key 'verbose' is retired; pass -v on the command line`). Within a file the canonical key wins; only the "is ignored" variant prints. Across layers the later layer wins regardless of spelling. Rev 6 also accepts rev-5 value forms for the ten keys only: quoted booleans and bare strings at top level (rev 5 accepted `xbps_query_path = /usr/bin/xbps-query`, `box_style = ascii`, `assume_yes = "true"`). Everything else stays strict TOML; duplicate keys are an error. Nothing is rewritten, converted or backed up. Rev 7 rejects the ten names as unknown keys (exit 2). |
+| FR-057 | M | #49 | **Precedence.** Only an explicitly passed CLI value overrides config. Colour: `--no-color` > explicit `--color` > `[Color] mode` > `Auto`; then `Never` → no ANSI, `Always` → ANSI even on a pipe, `Auto` → ANSI iff that stream is a TTY and `NO_COLOR` is unset/empty. UI mode: `--tui` forces `Tui` (upgrades `Plain`); `--no-tui` demotes `Tui` to `Auto` and leaves `Auto`/`Plain`; neither → file. Assume-yes: `-y` > `-n` > file. Autoremove: flag > file > true. Sync: `--update`/`--no-update`/`--no-sync` > `auto_update` > true. Simple: `--simple` or file. Full: `--no-full` > `--full`/`--safe` > file (all argv no-ops). Log: `--no-log` > `transaction_log` > true; it disables only the line log. History dir: `--history-dir` > `XBPRETTY_HISTORY_DIR` > default. Binary paths: config only, trust-gated. Verbose: `-v` only. `--debug` implies verbose and dumps resolved config. |
+| FR-058 | M | #49, #54 | **Migration deliverables.** `docs/config.toml.example` is the canonical example and parses to `Defaults()`. `docs/migration-rev6.md` covers the key map, retired keys, behaviour changes, the system layer, sudo, the line log and history, verification, rollback and the rev-7 deadline. The README carries a `### Migrating from rev 5` section. A rev-6 run writes no config file, no backup and no marker; warnings never change the exit code. One aggregate warning prints once per run when any legacy key was seen: `xbpretty: warning: rev 5 config keys are accepted for rev 6 only; see https://github.com/soubarnak/xbpretty/blob/main/docs/migration-rev6.md`. `--debug` adds one line per legacy key and a summary. |
+| FR-059 | M | #49 | **The `-c` collision.** `--config` is long-only global. `-c` is fetch-only `--country`; `-c` on any other command or before the command is `unknown flag -c` plus `xbpretty: -c is fetch's --country; config is --config`, exit 2. `xbpretty --config f fetch -c IN`, `xbpretty fetch --config f -c IN` and `xbpretty fetch -c IN --config f` all work. |
+| FR-060 | M | #54, #55 | **System layer and `/etc` packaging.** `/etc/xbpretty/config.toml` is absent by default; the package does not create the file or the directory and the template has no `conf_files=` line. If an administrator creates it, it is root-owned, not group/world-writable, read before the user layer, and subject to FR-055. The example and migration guide install under `/usr/share/doc/xbpretty/` as `config.toml.example` and `migration-rev6.md`. |
+
+### 3.8 Inline output and visuals
+
+The rendering rule: every glyph, role, string and spacing is nala's unless xbps cannot supply the element; every adaptation is listed in Appendix A.4. Every stream is stderr except durable output.
+
+| ID | Pri | Src | Requirement |
+|---|---|---|---|
+| FR-061 | M | #45 | **Theme and colour.** Nine roles with nala's defaults and exact SGR prefixes; a Style is `{fg, bg?, modifier?}`; `Regular` is visible in the widget and TUI but never in the inline summary. Section rules, labels, headers, package names, version diff, footer, prompt, prefixes and widget elements use the role map of ADR-0012. Colour precedence follows FR-057; `NO_COLOR` is honoured (extension); `TERM=dumb` disables the UI, not colour; `--no-color` emits no ANSI at all; `Always` forces ANSI on a pipe; forwarded child output is never repainted. |
+| FR-062 | M | #45 | **Inline summary.** Sections in fixed order `Remove, AutoRemove, Purge, AutoPurge, Install, ReInstall, Upgrade, Downgrade, Configure, Held`, filtered to non-empty; `Downgrade` never appears on xbps. One `=` rule before/after every label and before/after ` Summary`; rule width = stdout terminal width, else positive `$COLUMNS`, else 80, used even when piped. Label is one leading space plus Highlight(label). Tables are borderless (`NOTHING` + `DynamicFullWidth`), 2-space minimum gaps, one trailing space, ANSI-aware measurement, only the last column right-aligned; full width on a TTY, natural width when piped; wrapping/hard-split rather than truncation, with narrow (<80) squeezed width best-effort. Columns and size semantics are the operation table of ADR-0012. Footer: one `" " + "<label> <count>"` per non-empty section, no colon/colour; blank line; ` Total download size: <size>` only when > 0; always one ` Disk space required:`/` Disk space to free:` line from `Σ(new installed) − Σ(old installed) − Σ(removed installed)`; blank line. Sizes use `[Ui] unit`, precision 0, strict `>` (1 MiB → `1024 KiB`). ` Nothing to do.` for an empty plan. `--simple` prints one `Highlight(label): count` line per non-empty section with no leading space, then two-space indented names joined by `, ` (Held appends ` (<reason>)`), then the shared size block; no rules, no Summary heading, no version diff, no TUI. |
+| FR-063 | M | #45 | **Version diff.** Old version raw. New version split at the last `_` into upstream and revision; if upstreams are equal emit `<upstream>_` plain + Notice(revision). Otherwise split the whole version at `.`; find the first differing component or where the old runs out; every new component from there on is wrapped individually in Notice; earlier components plain; the revision rides on the last component, so `_rev` is inside the highlighted tail. A `.` between two highlighted components is plain and resets. Held rows with differing versions also get the diff. Examples: `3.5.1_1 → 3.5.4_1` → `3.5.` + Notice(`4_1`); `1.5.7_1 → 1.5.7_2` → `1.5.7_` + Notice(`2`). `internal/summary.VersionDiff`'s current ANSI-202 split-revision output is an implementation defect to fix, not a spec rule. |
+| FR-064 | M | #45 | **Progress widget.** Shown for a real execution with something to display, when `[Ui] mode != Plain`, stdout and stderr are TTYs, `TERM != dumb`, not `-v`, not `--dry-run`. Width `min(columns(stderr), 80)`, left-aligned; heights fixed: Download 7, Install 6, Remove 6, Update 6, MirrorScore 6. Rounded `╭╮╰╯`, title `"  <title>  "` centred; divider `├─┤` on the full frame width with centred ` Progress ` and right ` NN% `; bar `━` × `W−4`, fill `round`, percent truncated, split by colour only; info rows are two 50% halves with their own label widths; no spinner, no animation, no completion line. Numbers: Binary precision 1; `Speed = ceil(position/elapsed)`; `Remaining = ceil((total−position)/speed)`; `Elapsed = ceil(elapsed)` through `time_str`; units strict `>`. Download counts archives (not `.sig2`), position from exact plan bytes, snaps to 100% on verification; Install uses the two-unit model; Remove, Update and MirrorScore use the content of ADR-0012. On success clear to `\r`; on failure clear then print the captured child output and hint; SIGINT/SIGTERM forward to the child and exit 128+signal; a signal-killed run writes no log line. |
+| FR-065 | M | #45 | **Plain progress and suppression.** When the widget is unavailable but stderr is a TTY with `TERM != dumb`, draw one 40-cell line `[` + `=`×round(40×ratio) + ` `×rest + `] ` + `%3d` + `% ` + message + filters, redrawn with `\r\x1b[2K`, no colour. Default message `Working...`; transfer views append `<position>/<length> <rate>/s`; xbpretty's adapted Update view appends ` | Repositories: cur/tot`; filters ` | Package:`, ` | Packages:`, ` | Mirrors:`. When stderr is not a TTY, `TERM=dumb`, or `-v`, print no live line and forward child output verbatim to stderr. Discovery, `clean`, dry runs and zero-action plans have no widget. |
+| FR-066 | M | #45 | **Durable output.** stdout carries only durable output: the full/simple/read-only summary, `Nothing to do.`, `update`'s count/list line, `download`'s block, discovery rows and NDJSON, `--version`/`--help`/completions, the fetch table and `Sources have been written to …`/`Dry run: …`. Everything live, interactive or diagnostic is stderr: prompt, widget, plain line, persistent messages, forwarded child output, plan stderr, hints, notices, warnings, errors, verbose lines, log failures. The prompt is on stderr and stdin is still read when stderr is redirected. A failed stdout write (EPIPE) stops writing, does not abort the transaction, and exits with the run's code. **TUI exception:** in `Tui` mode the transaction summary screen is the screen and stdout is empty for that transaction; every non-TUI path keeps this rule. |
+### 3.9 Full-screen TUI
+
+There are exactly three alternate-screen surfaces (transaction summary, history detail, fetch picker) plus the inline progress viewport. There is no four-tab shell. Release-info is N/A.
+
+| ID | Pri | Src | Requirement |
+|---|---|---|---|
+| FR-067 | M | #50 | **Surfaces, gates and mode.** Two predicates: `use_enhanced_ui := resolvedMode != Plain && stdout is a TTY && TERM != dumb`; `use_fullscreen_ui := resolvedMode == Tui && enhanced && stdin is a TTY && locale is UTF-8`. Mode resolution follows FR-057. Full-screen surfaces are: S1 transaction summary (full-screen gate + root + non-empty plan + no `-y`/`-n`/`--simple`/`--dry-run`), S2 history detail (full-screen gate; read-only; no root), S3 fetch picker (enhanced gate + TTY stdin + UTF-8 + root + no `--auto`/`--dry-run`). S4 inline progress viewport is §3.8 (FR-064) in every mode except `Plain`; S5 release-info is N/A (FR-071). `-y`/`assume_yes` excludes S1; `-n` excludes S1 and takes the text refusal; `--simple` excludes S1; `--dry-run` excludes S1 and S3; hold-only and empty plans exclude S1; non-root mutating commands exclude S1 and take the text summary + hint. The entry floor is 60×18: below it the full-screen gate is false at entry and the text path is used with no warning. `TERM=dumb`, non-TTY stdout/stdin and a non-UTF-8 locale fall back with no warning. Only a failed init/render warns, exactly once (`xbpretty: full-screen interface unavailable (<error>); showing the text summary` or `... failed ...`), and the transaction's exit code is preserved. |
+| FR-068 | M | #50 | **Transaction summary screen.** Thick border `┏━┓┃┗┛`, title `"  xbpretty <Op>  "` centred (operation-derived: Install/Remove/Purge/Autoremove/Autopurge/Upgrade/Undo/Redo/History), title Highlight, border Primary, one column of inner padding. Two-row tab strip: labels joined by one space, left-aligned; active label Primary, inactive Regular, plus a `━` underline spanning exactly the active label (extension). Tabs are present operations in the fixed order, empty tabs skipped; initial tab is the first present. Table: headers from the tab's whole row set; natural widths per column; deterministic SpaceAround expansion (`R=T−C`, `g=R/N`, `h=R%N`, leading `g/2`, shift by 2 for the selection gutter); package left, versions/reason centred, size right; header Regular; no wrapping, cells clip. Selection starts at row 0; `j`/`↓`, `k`/`↑` clamp, `Home`/`End`, `PgUp`/`PgDn` ±10, wheel ±1; selected row is Primary plus a `❯` marker in a 1-column gutter (extension); scrollbar in a 3-column gutter, thumb `max(1, ...)` clamped to the interior, one-cell top thumb when all rows fit. Footer: one `<Label>:` + `<n> Pkgs` per present operation, one blank, optional `Total download size:` (>0 only), always one disk line; label left, value right-aligned with no separator space (nala quirk); help block at `L+S+1`, centred/wrapped, omitted below 12 columns. `y`/`Y` confirm and leave the screen, starting the real transaction with `-y`; `q`/`Q`/`n`/`N`/`Esc`/`Ctrl-C`/EOF refuse with `xbpretty: user refused confirmation`, exit 1; `s` opens package info; `Enter` is unbound (changelog N/A); everything else ignored. Commit/cancel exit codes follow §3.10. |
+| FR-069 | M | #50 | **History detail screen.** The same widget with confirmation disabled, title `xbpretty History`, over one parsed entry. Gate: full-screen; no root; no `-y`/`-n`/`--simple`/`--dry-run` involvement. Tabs are the entry's non-empty operation groups in fixed order. Footer is operation counts only: no download row, no disk row. Keys: navigation and `s` as S1; `q`/`Q`/`Esc`/`Ctrl-C`/EOF leave the screen and exit **0**; `y`/`Y`/`n`/`N` are ignored. An entry with no group rows opens as the text detail, never the screen. `xbp history` (the list) is always text. |
+| FR-070 | M | #50, #48 | **Fetch picker.** Rounded `╭╮╰╯` frame, title `xbpretty Fetch`, no outer horizontal padding; a borderless list; a 2-row info band (`Score is how many milliseconds it takes to download the repository index.`, centred, italic) and a 2–3-row help band. Columns: URL (`Mirrors:`, left, flexible, min 24, clipped), Location (left), Region (left), Tier (right), Latency (right), Speed (right, Binary precision 1), Score (right, always present). Fit rule (C1): Location only from 120 interior columns; otherwise drop Region → Tier → Speed only while the URL cannot keep its 24-cell floor; never drop Latency or Score. Marker `✓` on the highlighted row and `☐` on every other; the highlighted row is Secondary + REVERSED across URL and score. Cursor starts at row 0. `j`/`↓`/`k`/`↑` wrap, `g`/`Home` first, `G`/`End` last, `Enter`/`q`/`Q` confirm, `Esc`/`Ctrl-C` cancel with `xbpretty: no mirror was selected` exit 1; `Space` and mouse are ignored. The picker renders data and returns one index; it writes nothing. |
+| FR-071 | M | #50 | **Release-info N/A and minimum size.** xbps has no `Release` file, no release-info change gate and no apt acquire gate: it fails a signature mismatch closed. `xbp update` never opens an alternate screen for a prompt, never reads a key, and proceeds normally; `xbp update` shows only the inline `Updating Package Lists` view. Refusal is not a user decision xbps offers. While a full-screen surface runs below 60×18, the body paints one centred line `Terminal too small (60x18 minimum; now WxH)` keeping the border and title, with no tab/table/footer/cursor/mouse; cancel keys still work and growing back above the floor restores the frame on `SIGWINCH`. Resize recomputes the frame and clears before repaint; clipping order above the floor: tab strip at the right edge, table columns at the table edge, help block first, then size rows, then the table shrinks to its one-row minimum. |
+| FR-072 | M | #50, #52 | **Inline viewport and engine.** S4: after S1 confirms, leave the alternate screen, disable mouse, show the cursor and restore termios; build the viewport before any child that may read stdin; it lives on the normal screen for the rest of the run. No log pane (completed messages are inserted above the box into scrollback), no `q`, no keys. While no child reads stdin, use cbreak (`ICANON`/`ECHO`/`IEXTEN` off, `ISIG` on, `OPOST` unchanged); restore before the commit child starts and on every exit path. If a child writes `ESC[?1049h`, hide the box, leave cbreak and restore termios; on `ESC[?1049l`, re-enable and redraw on the next tick (a 2-state latch, never a general ANSI parser). Ctrl-C is not intercepted and reaches the signal handler; during xbpretty-owned transfers it cancels the context, tears down, prints `xbpretty: interrupted` and exits 130. Engine: stdlib Go only, `syscall`/`unsafe` for termios in `internal/term`, Linux build tags with non-Linux stubs, cell buffer with dirty diff and width-aware flush, wcwidth-style table (combining/ZWJ/VS16 zero, CJK/emoji two, ambiguous one, control zero), input decoder for CSI/SS3/SGR mouse/bracketed paste (paste discarded), SGR-only `Never`, DSR optional with a 100 ms select timeout and a no-anchor fallback (`\r\n`, draw, move up `H`, clear down), ordered restore on normal exit, signal and panic. `Never` removes SGR only; borders, gutter and underline remain. Every full-screen surface paints the body with a `Regular` base so a custom background covers the interior. |
+
+### 3.10 Errors, privileges, streams and exit codes
+
+| ID | Pri | Src | Requirement |
+|---|---|---|---|
+| FR-073 | M | #43, #45, #46, #48, #55 | **Errors, hints, privileges, exit codes.** All xbps/xbps-query calls use `LC_ALL=C`. A hint fires only when **both** the exit code and a stderr substring pattern match; all patterns live in one table; unmatched failures get no hint. On xbps failure print the raw xbps stderr and exit with xbps's code; append a hint for stale index (`xbp update`), package not found, lock held, xbps self-update first, and `ignorepkg`. A failed `remove` runs `xbps-query -X` on each target and lists dependents with the `-- -F` warning. Missing configured binary: `xbpretty: xbps binary not found: <path>`, exit 1. Non-root real execution prints the summary/ranking then `hint: rerun as root: doas|sudo xbp <cmd>` and exits 1 without prompting. Exit codes: **0** success, nothing to do, dry run, download-only, clean, update, all-downloaded, history empty/list, history detail quit, fetch success/dry-run; **1** refusal, non-TTY, non-root, missing package args, runtime errors, missing history entry/empty store/corrupt store, unsupported replay row, missing archive, invalid answer, fetch runtime/cancel, partial download; **2** usage, conflicts, N/A, config, `--print-uris` with another stop flag, TUI `--tui`/`--no-tui` conflict; xbps failures pass through. Refusal is **1**, not 0. |
+| FR-074 | M | #45, #46, #50 | **Signals, EPIPE, terminal loss.** Forward SIGINT/SIGTERM to the child and exit 128+signal; a signalled child writes no log line and no history entry. A failed stdout write (EPIPE) stops writing, does not abort the transaction, and exits with the run's code. A failed full-screen render restores best-effort, warns once, and continues on the text path; a terminal-loss write error marks the surface dead, restores best-effort, warns once, and continues. A TUI panic restores, warns, then re-raises (panic exit 2). Ctrl-C in a full-screen surface is a key (refuse/cancel); in the inline viewport it is a real signal. |
+| FR-075 | S | #45, #46, #50, #55 | **Superset extensions kept.** Error hints and the reverse-dependency hint (FR-073); the append-only transaction log and `xbp log` (ADR-0008; `--limit`, package filter, verbatim stdout, no root, no xbps); the reboot hint after a successful `install`/`upgrade` that changed a `linux*` or `glibc` package (`hint:` Notice); `xbpretty link` (FR-006); `NO_COLOR`; clean EPIPE; the six aliases; the `moo` easter egg. These have no nala counterpart and are specified by their own FRs, not by matrix rows. |
+
+### 3.11 Tooling, packaging and the parity matrix
+
+| ID | Pri | Src | Requirement |
+|---|---|---|---|
+| FR-076 | M | #55 | **Packaging and release.** Rev 6 ships as **0.4.0** (`revision=1`), tag `xbpretty-v0.4.0`; rev 7 is 0.5.0. `srcpkgs/xbpretty/template` is the single version source: `version`, `revision`, `build_style=go`, `go_import_path`, `go_package`, `go_ldflags` version-only (never `-s`/`-w`), `depends="xbps>=0.60.0"`, `pre_build` exports `CGO_ENABLED=0` and `GOFLAGS="-trimpath -buildvcs=false"`. Install: the binary, six symlinks, three completions, `man/xbpretty.8` + `man/xbpretty.conf.5` + six `man8` symlinks, `config.toml.example` and `migration-rev6.md` under `/usr/share/doc/xbpretty/`, the licence; no `/etc`, no `conf_files`, no directories the package creates. Completions and manpages are generated from the shared command table, committed, freshness-tested, syntax/lint checked, and installed; `mandoc -T lint` must be silent. `internal/fetch/snapshot/mirrors.lst` is embedded with a date; `make mirrors` refreshes it; the release manager refreshes when older than 90 days. Release: one job loops the 9 architectures (`x86_64`, `x86_64-musl`, `i686`, `aarch64`, `aarch64-musl`, `armv7l`, `armv7l-musl`, `armv6l`, `armv6l-musl`), gates on tests/vet, completion and manpage freshness, shell syntax, an 8,000,000-byte binary and 3,600,000-byte x86_64 package budget, static link, package contents with no `/etc` path, a clean-root install, and 9 signed packages + signatures + repodata; a missing `XBPS_PRIVKEY` fails the release (`secret XBPS_PRIVKEY is not set; refusing to publish an unsigned repository`). No `CHANGELOG.md`; the tag, generated notes and the release-note block are the changelog. Size note: #50's ≤100 KB budget applies to the TUI engine's own delta, not the `net/http`/TLS stack. |
+| FR-077 | M | #56 | **Parity matrix process.** The two TSVs `testdata/parity/nala-v0.18.2.tsv` (6 columns, 189 rows) and `testdata/parity/matrix.tsv` (8 columns, 189 rows, 37 N/A, `# spec_rev: 6`) are the only source. Appendix A.1 is hand-written rules; A.2–A.4 and `docs/parity/matrix.md` are generated between the `parity` generated-region comment markers and freshness-tested. `go test ./tools/parity` (or the packaged `internal/parity`) enforces counts, bijection, schema, dispositions, evidence grammar, N/A proof (exact refusal or exact absence + AC), no placeholders, cited FR/AC/NFR existence, `[P]` citation coverage, spec-rev match and rendering freshness. A normatively changed row (disposition, xbps mechanism, behaviour) or a new nala surface is a new spec revision; test names, evidence lines, notes and typos are in-place maintenance. A new xbpretty-only feature is an FR, never a matrix row. The inventory is frozen to nala v0.18.2. |
+## 4. Non-functional requirements
 
 | ID | Pri | Requirement |
 |---|---|---|
-| FR-001 | M | Ship one binary `xbpretty`. Dispatch on argv[0]: `xbpretty <cmd>`, `xbp <cmd>`, and symlinks `xbp-install`, `xbp-remove`, `xbp-upgrade`, `xbp-autoremove`, `xbp-update` map to the same commands. |
-| FR-002 | M | `install <pkgs...>` wraps `xbps-install -S <pkgs...>` (index sync on by default, since xbps refuses new packages against a stale index). `--no-sync` drops `-S`. |
-| FR-003 | M | `remove <pkgs...>` wraps `xbps-remove <pkgs...>`. |
-| FR-004 | M | `upgrade` wraps `xbps-install -Su`. `--no-sync` drops `-S`. |
-| FR-005 | M | `autoremove` wraps `xbps-remove -o`. |
-| FR-006 | M | `update` wraps `xbps-install -S` (index sync only, no packages). Requires root. No summary or prompt; streams xbps output per FR-014. |
-| FR-007 | M | Index sync rule for dry-runs: as root, the dry-run includes `-S` where the command uses it. When unprivileged, `--dry-run` omits `-S` and prints a one-line warning that the repo index may be stale. |
-| FR-008 | M | Second-run sync rule: when the dry-run already synced the index (root), the real run omits `-S`, so the index is not fetched twice and the executed transaction matches the previewed one. |
+| NFR-001 | M | Single static binary: `CGO_ENABLED=0`, no cgo, no external Go modules (zero `require` lines), no ncurses/terminfo, stdlib only. The only runtime dependency is `xbps>=0.60.0`. |
+| NFR-002 | S | Wrapper overhead on top of the xbps dry run and the batched `xbps-query` lookups stays under 100 ms for transactions of up to 200 packages. Lookups are batched: at most one call per property set per transaction. |
+| NFR-003 | M | Exit codes are exactly §3.10's set: 0 success/nothing/dry-run/download-only/clean/update; 1 refusal/non-TTY/non-root/runtime/missing history/partial; 2 usage/conflict/N/A/config; xbps failures pass through. A refusal is 1. |
+| NFR-004 | M | Fixture tests cover three families. **Parser:** captured `-n` output including hold, configure and remove rows from at least two xbps versions. **Hints:** stderr and exit code for every hint case, reproduced in a `voidlinux/voidlinux` container; a captured case that stops matching fails. **Parity:** the two `testdata/parity` TSVs enumerate every user-visible nala v0.18.2 surface and its disposition; the checker fails on a missing/extra row, a vague N/A, a cited test that does not exist, or a stale generated rendering. |
+| NFR-005 | M | Durable output only on stdout (FR-066); everything live/interactive/diagnostic on stderr. The one stated exception is the `Tui` transaction summary screen, where stdout is empty for that transaction. |
+| NFR-006 | S | With warm repodata and 25,000 repository rows, the predownload metadata pass completes within 0.5 s and performs no network; a fully cached transaction performs no network. Baseline: 0.26 s / 20,685 rows / 15 repositories. |
+| NFR-007 | S | A fetch run performs one mirror-list request and at most 33 × 256 KiB of probe traffic plus the sync; it never downloads a full `<arch>-repodata` per mirror. Baseline: ~8.25 MiB worst case. |
+| NFR-008 | S | The mirror snapshot is compiled in (`//go:embed` + date constant); no runtime disk cache, no new runtime dependency. |
+| NFR-009 | M | Release artifacts are built from the tagged commit with `CGO_ENABLED=0`, `-trimpath -buildvcs=false`, statically linked and stripped by the packaging path, one package per architecture, no runtime dependency beyond `xbps>=0.60.0`. The binary is ≤ 8,000,000 bytes and the x86_64 `.xbps` ≤ 3,600,000 bytes. The TUI engine's own delta is ≤ 102,400 bytes, measured separately from the `net/http`/TLS stack. |
+| NFR-010 | M | A full-screen surface restores the terminal on every exit path (normal, cancel, signal, panic): mouse off, bracketed paste off, alternate screen left, cursor shown, termios restored, `\r` written, in that reverse order. A terminal-loss write returns control to the text path. |
+| NFR-011 | S | Discovery (`list`/`search`) completes within 1.5 s for 25,000 repository rows and 15 repositories with warm metadata, never touches the network, and uses one property per `-p` call. |
 
-### 3.2 Transaction flow
+## 5. Acceptance criteria
 
-| ID | Pri | Requirement |
-|---|---|---|
-| FR-009 | M | Default mode: run the xbps command with `-n`, print the summary (FR-011/FR-012), then apply FR-016. As root, prompt `[Y/n]` on stderr: empty input, `y` or `Y` proceeds; `n` or `N` aborts with exit 0; any other input re-prompts. On proceed, run the real command with xbps's `-y` appended, so xbps does not prompt a second time. |
-| FR-010 | M | Non-interactive rule: if stdin is not a TTY and neither `-y` nor `--dry-run` is given, print the summary, then exit 1 with a hint to pass `-y`. Never block waiting on a pipe. |
-| FR-011 | M | Summary groups packages into Install / Upgrade / Remove, plus a Hold group when the dry-run reports held packages. Enclosed in Unicode rounded box containers (`╭── Packages To Upgrade (N) ──╮`). Sources: <br>• Install/upgrade/hold rows: parse the `-n` output columns (pkgver, action, arch, repository, installedsize, downloadsize). <br>• Old version and old installed size for upgrades: `xbps-query -p pkgver,installed_size <pkg>`, batched. <br>• Remove rows, including `autoremove`: `xbps-remove -n` for the package list, plus `xbps-query -p installed_size <pkg>` for sizes. <br>Upgrade rows show `old → new` in a unified `Version Delta` column with version diff highlighting in ANSI 202 orange (`\x1b[38;5;202m`). Package names are color-coded (green for install, blue for upgrade, red for remove, orange for hold). `configure` actions are counted but not listed. |
-| FR-012 | S | Render sizes human-readable (B/KiB/MiB/GiB) in aligned columns. End the summary with a rounded Summary card, e.g. displaying operation counts per group, total download size, and net disk delta (`+X MiB disk` or `-X MiB disk`). When stdout is not a TTY or piped, box borders are omitted and clean space-aligned plaintext is rendered. |
-| FR-013 | S | After every real execution that exits 0, append one line to `$XDG_STATE_HOME/xbpretty/transactions.log` (fallback `<home>/.local/state/...`, with `<home>` resolved per FR-019): ISO-8601 timestamp, command, and the package list with versions. Create the directory on first use. Log failures are warnings, not errors. |
-| FR-014 | M | During real execution in interactive mode (`isatty(1) == true`), stream xbps stdout through a PTY (forcing line-buffered output during unpack/configure) and stderr through a pipe, collapsed into an in-place 5-line rounded execution widget (`╭── Downloading... ──╮` and `╭── Running xbps... ──╮` with live spinner). Clears on completion to a single checkmark line. Non-TTY streams suppress the widget; `-v` streams raw unbuffered lines. Forward SIGINT and SIGTERM to the xbps child process, and exit with the child's exit code. |
-| FR-015 | M | If the dry-run yields no packages, print `Nothing to do.`, skip the prompt, and exit 0. |
-| FR-015a | C | After a successful `install` or `upgrade` that changed any `linux*` kernel package or `glibc`, print a one-line reboot hint. |
+Every AC is `[P]` (parity or parity-process). Stable ids; no gaps. `Given … when … then …`.
 
-### 3.3 Errors and privileges
+- **AC-001 [P] (FR-001):** Given the package or `xbpretty link`, when installed, then the binary and exactly six alias names exist (`xbpretty`, `xbp`, `xbp-install`, `xbp-remove`, `xbp-upgrade`, `xbp-autoremove`, `xbp-update`); `xbp remove foo` behaves as `xbpretty remove foo`; no `xbp-history`, `xbp-fetch`, `xbp-undo` or other `xbp-*` file exists.
+- **AC-002 [P] (FR-002, FR-003, FR-004):** Given any command, when run with `--help` or `-V`, then stdout carries the generated usage or `xbpretty <version>` + xbps line; global flags parse before or after the subcommand; `-V` after `list` means `--virtual` while `--version` stays global; a conflicting pair exits 2; after `--` flags go to xbps.
+- **AC-003 [P] (FR-005):** Given bash, zsh and fish files, when compared to `xbpretty completion <shell>`, then they are byte-identical; they offer every visible command, the six aliases, per-command flags, `--color` values, package names and history ids + `last`, never an N/A flag; `bash -n`/`zsh -n`/`fish -n` pass; drift fails with `completion scripts are stale: run make completions`.
+- **AC-004 [P] (FR-006):** Given an empty directory, when `xbpretty link DIR` runs, then exactly six names are created, the command is silent, exit 0; a rerun leaves them unchanged; a conflicting file prints `xbpretty: <path> already exists ... not overwriting` and exits 1.
+- **AC-005 [P] (FR-007):** Given root and `xbp install figlet`, when confirmed, then the dry run is `xbps-install -n figlet` and the real run is `xbps-install -y figlet`; `--reinstall` adds `-f` after an installed guard; a missing target prints `xbpretty: figlet is not installed, so it cannot be reinstalled`, exit 1; install does not add `-S`.
+- **AC-006 [P] (FR-008, FR-009):** Given `xbp remove nano` with nano not installed, when run, then the target is reported on stderr and filtered, `Nothing to do.` prints on stdout, exit 0; `xbp purge nano` plans and runs `xbps-remove -n -f` / `-y -f`; `remove --purge` is equivalent.
+- **AC-007 [P] (FR-010):** Given orphans exist, when `xbp autoremove -n`/`autopurge -n`, then rows appear under AutoRemove/AutoPurge with installed sizes and the argv contains `-o` (and `-f` for autopurge), with no positionals.
+- **AC-008 [P] (FR-011, FR-013):** Given `xbp upgrade`, when run as root, then `xbps-install -S` runs as a separate stderr step and the transaction argv is `xbps-install -n -u` / `xbps-install -y -u`; `full-upgrade`, `dist-upgrade`, `safe-upgrade`, `--full`, `--safe`, `--no-full` and `[Nala] full_upgrade` leave the argv unchanged; `--no-update` suppresses the step; `--update`/`--no-update` conflict exits 2.
+- **AC-009 [P] (FR-012):** Given root and 3 upgradable packages, when `xbp update` runs, then `xbps-install -S` runs, the count line prints on stdout only when the count is non-zero, and with `update_show_packages = true` one `name old -> new` line per package prints instead; at zero nothing extra prints.
+- **AC-010 [P] (FR-015):** Given a TTY and root, when the prompt shows and the user enters empty, `y`, `Y` or `yes`, then the real transaction runs; `n`, `N` or `no` prints `xbpretty: user refused confirmation` and exits 1; `x` prints `xbpretty: 'x' is not a valid response` and exits 1 without re-prompting; EOF refuses; `-y` skips the prompt.
+- **AC-011 [P] (FR-015):** Given `-n`, when a non-empty plan is shown, then no prompt appears, `xbpretty: user refused confirmation` prints on stderr and the exit code is 1; `-n` with `-y` exits 2; `-n` with `--dry-run` prints the plan and exits 0.
+- **AC-012 [P] (FR-015):** Given root with stdin piped from `/dev/null`, when a transaction runs without `-y`, then the summary prints, `xbpretty: stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed` appears, the command never blocks, and it exits 1.
+- **AC-013 [P] (FR-016):** Given `auto_remove = true` and an orphan plan after a successful install, when the primary transaction commits, then a second `xbps-remove -n -o` summary and prompt run, `auto_remove = false`/`--no-auto-remove` skips them, `-y` skips them unless `--auto-remove` was explicit, and `--dry-run`/`--download-only` never run them.
+- **AC-014 [P] (FR-017):** Given an up-to-date system, when a transaction runs, then `Nothing to do.` prints on stdout, no prompt appears, exit 0; a hold-only plan prints the read-only summary, no prompt, exit 0; a configure-only plan is listed.
+- **AC-015 [P] (FR-018, FR-040):** Given `--dry-run --download-only`, when run, then nothing is downloaded and exit is 0; given `--download-only` alone, then predownload runs after the prompt/root checks and stops with no pkgdb write, no log, no history; `--print-uris` with either stop flag exits 2.
+- **AC-016 [P] (FR-020):** Given root, when `xbp clean` runs, then `xbps-remove -O` runs and its output is streamed; `clean --lists` deletes `*-repodata` and keeps keys; `clean` no longer runs autoremove; `--lists --fetch` chooses `--lists`.
+- **AC-017 [P] (FR-021):** Given `xbp install` with no package, then `xbpretty: install needs at least one package` prints and exits 1; `xbp upgrade foo` is a usage error 2; `xbp install -- -f foo` passes `-f` to both xbps invocations; `uninstall`/`info`/`dist-upgrade` dispatch to their canonical commands.
+- **AC-018 [P] (FR-022):** Given the discovery commands, when `-v` is active, then the only child calls are the fixed offline set (`-l`, `-m`, `-R -s ''`, per-property repository passes, the `-n -u` plan, `-H`/`-O`/`--list-repolock-pkgs`, `-L`/`-L -v`, `-S`/`-R -S`); no `-M`, no `-R -o`, no `-S` sync, no network.
+- **AC-019 [P] (FR-023, FR-024):** Given a fixture with installed, repository, virtual and upgradable rows, when `list`/`search` run, then the line is `name (version) [repo] [attributes]`, sorted by name, `[local]` for installed-only, `-a` repeats variants, `-i`/`-u`/`-V` compose in order, a non-matching glob prints `Notice: '<token>' was not found` and exits 0, `search` falls back to `short_desc` unless `--names`, and machine output is NDJSON (see AC-022).
+- **AC-020 [P] (FR-025):** Given an installed package, when `xbp show <pkg>` runs, then the field-order block prints, apt-only labels are absent, absent properties omit their lines, more than three list values print one per line with four leading spaces, `-a` prints the installed block then variants, a missing name prints `Notice: '<name>' was not found` and exits 0, and zero names exits 1.
+- **AC-021 [P] (FR-026):** Given no names, when `xbp policy` runs, then `Package files:` lists `1`-based precedence, signature state, `Signed-by` and fingerprint for signed repos, `Pinned packages:` always prints, and hold/repolock entries appear; with names, `Installed:`/`Candidate:`/`Version table:` print and `***` marks the candidate; a missing name is a notice, exit 0.
+- **AC-022 [P] (FR-027):** Given `-m`, when `list`, `search`, `show` and `policy` run, then every stdout line is a compact JSON object with `"schema":1`; `installed_size`/`download_size` are integers only on `-u` rows and `null` otherwise; virtual rows emit JSON; `show -m` carries a `properties` map; `policy -m` is an array with names and an object without; no ANSI appears even with `--color=always`.
+- **AC-023 [P] (FR-028):** Given `xbp upgrade --print-uris`, when run as non-root, then one object per planned download prints with the exact `url`/`signature_url`/`size` and `sha256` (or null), no summary/prompt/download/root/sync occurs, an empty plan prints nothing and exits 0, and combining it with `--dry-run` or `--download-only` exits 2.
+- **AC-024 [P] (FR-029, FR-030):** Given a successful transaction, when it exits 0, then one `<id>.json` entry exists with schema 1, the id matches the filename, before/after snapshots come from the four bulk queries, operations are derived from the snapshots, and a corrupt/future-schema entry fails the read with the file named; a write failure prints `xbpretty: history entry not saved: <err>` and does not change the exit code.
+- **AC-025 [P] (FR-030, FR-032):** Given entries, when `xbp history` runs, then ascending rows show ID/Command/Date/Requested-By/Altered; `history <id|last>`/`info` shows the metadata, `Replay of` for replays, and operation groups in fixed order; an empty store prints `No history entries found.` on stdout and exits 0; a bad selector exits 2, an unknown id exits 1, `last` on empty exits 1.
+- **AC-026 [P] (FR-033):** Given a successful install entry, when `xbp undo <id>` runs as root and is confirmed, then the package is removed with `-f`, one new entry with `replay_kind = "undo"` is written, and one audit line is appended; undoing an upgrade restores the exact old version with one `-f`.
+- **AC-027 [P] (FR-033):** Given an entry whose old archive is missing from `/var/cache/xbps` and no configured repository serves that exact version, when `undo` runs, then one `xbpretty: undo cannot restore ...` line per package prints and the command exits 1 **before** any mutating xbps command; an entry with a `Reinstall` row exits 1; an entry with no replayable rows exits 1.
+- **AC-028 [P] (FR-035):** Given `undo` of an install, when `xbp redo` runs, then the package is installed again at the recorded version, a new `redo` entry is written; `redo last` targets the newest entry literally; undoing twice then redoing toggles as specified; replay never syncs and never runs implicit autoremove.
+- **AC-029 [P] (FR-035):** Given entries, when `history clear <id>` runs as root, then that entry is deleted and `Cleared history entry <id>.` prints; `clear --all` deletes every numeric entry and stale tmp and prints the plural/singular count; a non-root `clear` prints the root hint and exits 1.
+- **AC-030 [P] (FR-036, FR-037, FR-038):** Given root and a plan with three remote archives, when the transaction is confirmed, then all three `.xbps` and `.sig2` files exist under `/var/cache/xbps` before `xbps-install` starts, the hashes match, and the real run verifies and exits 0; a fully cached plan performs no network.
+- **AC-031 [P] (FR-038):** Given a predownload 404 or a transport failure after four attempts, when a real transaction runs, then one `xbpretty: predownload: N of M archives could not be fetched; xbps will download them` warning prints, xbps takes over, and the transaction's exit code is xbps's; a hash mismatch deletes `.part` and falls back; `--download-only`/`download` abort instead, exit 1.
+- **AC-032 [P] (FR-039):** Given a normal user, when `xbp download figlet` runs, then `./figlet-2.2.5_6.x86_64.xbps` and `.sig2` exist, the exact `Downloads Complete:` block prints on stdout, exit 0, and no cache/log/history is written; `xbp download figlet nonsense` writes figlet, prints `Some packages were not found.` and exits 1.
+- **AC-033 [P] (FR-040):** Given root and `xbp install -d figlet`, when confirmed, then the cache is filled, no pkgdb change/log/history occurs, no completion line prints, exit 0; `-y` skips the prompt; non-root prints the hint and exits 1; an empty/remove plan is a no-op after confirmation, exit 0.
+- **AC-034 [P] (FR-042, FR-044, FR-045, FR-046):** Given a mocked mirror list, when `xbp fetch` runs, then it probes 256 KiB ranges, validates zstd, ranks deterministically, validates every required suffix, writes exactly one mirror, prints the table with `Chosen`, and prints `Sources have been written to <path>` once per file; `--auto 2` tries the two fastest; `-c` filters region/location words; `--https-only` writes https; `--sources`/`--debian`/`--ubuntu`/`--devuan` exit 2 with their exact lines.
+- **AC-035 [P] (FR-047, FR-048, FR-049):** Given a successful fetch, then `/etc/xbps.d/<basename>` masks the system file, the original is in `.xbpretty-backup`, the manifest has schema 1, and `xbps-install -S` ran; when the sync's `ERROR:` names a written repository, the previous configuration is restored and the run exits non-zero/1; `clean --fetch` restores/deletes through the manifest, errors without one, and a hand-edited file prints the modified warning before reverting.
+- **AC-036 [P] (FR-050):** Given a non-root user, when `xbp fetch` runs, then the ranking table prints with `Chosen`, the sudo hint prints, nothing under `/etc` or `/var/lib` changes, and exit is 1; with `--dry-run` the same table plus `Dry run: no repository configuration was written.` prints and exit is 0; a rootless TUI run never opens the picker.
+- **AC-037 [P] (FR-051, FR-057):** Given `docs/config.toml.example`, when parsed, then it equals `Defaults()`; every key/default/enum/role matches §3.7; `[Xbps]` has exactly six paths plus `transaction_log`; precedence resolves each pair as specified (CLI > config > default, with `NO_COLOR` only under Auto).
+- **AC-038 [P] (FR-052, FR-053):** Given a config with an unknown key, wrong type, bad enum, bad colour/modifier, relative path or a rejected TOML construct, when loaded, then the exact `xbpretty: config <path>:<line>: <message>` prints and exit is 2; a missing default layer is silent; `--config` missing/invalid exits 2; `--help`/`--version`/`completion`/`link` bypass config.
+- **AC-039 [P] (FR-054, FR-059):** Given `/etc` + user + `--config` layers, when keys collide, then the later layer wins per key and theme roles merge role-by-role; `--config` replaces both layers and works before/after the subcommand; `-c` on a non-fetch command exits 2 with the hint; `fetch -c IN --config f` works.
+- **AC-040 [P] (FR-055):** Given root and a user-owned or group/world-writable config with `[Xbps] install_path`, when a command runs, then the path is ignored with `xbpretty: warning: config <path>: ignoring [Xbps] install_path: ...`, the built-in binary is used, non-privileged keys still apply, and the command proceeds; a root-owned non-writable file is trusted.
+- **AC-041 [P] (FR-056):** Given an unmodified rev-5 config with all ten keys (quoted and bare values), when a rev-6 command loads it, then the mapped values apply, one warning per key plus the aggregate prints, exit is unchanged, and the file is byte-identical afterwards; `verbose`, `box_style`, `progress_bar` warn and have no effect.
+- **AC-042 [P] (FR-056, FR-058):** Given `box_style = ascii`, `assume_yes = "true"` and a bare `xbps_query_path`, when loaded, then the shim accepts them; a bare value on a rev-6 key is a parse error; a legacy key after the first table is `unknown key ... rev-5 keys must appear before the first table`, exit 2; `--debug` lists each legacy mapping; the aggregate URL prints once.
+- **AC-043 [P] (FR-035):** Given no history store and a non-empty line log, when `xbp history` runs, then `No history entries found.` prints on stdout, the `earlier transactions are only in the line log ...` note prints on stderr, exit 0; with no/unreadable log there is no note; `history last` exits 1 with `xbpretty: history is empty`; no file is created.
+- **AC-044 [P] (FR-061, FR-062):** Given the 80-column golden plan, when the summary prints, then the `=` rules, labels, borderless table, 2-space gaps, trailing spaces, only-Size-right alignment, uncoloured ` Summary`, counts and computed size block match the ADR-0012 golden byte-for-byte; when piped, natural widths and 80-column rules match; under `--no-color` there is no ANSI and the bar is solid; `--simple` matches the simple golden.
+- **AC-045 [P] (FR-063):** Given `3.5.1_1 → 3.5.4_1`, when the upgrade row renders, then it is `3.5.` + Notice(`4_1`); `1.5.7_1 → 1.5.7_2` is `1.5.7_` + Notice(`2`); the old version is raw; the `.` between highlighted components is plain; a held row with differing versions also gets the diff.
+- **AC-046 [P] (FR-064):** Given a real execution in a TTY, when the widget draws, then the width is `min(columns,80)`, heights are 7/6, the divider spans the full frame width, ` Progress ` is centred and `NN%` right, the bar is `W−4` cells with round fill and truncated percent, the view content matches ADR-0012, and on success the box clears with no completion line.
+- **AC-047 [P] (FR-065):** Given stderr is a TTY and the widget is unavailable, when progress runs, then the 40-cell plain line prints with `%3d`, round fill, the message and filters, redrawn in place, no colour; with stderr redirected or `TERM=dumb` or `-v`, no live line prints and the child output is forwarded verbatim.
+- **AC-048 [P] (FR-066, FR-074):** Given `xbp upgrade -n | cat`, when run, then stdout holds only the summary, no ANSI under auto/never, no `\r`; the prompt, hints and child output are on stderr; `xbp install foo 2>/dev/null` still reads stdin; a `| head -1` broken pipe stops writing, the transaction continues and exits with its code.
+- **AC-049 [P] (FR-067):** Given the gate matrix, when `Tui` + TTY + stdin + UTF-8 + root + a non-empty plan and no `-y`/`-n`/`--simple`/`--dry-run`, then S1 opens; `Auto`/`Plain` and `TERM=dumb`, a non-TTY stream, a non-UTF-8 locale, non-root or an excluded flag never opens it; a 59-column or 17-row terminal falls back with no screen; a 60×18 terminal opens; the fetch picker uses the enhanced gate, so it appears under `Auto` and still under `--no-tui` (which demotes `Tui` to `Auto`), and it is excluded under `Plain`, `TERM=dumb`, a non-TTY stream, a non-UTF-8 locale, `--auto` or `--dry-run`.
+- **AC-050 [P] (FR-068):** Given the 80×24 upgrade plan, when S1 draws, then the frame, title, tab strip, active underline, table columns/widths, `❯` gutter, scrollbar, footer (including the no-separator quirk) and help block match the ADR-0017 golden; `j/k/Home/End/PgUp/PgDn/wheel` clamp; `y` confirms and starts the transaction; `q/Esc/n/Ctrl-C` refuse with exit 1; `s` opens package info.
+- **AC-051 [P] (FR-069):** Given a history entry and `Tui`, when the detail opens, then the title is `xbpretty History`, the tabs/footer show operation counts only (no download/disk rows), `q/Esc/Ctrl-C` exit 0, `y` is ignored, and an entry with no groups opens as text; `xbp history` (list) is always text.
+- **AC-052 [P] (FR-070):** Given the 80×24 four-mirror fixture, when the picker draws, then the frame, columns, `✓`/`☐`, `Secondary`+`REVERSED` highlight, info and help bands match the ADR-0017 golden; `j/k` wrap; `Enter/q` confirm; `Esc/Ctrl-C` cancel with `xbpretty: no mirror was selected`, exit 1; at 60×18 the C1 drop order keeps the URL ≥24 cells and never drops Latency/Score.
+- **AC-053 [P] (FR-071):** Given `[Ui] mode = Tui` and an interactive `update` against changed repodata, when it runs, then `\x1b[?1049h` never appears, no key is read, no `Accept these changes` screen exists, the inline Update view is used, and the exit code is xbps's.
+- **AC-054 [P] (FR-071, FR-072):** Given S1 open on a terminal at or above 60×18, when it is resized to 50×15, then the body shows `Terminal too small (60x18 minimum; now 50x15)` keeping the border/title, with no tab/table/footer; cancel keys work; resizing to 80×24 restores the full frame; a terminal already below 60×18 at entry uses the text path and never opens S1; on normal exit, cancel, SIGTERM and a panic the termios flags are restored, the alternate screen is left, the cursor is shown and mouse/paste are off.
+- **AC-055 [P] (FR-072):** Given the engine, when `--color never` runs, then no SGR bytes appear while `┏ ❯ ━ ┃` remain; a width test gives box glyphs/`✓☐❯` 1, CJK 2, combining/ZWJ/VS16 0, control 0, ambiguous 1; a DSR-silent terminal uses the no-anchor fallback and the inline viewport still inserts/re-anchors; `CGO_ENABLED=0` builds and `go.mod` has zero requires.
+- **AC-056 [P] (FR-073):** Given a non-root install, then the summary, doas/sudo hint and exit 1 print with no prompt; a failed xbps call forwards stderr and passes its code; each hint requires both the code and a stderr substring; a missing configured binary exits 1; a refusal exits 1; a usage error exits 2; a `--print-uris` empty plan exits 0.
+- **AC-057 [P] (FR-075):** Given a successful transaction, then `xbp log` prints the line log verbatim on stdout with `--limit` and package filters, no root/xbps/prompt; a `linux*`/`glibc` change prints the reboot hint; `xbp link` follows AC-004; the hints follow AC-056; all of these are documented as extensions and are not matrix rows.
+- **AC-058 [P] (FR-076):** Given the template, then `version=0.4.0`, `revision=1`, the tag is `xbpretty-v0.4.0`, `--version` prints `xbpretty 0.4.0`, the template and `tools/build-xbps.sh` use the same `-X ...Version=${version}`, the alias list is exactly six and drift-tested across the template, build script, spec, completions, manpage and README.
+- **AC-059 [P] (FR-076):** Given `make manpages`, then `man/xbpretty.8` and `man/xbpretty.conf.5` are generated and committed, every command/flag appears, `mandoc -T lint` is silent, the six `man8` symlinks resolve, and the installed completions equal `xbpretty completion <shell>`.
+- **AC-060 [P] (FR-060, FR-076):** Given the built package, then it contains no `/etc/xbpretty` path and no `conf_files=`; `config.toml.example` parses to `Defaults()` and is byte-identical to the repo file; `migration-rev6.md` is installed; the binary embeds the mirror snapshot with its date; the 9-arch signed release gates on tests/static/size/contents/clean-root install and fails when `XBPS_PRIVKEY` is unset.
+- **AC-061 [P] (FR-077):** Given the two TSVs, then the inventory holds 189 rows (CMD 18, OPT 60, CFG 21, VIS 34, TUI 5, BEH 40, PKG 11) with no missing/extra/duplicate/renumbered row, every inventory id has exactly one matrix row and vice versa, and the counts headers match.
+- **AC-062 [P] (FR-077):** Given every `n/a` row, then its `behaviour` states the exact `xbpretty:` stderr line and exit 2 (refusal) or a backticked/never absence plus what happens instead (absence), it cites ≥1 `AC-`, uses no `release:` marker, and the checker rejects a generic "not applicable".
+- **AC-063 [P] (FR-077):** Given the matrix, then `make parity` regenerates Appendix A.2–A.4 and `docs/parity/matrix.md` byte-identically, the `# spec_rev:` equals the spec title's rev, every cited FR/NFR/AC exists, every `[P]` AC is cited by ≥1 row, and a renamed/deleted cited test fails with the exact `parity:` message.
+- **AC-064 [P] (FR-019):** Given each transaction N/A flag in §3.2.1, when run, then the exact stderr line prints, exit is 2, no summary prints, the summary is not rendered, and the stub invocation log is empty (no xbps child ran).
+- **AC-065 [P] (FR-046):** Given fetch `--sources`, `--debian`, `--ubuntu` or `--devuan`, when run, then the exact refusal prints, exit is 2, and no network or file access occurs.
+- **AC-066 [P] (FR-019):** Given `--no-fix-broken`, `--no-install-recommends` or `--no-install-suggests`, when run, then the flag is accepted, nothing prints, no flag is added to xbps argv, the command's exit is unchanged, and `fix-broken`/`recommends`/`suggests` never appear in any xbps argv.
+- **AC-067 [P] (FR-052):** Given a config using floats, dates, multiline strings, dotted keys, arrays of tables, quoted keys or an alternate theme form, when loaded, then the exact rejection prints with path and line and exit is 2; a canonical nala file parses unchanged.
+- **AC-068 [P] (FR-062, FR-064):** Given a Downgrade, Excluded/Kept-back/Phased reason, a Download mirror table, a `Fetched ` line, `Nothing to fetch`, a dpkg conffile prompt/status-fd, or an APT essential-removal warning, when the relevant surface renders, then the literal never appears and the documented replacement (Install/Upgrade section, `Manual hold`, 7-row Download view, silent clear, xbps sync output, forwarded child output, xbps dependency refusal) is used.
+- **AC-069 [P] (FR-035, FR-005):** Given a legacy `history.json`, a nala completion protocol (`COMPLETE=`), or an i18n catalog, when any command runs, then none is read: history never imports it, completion is static + runtime lookups, and every message is English-only.
+- **AC-070 [P] (FR-019, FR-037):** Given `-o`, an `Acquire::*` proxy key, or `/etc/apt/auth.conf`, when a command runs, then `-o` is refused (exit 2), the proxy comes only from `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`, and no apt auth file is read.
+- **AC-071 [P] (FR-031, FR-037, FR-072):** Given a `config_files_only` state, a multi-mirror candidate list, or a `q` keypress during a transfer/install, when the surface runs, then `config_files_only` is never recorded, mirror rotation/fairness never runs (one URL per package), and `q` never cancels (Ctrl-C is the signal; exit 130 during xbpretty-owned transfers).
+- **AC-072 [P] (FR-039, FR-076):** Given a `.deb` path or `https://` package argument, or a Debian/Ubuntu/Devuan PPA packaging artifact, when invoked or inspected, then direct install never happens (the `download` surface is the equivalent) and no Debian suite/PPA artifact exists; xbpretty is Void-only.
+## 6. Constraints and dependencies
 
-| ID | Pri | Requirement |
-|---|---|---|
-| FR-016 | M | Real execution requires euid 0. When not root and not `--dry-run`, print the summary, then a hint to rerun under `doas` if `/usr/bin/doas` exists, else `sudo`, and exit 1 **without prompting**. |
-| FR-017 | M | On xbps failure, print the raw xbps stderr and exit with xbps's exit code. No retry. <br><br>Append a one-line hint for these known cases: <br>• Stale repo index → `xbp update` <br>• Package not found <br>• Lock held by another xbps process <br>• xbps must be updated first → `xbps-install -u xbps` <br>• Package ignored via `ignorepkg` in xbps config <br><br>Hint matching rules: <br>• Every xbps and xbps-query call runs with `LC_ALL=C`. <br>• A hint fires only when **both** the exit code and a stderr substring pattern match. <br>• All patterns live in one table (`hints.go`) and are short substrings, never full lines. <br>• An unmatched failure gets no hint. Never show a guessed one. |
-| FR-018 | S | After any failed `remove`, run `xbps-query -X` on each target package. Do not match the error string. If any dependents are returned, list them and hint that `xbp remove -- -F <pkg>` forces removal and will break those dependents. |
-| FR-018a | S | Fail with a clear message and exit 1 if the configured xbps binaries are not found. |
-
-### 3.4 Configuration and output
-
-| ID | Pri | Requirement |
-|---|---|---|
-| FR-019 | M | Read config from `$XDG_CONFIG_HOME/xbpretty/config.toml`, falling back to `<home>/.config/xbpretty/config.toml`. When euid is 0 and `SUDO_USER` or `DOAS_USER` is set, `<home>` is that user's home directory, not `/root`. Keys: `assume_yes`, `color`, `verbose`, `sync` (default true), `log` (default true), `box_style` (default `"rounded"`, options: `"rounded"`, `"classic"`, `"ascii"`), `progress_bar` (default `true`), `xbps_install_path`, `xbps_remove_path`, `xbps_query_path`. Precedence: CLI flags > config > built-in defaults. A missing file is not an error. A malformed file exits 2 with the parse error and line. |
-| FR-020 | M | Disable color when stdout is not a TTY or `NO_COLOR` is set. The config `color` key and a `--color=auto\|always\|never` flag override this. |
-| FR-021 | M | Flags: `-n/--dry-run`, `-y/--yes`, `-v/--verbose`, `--no-sync`, `--no-log`, `--color`. `-n` mirrors xbps's own dry-run flag. |
-| FR-022 | S | Arguments after `--` pass through verbatim to the underlying xbps command, in both the dry-run and the real run (e.g. `xbp install -- -f pkg`). |
-| FR-023 | S | `-v/--verbose` prints each exact xbps or xbps-query command line, on stderr, before running it. |
-
-### 3.5 Tooling
-
-| ID | Pri | Requirement |
-|---|---|---|
-| FR-024 | S | `xbpretty completion bash\|zsh\|fish` prints a completion script. Completes subcommands and flags, installed package names for `remove` (`xbps-query -l`), and repo package names for `install` (`xbps-query -Rs`). |
-| FR-025 | C | `xbpretty link [dir]` creates the `xbp` and `xbp-*` symlinks in `dir` (default: the binary's own directory). Existing correct links are left alone; conflicting files are reported, not overwritten. |
-| FR-026 | C | `--version` prints the xbpretty version and the detected xbps version. |
-| FR-027 | C | Repository includes an xbps-src template that builds the binary and installs the symlinks and completions. |
-
-## 4. Non-Functional Requirements
-
-| ID | Pri | Requirement |
-|---|---|---|
-| NFR-001 | M | Single static binary (`CGO_ENABLED=0`). No runtime dependencies other than xbps. |
-| NFR-002 | S | Wrapper overhead on top of the xbps dry-run and the xbps-query lookups stays under 100 ms for transactions of up to 200 packages. xbps-query calls are batched: at most one call per property set per transaction. |
-| NFR-003 | M | Exit codes: <br>• xbps failures pass through. <br>• Usage or config errors exit 2. <br>• Privilege, non-interactive, or missing-binary errors exit 1. <br>• A user abort or nothing to do exits 0. |
-| NFR-004 | M | Fixture tests cover the parser and the hint table, using output captured from at least two xbps versions. <br>• Parser fixtures: captured `-n` output, including hold and configure actions. <br>• Hint fixtures: stderr and exit code for each FR-017 case, reproduced in a `voidlinux/voidlinux` container. <br>The fixtures define the `hints.go` patterns, and a test fails if a captured case stops matching. |
-| NFR-005 | S | All interactive text (prompt, hints, warnings, verbose lines) goes to stderr. Only the summary goes to stdout, so `xbp upgrade -n | grep` works. |
-
-## 5. Acceptance Criteria
-
-- **AC-001 (FR-009, FR-016):** Given a non-root user, when they run `xbp install foo` with no flags, then the summary prints, the `doas`/`sudo` hint follows, no prompt appears, and the exit code is 1.
-- **AC-002 (FR-009, FR-008):** Given root, when they run `xbp install foo` and press Enter, then the dry-run is `xbps-install -Sn foo`, the real run is `xbps-install -y foo` (no second `-S`), and its exit code is returned.
-- **AC-003 (FR-009):** Given root at the prompt, when they enter `n`, then nothing executes and the exit code is 0. When they enter `x`, the prompt repeats.
-- **AC-004 (FR-010):** Given root with stdin piped from `/dev/null`, when they run `xbp upgrade`, then the summary prints, no prompt appears, the `-y` hint shows, and the exit code is 1.
-- **AC-005 (FR-021):** Given `-n` or `--dry-run`, when the command runs as root or non-root, then only the summary prints and no non-dry xbps command executes.
-- **AC-006 (FR-009):** Given `-y` and root, when the command runs, then no prompt appears and the real command executes after the summary.
-- **AC-007 (FR-007):** Given a non-root user, when they run `xbp upgrade -n`, then `xbps-install -un` is used and the stale-index warning prints on stderr.
-- **AC-008 (FR-006):** Given root, when they run `xbp update`, then `xbps-install -S` runs with output streamed, and no summary or prompt appears.
-- **AC-009 (FR-005):** Given orphaned packages exist, when the user runs `xbp autoremove -n`, then they appear in the Remove group with sizes.
-- **AC-010 (FR-011, FR-012):** Given a transaction with installs, upgrades, removals and a held package, when the summary prints, then four labeled groups appear, upgrades show `old → new`, sizes are human-readable, and the footer shows the counts, download total and net disk delta.
-- **AC-011 (FR-015):** Given a fully up-to-date system, when the user runs `xbp upgrade`, then `Nothing to do.` prints, no prompt appears, and the exit code is 0.
-- **AC-012 (FR-013):** Given a successful `xbp install foo` run via `sudo` by user `alice`, when it finishes, then one timestamped line naming `foo` with its version is appended to `/home/alice/.local/state/xbpretty/transactions.log`.
-- **AC-013 (FR-015a):** Given an upgrade that updates `linux6.12`, when it completes successfully, then the reboot hint prints.
-- **AC-014 (FR-014):** Given a real execution in progress, when the user presses Ctrl-C, then the xbps child receives SIGINT and xbpretty exits with the child's exit code.
-- **AC-015 (FR-017):** Given a nonexistent package, when xbps fails, then the raw stderr shows, a hint line follows, and the exit code equals xbps's.
-- **AC-016 (FR-017):** Given an xbps failure whose exit code and stderr match no `hints.go` entry, when it fails, then the raw stderr prints with no hint line.
-- **AC-017 (FR-018):** Given package `foo` with reverse dependencies, when `xbp remove foo` fails, then `xbps-query -X foo` is run, the dependents are listed, and the `-- -F` hint with its breakage warning is shown.
-- **AC-018 (FR-018a):** Given `xbps_install_path` points to a missing file, when any command runs, then a clear error prints and the exit code is 1.
-- **AC-019 (FR-019):** Given user `alice` has `assume_yes = true` in her config, when she runs `sudo xbp install foo`, then her config is read and no prompt appears.
-- **AC-020 (FR-019):** Given a malformed config file, when any command runs, then the parse error and line number print and the exit code is 2.
-- **AC-021 (FR-020, NFR-005):** Given `xbp upgrade -n | cat`, when it runs, then stdout holds only the summary with no ANSI escapes, and any warning appears on stderr.
-- **AC-022 (FR-001):** Given a symlink named `xbp-remove`, when it is invoked with `foo`, then the behavior equals `xbpretty remove foo`.
-- **AC-023 (FR-022):** Given `xbp install -- -f foo`, when it runs, then both the dry-run and the real xbps invocations include `-f`.
-- **AC-024 (FR-023):** Given `-v`, when any command runs, then every xbps and xbps-query command line is printed on stderr before it executes.
-- **AC-025 (FR-024):** Given bash completion is loaded, when the user types `xbp remove <TAB>`, then installed package names are offered.
-- **AC-026 (FR-025):** Given an empty directory, when the user runs `xbpretty link <dir>`, then all six symlinks are created. On a rerun, nothing changes and nothing errors.
-
-## 6. Constraints / Dependencies
-- Void Linux with xbps installed. Uses `xbps-install`, `xbps-remove` and `xbps-query`.
-- Go toolchain for building (current stable).
-- Config format: TOML.
-- Parsing depends on xbps's `-n` output format. Fixtures are required (NFR-004).
+- Void Linux with xbps ≥ 0.60.0 (`xbps-install`, `xbps-remove`, `xbps-query`, `xbps-rindex`, `xbps-uhelper`, `xbps-pkgdb`, `xbps-uhelper cmpver`). The six-field `-n` plan and the metadata passes are 0.60+ contracts; a parser that assumes six fields must gate on 0.60.
+- Go 1.25+ toolchain. Stdlib only: zero `go.mod` require lines, `CGO_ENABLED=0`, statically linked. No ncurses, terminfo, `x/sys`, `x/term`, `x/text` or third-party TUI/TOML packages.
+- The TUI needs a UTF-8 locale, a TTY on stdout and stdin, and `TERM != dumb`; otherwise it falls back to text. The inline viewport additionally needs both stdout and stderr to be TTYs.
+- Config format: a TOML subset (§3.7), not full TOML 1.0. The canonical nala file parses unchanged; unsupported constructs fail loudly.
+- Shell completion/manpage checks need `bash`, `zsh`, `fish` and `mandoc` at check time only; they are not runtime or build dependencies.
+- Repositories: one signed `<arch>-repodata` per repository, one version per package per index, first configured repository wins unless `bestmatching=true`; remote archives need RSA `.sig2`, local repositories verify SHA-256 only.
+- Network: the mirror list, mirror probes and archive downloads use Go `net/http`/TLS; proxies come from the environment. No network on a dry run, discovery, history or `--version`.
+- English only. No i18n.
 
 ## 7. Risks
-- The xbps `-n` output format may change between versions. Mitigated by NFR-004 and by failing loudly on unparseable lines rather than guessing.
-- FR-017 hints depend on xbps error wording. Mitigated by the exit-code-plus-pattern rule, by suppressing the hint when nothing matches, and by the NFR-004 hint fixtures.
-- Dry-run and real run can still diverge if a repo changes between them with `--no-sync`. Accepted; FR-008 removes the common cause.
 
-## 8. Open Questions
-None.
+| Risk | Impact | Mitigation |
+|---|---|---|
+| xbps `-n`/telemetry format drift between versions | Parser misreads a plan or progress | NFR-004 fixtures from ≥2 versions; fail loudly on unparseable lines, never guess; the six-field contract gates on 0.60. |
+| History archives absent or repository moved on | Undo cannot restore an exact version | Fail-closed preflight before any mutation; explicit per-package message; documented in FR-034 and the migration guide. |
+| Cache pruning / partial transactions | Undo/replay cannot reconstruct a state | One `-f` preserves modified conffiles; non-zero xbps exits write nothing; limitations documented, never hidden. |
+| Repository metadata/signature changes | Predownload/fetch trust assumptions | SHA-256 from authenticated metadata for predownload/download; RSA deferred to xbps (which fails closed); fetch validates the new config with `-S` and reverts on errors. |
+| TUI engine size/complexity under NFR-001 | Schedule and binary growth | Stdlib-only primitives proven by #52; ~3.8k–5.6k prod LOC estimate; TUI delta budget separate from the TLS stack; DSR optional. |
+| Squeezed-width wrapping differs from comfy-table | Narrow-terminal goldens diverge | Visual goldens capped at ≥80 columns; narrow terminals recorded as best-effort in Appendix A.4. |
+| Release binary grows past the envelope | Release gate fails | 8 MB binary / 3.6 MB package budget with measured baseline; TUI delta measured separately; no hand-rolled HTTP client. |
+| A nala surface is missed | Parity claim is false | The 189-row inventory + bijection + counts header; a new nala tag is a new spec revision. |
+| `fetch` writes system package-source config | A broken config could persist | One mirror, `.xbpretty-backup`, manifest, post-write `-S` validation, revert-on-failure, `clean --fetch`. |
+
+## 8. Open questions
+
+None. Every decision needed by an implementer is fixed in §3–§5; unresolved implementation tactics are not spec questions. The parity matrix's `test` cells are intentionally `—` at spec phase (no implementation exists); the checker and §9 define how they get filled.
+
+## 9. Implementation route
+
+No implementation issues are created by this ticket. The slices below are the recommended build order; each names the FRs/ACs it must satisfy and its dependencies. A slice is done when its ACs pass and the rows it covers have a resolving `test` cell.
+
+| # | Slice | Delivers | Depends on |
+|---|---|---|---|
+| 1 | **Foundations** | `internal/spec` command/flag/alias table; the stdlib TOML parser (`internal/config`); `Config`/`Defaults`/layers/trust/legacy; `--config`, `--debug`, colour/unit enums; `go.mod` unchanged | none |
+| 2 | **CLI surface** | dispatch + six aliases; global flags; usage/help/version; N/A flag refusal table; completion generator; `link`; the `moo` and no-subcommand paths (FR-001–FR-006, FR-019, FR-021, AC-001–004, AC-017, AC-064, AC-066) | 1 |
+| 3 | **Transaction core** | command argv tables; sync step; flow; prompt/refusal/non-TTY; nothing-to-do/hold-only; implicit autoremove; `clean`; exit codes; hints/`-X`; EPIPE/signals (FR-007–FR-021, FR-073–FR-075, AC-005–017, AC-056, AC-057) | 1, 2 |
+| 4 | **Visual engine (inline)** | borderless table engine; theme roles; summary/simple; version diff; five progress views; plain line; durable-output discipline (FR-061–FR-066, AC-044–048); fix `VersionDiff` to Notice `_`-aware spans | 1, 3 |
+| 5 | **Discovery** | offline pass set; row model; `list`/`search`/`show`/`policy`; NDJSON schema 1; `--print-uris` (FR-022–FR-028, AC-018–023) | 1, 3 |
+| 6 | **History** | store/schema/recording; list/detail; undo/redo; clear; replay repo; fail-closed preflight; empty-store note; line-log dual-write (FR-029–FR-035, AC-024–029, AC-043) | 1, 3, 4 |
+| 7 | **Downloads** | predownload engine; cache scan/hash; retry/fallback; `download`; `--download-only`; Download view events (FR-036–FR-041, AC-030–033) | 3, 4, 6 |
+| 8 | **Fetch** | mirror list + snapshot; probe/score; selection/validation; flags; write/backup/manifest; `clean --fetch`; sync validation/revert; rootless/dry-run/table; MirrorScore (FR-042–FR-050, AC-034–036) | 1, 3, 4 |
+| 9 | **TUI engine** | `internal/term` + `internal/tui`; restore guard; cell diff/width; decoder; S1/S2/S3; inline viewport; release-info N/A; floor/resize; fallbacks (FR-067–FR-072, AC-049–055); reuse #52's proven primitives | 4, 5, 8 |
+| 10 | **Packaging & matrix** | completions/manpages generation; template/build script/workflow/Makefile; docs + migration guide/example; mirror snapshot refresh; parity TSVs + checker + generated Appendix A + `make parity`; release gates (FR-005, FR-058, FR-060, FR-076, FR-077, AC-003, AC-041–042, AC-058–063) | 1–9 |
+
+**Matrix loop.** The two TSVs are written at spec approval. From slice 2 onward, every PR that touches a matrix-mapped surface fills that row's `test` cell with a `TestParity_<ID>_...` name and updates any changed `behaviour`/`xbps`/`evidence` cells; the checker runs in `go test ./...`. Definition of done for the map: every row has a test (or a `release:` gate where automation is impossible), the inventory is untouched, and Appendix A regenerates byte-identically.
+## Appendix A — Parity matrix
+
+### A.1 Rules (normative prose)
+
+The matrix is the coverage proof for the destination's parity bar. It has two normative TSVs and generated renderings; this section states the rules no test can enforce.
+
+**Source and scope.** `testdata/parity/nala-v0.18.2.tsv` is the frozen inventory of every user-visible nala v0.18.2 surface: one row per command name, clap argument id, config key or grammar surface, inline visual element, full-screen surface, cross-cutting behaviour and packaging artifact. `testdata/parity/matrix.tsv` has exactly one disposition row per inventory id, in the same order. Aliases are a column, never a row. The inventory is frozen to the tag; a new nala tag is a new inventory file and a new spec revision, never a PR edit.
+
+**Disposition classes.** Every row carries exactly one:
+
+| Class | Meaning |
+|---|---|
+| `equivalent` | nala's user-visible behaviour is reproduced with xbps data. |
+| `adaptation` | same intent, different bytes or data because xbps supplies different input (no apt disk API, one URL per package, `_` revision separator). |
+| `extension` | xbpretty's superset touching a nala surface (`NO_COLOR`, six aliases where nala has one name). |
+| `n/a` | the surface cannot exist on xbps; xbpretty refuses explicitly (flag/config) or the element never renders (visual/TUI/behaviour/packaging), never silently. |
+| `defect-not-copied` | a nala bug xbpretty deliberately does not reproduce. |
+
+**N/A proof.** Two flavours:
+
+- **Refusal** (flags and config): the `behaviour` cell names the exact `xbpretty: ...` stderr line, exit **2**, and that no xbps child runs.
+- **Absence** (visuals, TUI, behaviour, packaging): the `behaviour` cell names the literal that never appears (or says `never`) and what happens instead.
+
+Every `n/a` row cites at least one `AC-`. At spec phase no test exists; at implementation phase the cell names a resolving Go test, and `release:` markers are forbidden on `n/a` rows. A row that says only "not applicable", "unsupported" or "no equivalent" is invalid.
+
+**Reconciliation note (binding).** #56 counted 16 OPT N/A rows and #43 pinned three negative compatibility flags (`--no-fix-broken`, `--no-install-recommends`, `--no-install-suggests`) as silent no-ops. Rev 6 keeps both: those three are `n/a` by **absence**, not refusal, because xbps has no broken-repair/recommends/suggests state for them to change, and making them exit 2 would break nala command lines for no gain. Their `behaviour` states the exact absence and the unchanged exit code. All other OPT N/A rows are refusals. This preserves #56's 16-row OPT count and 37-row total without contradicting #43's behaviour.
+
+**Other reconciliations recorded for the reviewer.** #45's illustrative golden footer (`12 MiB`/`18 MiB`) is not derivable from the Size column; rev 6 goldens derive footer totals from the rows (AC-044). #45's version-diff rule stands; `internal/summary.VersionDiff`'s ANSI-202 split-revision output is an implementation defect, not a spec rule (FR-063). Squeezed-width wrapping below 80 columns is best-effort, because comfy-table's `optimize_space_after_split` is not reproduced (Appendix A.4). In `Tui` mode the summary screen replaces stdout for that transaction; this is the single stated exception to the durable-output rule (FR-066). A terminal below 60×18 at entry is an expected text-fallback mode, not a warning; only a failed init/render warns (FR-067). `vdoc docs/migration-rev6.md` installs `migration-rev6.md`, and the installed name is the documented one (FR-060).
+
+**Granularity and evidence.** One row = one nala user-visible surface with one disposition; many rows may cite the same test. Evidence tokens are `src:`, `obs:`, `dec:`, `proto:`, `fixture:` and `spec:`; every `n/a` row needs at least one `dec:` or `obs:`. The nala side is source-evidenced, never execution-evidenced: nala cannot be built or run on the development host. This is a permanent, recorded limitation, not a gap to close.
+
+**Ownership and revision.** No dedicated owner: the author who changes a mapped surface updates the row and its test in the same PR; the CI gate is the backstop. A disposition/xbps/behaviour change, or a newly discovered nala surface, is a **new spec revision**; a test name, evidence line, note or typo is in-place maintenance. A new xbpretty-only feature is an FR, never a matrix row. The checker runs at spec approval (`go test ./tools/parity`) and at release (the workflow forbids the spec-phase skip once `internal/spec` exists).
+
+**Generated renderings.** A.2–A.4 and `docs/parity/matrix.md` are generated from the TSVs by `tools/parity`; a rendering is never hand-edited. `make parity` regenerates them. The count header is the completeness checksum and is edited only deliberately, together with the rows.
+
+<!-- BEGIN GENERATED: parity -->
+<!-- Generated by `make parity` from testdata/parity/*.tsv. Do not edit by hand. -->
+### A.2 Counts
+
+| Kind | equivalent | adaptation | extension | n/a | defect-not-copied | total |
+|---|---:|---:|---:|---:|---:|---:|
+| CMD | 3 | 15 | 0 | 0 | 0 | 18 |
+| OPT | 22 | 22 | 0 | 16 | 0 | 60 |
+| CFG | 18 | 2 | 0 | 1 | 0 | 21 |
+| VIS | 13 | 13 | 1 | 7 | 0 | 34 |
+| TUI | 0 | 4 | 0 | 1 | 0 | 5 |
+| BEH | 2 | 27 | 1 | 10 | 0 | 40 |
+| PKG | 3 | 5 | 1 | 2 | 0 | 11 |
+| **total** | 61 | 88 | 3 | 37 | 0 | 189 |
+
+### A.3 N/A register
+
+Every row below is an explicit, documented N/A. A **refusal** names the exact stderr line and exit code; an **absence** names what never renders and what happens instead. Every row cites at least one AC.
+
+| ID | Surface | Proof | Behaviour | Spec |
+|---|---|---|---|---|
+| P-OPT-007 | -o/--option | refusal | `xbpretty: -o/--option is not available on xbps: apt configuration options have no xbps equivalent; repository settings live in /etc/xbps.d/*.conf.` on stderr; exit 2; no xbps child runs | FR-019,FR-064,AC-064,AC-070 |
+| P-OPT-014 | --allow-unauthenticated | refusal | `xbpretty: --allow-unauthenticated is not available on xbps: xbps verifies repository signatures and has no unauthenticated mode.` on stderr; exit 2; no xbps child runs | FR-019,AC-064 |
+| P-OPT-017 | --remove-essential | refusal | `xbpretty: --remove-essential is not available on xbps: xbps has no essential-package protection to override.` on stderr; exit 2; no xbps child runs | FR-019,AC-064 |
+| P-OPT-019 | -f/--fix-broken | refusal | `xbpretty: -f/--fix-broken is not available on xbps: xbps has no broken-dependency repair mode. Check the pkgdb with xbps-pkgdb --checks dependencies, or force a reinstall with xbp install -- -f PKG.` on stderr; exit 2; no xbps child runs | FR-019,AC-064 |
+| P-OPT-020 | --no-fix-broken | absence | `fix-broken` never appears in any xbps argv and no stderr line prints; exit follows the command (0 on success); no xbps child is affected differently | FR-018,AC-066 |
+| P-OPT-021 | --install-recommends | refusal | `xbpretty: --install-recommends is not available on xbps: xbps has no recommends metadata; every declared run_depends dependency is installed.` on stderr; exit 2; no xbps child runs | FR-019,AC-064 |
+| P-OPT-022 | --no-install-recommends | absence | `recommends` never appears in any xbps argv and no stderr line prints; every declared run_depends is still installed; exit follows the command (0 on success) | FR-018,AC-066 |
+| P-OPT-023 | --install-suggests | refusal | `xbpretty: --install-suggests is not available on xbps: xbps has no suggests metadata.` on stderr; exit 2; no xbps child runs | FR-019,AC-064 |
+| P-OPT-024 | --no-install-suggests | absence | `suggests` never appears in any xbps argv and no stderr line prints; exit follows the command (0 on success) | FR-018,AC-066 |
+| P-OPT-041 | --sources | refusal | `xbpretty: --sources is not available: Void repositories contain no source packages` on stderr; exit 2; no network or file access | FR-046,AC-065 |
+| P-OPT-044 | --debian | refusal | `xbpretty: --debian is not available: xbpretty targets Void Linux only` on stderr; exit 2; no network or file access | FR-046,AC-065 |
+| P-OPT-045 | --ubuntu | refusal | `xbpretty: --ubuntu is not available: xbpretty targets Void Linux only` on stderr; exit 2; no network or file access | FR-046,AC-065 |
+| P-OPT-046 | --devuan | refusal | `xbpretty: --devuan is not available: xbpretty targets Void Linux only` on stderr; exit 2; no network or file access | FR-046,AC-065 |
+| P-OPT-047 | --remove-config | refusal | `xbpretty: --remove-config is not available on xbps: xbps has no config-files state; xbps-remove -f removes files, it does not create a config-only removal.` on stderr; exit 2; no xbps child runs | FR-019,AC-064 |
+| P-OPT-049 | -t/--target-release | refusal | `xbpretty: -t/--target-release is not available on xbps: xbps has no default-release targeting; pin a repository with a repository= line in /etc/xbps.d.` on stderr; exit 2; no xbps child runs | FR-019,AC-064 |
+| P-OPT-051 | --exclude | refusal | `xbpretty: --exclude is not available on xbps: xbps has no upgrade exclusion; hold the package with xbps-pkgdb -m hold PKG (release with -m unhold).` on stderr; exit 2; no xbps child runs | FR-019,AC-064 |
+| P-CFG-021 | TOML outside the supported subset | refusal | `floats`, dates, multiline strings, dotted keys, arrays of tables and quoted keys never parse; each is a hard `xbpretty: config <path>:<line>: <message>` error, exit 2; alternate theme forms are rejected by name | FR-052,AC-038,AC-067 |
+| P-VIS-028 | Downgrade section | absence | a `Downgrade` section never renders; a downgrade is planned as `install` or `update` and appears under Install or Upgrade | FR-062,AC-068 |
+| P-VIS-029 | held-reason vocabulary beyond Manual hold | absence | `Excluded`, `Kept back` and `Phased` never render; only `Manual hold` is possible | FR-062,AC-068 |
+| P-VIS-030 | Download view mirror table | absence | a per-mirror table (Connections, Average, State, overflow) never renders; Download is 7 rows with no mirror table | FR-064,AC-068 |
+| P-VIS-031 | Fetched ... completion line | absence | `Fetched ` never prints after an update; the widget clears with no completion line | FR-064,AC-068 |
+| P-VIS-032 | Nothing to fetch | absence | `Nothing to fetch` never prints; xbps always attempts a sync and reports per-repository lines | FR-064,AC-068 |
+| P-VIS-033 | dpkg conffile and status-fd handling | absence | dpkg conffile prompts and status-fd parsing never occur; maintainer-script output is forwarded as ordinary child output | FR-061,FR-066,AC-068 |
+| P-VIS-034 | APT essential-package removal warning | absence | an apt essential/protected-removal warning never renders; xbps refuses through its dependency resolver instead | FR-061,AC-068 |
+| P-TUI-005 | release-info | absence | no release-change screen: `\x1b[?1049h` never appears on an interactive `update`, no key is read, and update proceeds under the normal path | FR-071,AC-053 |
+| P-BEH-011 | legacy history.json import | absence | a legacy `history.json` is never read or imported; `xbp history` never synthesises pre-rev-6 rows and the line log is never converted | FR-035,AC-069 |
+| P-BEH-028 | dynamic completion protocol | absence | a `COMPLETE=<shell>` dynamic protocol never runs; completions are static generated files plus runtime `xbps-query` and history-store lookups | FR-005,AC-069 |
+| P-BEH-029 | i18n | absence | a translation catalog never loads and no locale selection exists; every message is English-only | FR-001,AC-069 |
+| P-BEH-032 | -o APT option passthrough | refusal | `-o` never reaches any child; the flag is refused with `xbpretty: -o/--option is not available on xbps: apt configuration options have no xbps equivalent; repository settings live in /etc/xbps.d/*.conf.` and exit 2 | FR-019,AC-070 |
+| P-BEH-034 | config_files_only replay | absence | `config_files_only` is never recorded or replayed; a removed package is absent, and undo reinstalls from the archive | FR-031,AC-071 |
+| P-BEH-035 | per-domain mirror rotation and fairness | absence | candidate rotation and exclusive-package fairness never run; xbps resolves exactly one URL per package | FR-037,AC-071 |
+| P-BEH-037 | APT Acquire proxy keys | absence | `Acquire::*` proxy keys never parse; proxy selection is `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` via Go | FR-037,AC-070 |
+| P-BEH-038 | apt auth config | absence | `/etc/apt/auth.conf` and netrc are never read; Void repositories are public | FR-037,AC-070 |
+| P-BEH-039 | q-to-cancel key | absence | `q` never cancels a transfer or an install; the inline viewport reads no keys and Ctrl-C is the real signal (exit 130) | FR-072,AC-071 |
+| P-BEH-040 | direct .deb/URL install | absence | a `.deb` path or `https://` package argument never installs; xbps has no direct-archive install mode | FR-039,AC-072 |
+| P-PKG-001 | debian packaging files | absence | `debian/` packaging files never ship; the equivalent artifact is the xbps-src template plus the signed XBPS repository | FR-076,AC-072 |
+| P-PKG-004 | multi-suite PPAs | absence | Debian/Ubuntu/Devuan suites and PPAs never exist; xbpretty is Void-only with one repository and 9 architecture variants | FR-076,AC-072 |
+
+### A.4 Deviation register
+
+Every row that is not `equivalent` and not `n/a`: the delta from nala and the xbps input or superset that causes it.
+
+| ID | Surface | Disposition | xbps mechanism | Evidence | Spec |
+|---|---|---|---|---|---|
+| P-CMD-001 | list | adaptation | `xbp list` merges `xbps-query -l` with repository metadata and prints name-sorted rows | dec:#44 §1;dec:#44 §3;obs:OBS-04 | FR-023,FR-024,AC-001,AC-018,AC-019 |
+| P-CMD-002 | search | adaptation | `xbp search` uses RE2 over names, then `short_desc` | dec:#44 §5 | FR-024,AC-019 |
+| P-CMD-003 | show | adaptation | `xbp show` prints xbps record properties as `Label: value` | dec:#44 §6 | FR-025,AC-020 |
+| P-CMD-004 | policy | adaptation | `xbp policy` prints repository precedence, signatures and hold/repolock pins | dec:#44 §7 | FR-026,AC-021 |
+| P-CMD-005 | clean | adaptation | `xbp clean` runs `xbps-remove -O`; `--lists` deletes repodata; `--fetch` reverts fetch | dec:#43 §8;dec:#48 §8 | FR-020,FR-048,AC-016,AC-035 |
+| P-CMD-006 | download | adaptation | `xbp download` writes named archives and `.sig2` to the current directory | dec:#43 §7;dec:#47 §8 | FR-039,AC-032 |
+| P-CMD-007 | history | adaptation | `xbp history` lists and shows the xbps history store; `undo`/`redo` replay | dec:#46 §1;dec:#46 §5 | FR-029,FR-030,FR-031,FR-032,FR-033,AC-024,AC-025 |
+| P-CMD-008 | fetch | adaptation | `xbp fetch` probes Void mirrors and writes one `repository=` mirror into `/etc/xbps.d` | dec:#48 §1;dec:#48 §5 | FR-042,FR-044,FR-045,FR-047,FR-048,FR-049,AC-034,AC-035,AC-036 |
+| P-CMD-009 | update | adaptation | `xbp update` runs `xbps-install -S`, then `xbps-install -n -u` to count | dec:#43 §6 | FR-012,FR-013,AC-009 |
+| P-CMD-011 | full-upgrade | adaptation | same argv as `upgrade` (`-u`); xbps never removes packages during an upgrade | dec:#43 §1;dec:#49 §1.2 | FR-011,AC-008 |
+| P-CMD-012 | safe-upgrade | adaptation | same argv as `upgrade` (`-u`) | dec:#43 §1 | FR-011,AC-008 |
+| P-CMD-013 | install | adaptation | `xbp install` plans `xbps-install -n PKG...` and runs `xbps-install -y PKG...` | dec:#43 §1;dec:#43 §2;dec:#43 §3 | FR-007,FR-016,AC-005,AC-013 |
+| P-CMD-015 | purge | adaptation | `xbps-remove -n -f PKG...` / `xbps-remove -y -f PKG...` | dec:#43 §1 | FR-009,AC-006 |
+| P-CMD-017 | autopurge | adaptation | `xbps-remove -n -o -f` / `xbps-remove -y -o -f` | dec:#43 §1 | FR-010,AC-007 |
+| P-CMD-018 | moo | adaptation | hidden `xbp moo` prints a short ASCII cow and exits 0 | src:src/cmd/mod.rs:278-299;dec:#43 §9 | FR-002,AC-002 |
+| P-OPT-001 | -v/--verbose | adaptation | `-v/--verbose` prints every xbps/xbps-query command line to stderr | dec:#43 §4;dec:#45 §7.2 | FR-003,FR-061,AC-002 |
+| P-OPT-003 | --config FILE | adaptation | `--config FILE` replaces the system and user layers | dec:#49 §4.4;dec:#49 §7.3 | FR-054,FR-059,AC-039,AC-040 |
+| P-OPT-010 | -d/--download-only | adaptation | `-d/--download-only` predownloads the plan into the xbps cache and stops | dec:#43 §4;dec:#47 §9 | FR-040,AC-015,AC-033 |
+| P-OPT-026 | -A/--all-arches | adaptation | `-A/--all-arches` is a silent no-op | dec:#44 §1;dec:#44 §11 | FR-023,AC-019 |
+| P-OPT-027 | --auto-remove/--autoremove | adaptation | `--auto-remove` forces the implicit second orphan transaction | dec:#43 §2 | FR-016,AC-013 |
+| P-OPT-028 | --no-auto-remove/--no-autoremove | adaptation | `--no-auto-remove` disables the implicit orphan transaction | dec:#43 §2 | FR-016,AC-013 |
+| P-OPT-030 | --description | adaptation | `--description` appends `long_desc`, else `No Description` | dec:#44 §4 | FR-024,AC-019 |
+| P-OPT-031 | --summary | adaptation | `--summary` appends `short_desc`, else `No Summary` | dec:#44 §4 | FR-024,AC-019 |
+| P-OPT-034 | -V/--virtual | adaptation | `-V/--virtual` lists virtual names with providers | dec:#44 §3 | FR-023,FR-024,AC-019 |
+| P-OPT-035 | -m/--machine | adaptation | `-m/--machine` prints xbps-native NDJSON schema 1 | dec:#44 §8 | FR-027,AC-022 |
+| P-OPT-038 | --fetch (clean) | adaptation | `clean --fetch` reverts the files `xbp fetch` wrote | dec:#48 §8 | FR-048,AC-035 |
+| P-OPT-039 | --non-free | adaptation | `--non-free` also manages derived `/nonfree` repository files | dec:#48 §6.1 | FR-046,AC-034 |
+| P-OPT-042 | --auto [N] | adaptation | `--auto [N]` validates the N fastest mirrors and writes one | dec:#48 §5.2 | FR-045,AC-034 |
+| P-OPT-043 | -c/--country | adaptation | `-c/--country` matches the TSV region or a word of the location | dec:#48 §6.1 | FR-046,AC-034 |
+| P-OPT-048 | --reinstall | adaptation | `--reinstall` adds `-f` after an installed guard | dec:#43 §4 | FR-007,AC-005 |
+| P-OPT-050 | --print-uris | adaptation | `upgrade --print-uris` prints one NDJSON object per planned download and stops | dec:#44 §9 | FR-028,AC-023 |
+| P-OPT-052 | --full | adaptation | accepted no-op; `--no-full` wins over `--full` | dec:#43 §4 | FR-011,AC-008 |
+| P-OPT-053 | --no-full | adaptation | accepted no-op; checked before `--full` | dec:#43 §4 | FR-011,AC-008 |
+| P-OPT-054 | --safe | adaptation | accepted no-op | dec:#43 §4 | FR-011,AC-008 |
+| P-OPT-058 | moo --help | adaptation | hidden `moo --help` prints the joke line | src:src/cmd/mod.rs:278-299 | FR-002,AC-002 |
+| P-OPT-059 | moo --update | adaptation | hidden `moo --update` adds a joke line | src:src/cmd/mod.rs:278-299 | FR-002,AC-002 |
+| P-OPT-060 | moo --no-update | adaptation | hidden `moo --no-update` adds a joke line | src:src/cmd/mod.rs:278-299 | FR-002,AC-002 |
+| P-CFG-001 | [Nala] auto_remove | adaptation | same key/default `true`; implicit autoremove is a second confirmed `xbps-remove -o` transaction | dec:#49 §1.2;dec:#43 §2 | FR-051,FR-016,AC-013 |
+| P-CFG-002 | [Nala] auto_update | adaptation | same key/default `true`; gates the upgrade family's implicit sync only | dec:#49 §1.2;dec:#43 §3 | FR-051,FR-013,AC-037 |
+| P-VIS-004 | table geometry | adaptation | borderless NOTHING table, 2-space gaps, one trailing space, ANSI-aware width; natural width when piped | dec:#45 §3.2;proto:#51 §6 | FR-062,AC-044 |
+| P-VIS-006 | old and new version cells and diff spans | adaptation | old version raw; new version split at the last `_`; changed components painted Notice individually | dec:#45 §3.4;proto:#51 §6 | FR-063,AC-045 |
+| P-VIS-007 | held reason cell | adaptation | Held rows carry a `Reason:` column; xbps's only reason is `Manual hold` | dec:#45 §3.3;dec:#45 §8 | FR-062,AC-044 |
+| P-VIS-010 | size block | adaptation | ` Total download size:` only when > 0; always one disk line computed from the plan | dec:#45 §3.5;proto:#51 §6 | FR-062,AC-044 |
+| P-VIS-011 | confirmation prompt | adaptation | `Do you want to continue? [Y/n] ` on stderr, exactly one trailing space | dec:#45 §5;dec:#43 §6 | FR-015,AC-010 |
+| P-VIS-013 | progress widget frame and titles | adaptation | rounded box on stderr, width min(columns,80), fixed heights 7/6; titles Downloading Packages, Installing Packages, Removing Packages, Updating Package Lists, Testing Mirrors | dec:#45 §6.2;dec:#50 §7 | FR-064,AC-046 |
+| P-VIS-016 | widget info and message rows | adaptation | fixed label/value pairs per view; message from xbps telemetry | dec:#45 §6.3;dec:#45 §6.4 | FR-064,AC-046 |
+| P-VIS-017 | update view Updating: | adaptation | message `Updating: <repository URL>` from xbps sync output | dec:#45 §6.3;dec:#45 D10 | FR-064,AC-046 |
+| P-VIS-018 | mirror-score Finished: | adaptation | message `Finished: <mirror URL>`; info `Mirrors: done/total` and `Elapsed` | dec:#45 §6.3;dec:#48 §12 | FR-064,AC-046 |
+| P-VIS-019 | plain progress line | adaptation | 40-cell `[====] NN% message` line on stderr, redrawn in place when stderr is a TTY and TERM != dumb | dec:#45 §7.1;proto:#51 §6 | FR-065,AC-047 |
+| P-VIS-020 | discovery row format and order | adaptation | `name (version) [repository] [attributes]`, one line per row, sorted by name | dec:#44 §4 | FR-024,AC-019 |
+| P-VIS-021 | show and policy label format | adaptation | `Label: value` lines; policy uses `Installed:`, `Candidate:`, `Version table:` | dec:#44 §6;dec:#44 §7 | FR-025,FR-026,AC-020,AC-021 |
+| P-VIS-022 | policy *** marker | adaptation | `***` marks the variant matching the candidate | dec:#44 §7 | FR-026,AC-021 |
+| P-VIS-023 | prefixes and roles | extension | `hint:` Notice, `xbpretty:` Error for errors and Warning for warnings, `verbose:` uncoloured | dec:#45 §2.2;dec:#45 D19 | FR-061,FR-066,AC-044,AC-057 |
+| P-TUI-001 | transaction summary screen | adaptation | operation-tabbed full-screen summary, opt-in via `Ui.mode = Tui` or `--tui` | dec:#50 §1;dec:#50 §2;dec:#50 §3 | FR-067,FR-068,AC-049,AC-050,AC-055 |
+| P-TUI-002 | history detail screen | adaptation | read-only transaction summary over one history entry | dec:#50 §4 | FR-069,AC-051 |
+| P-TUI-003 | fetch picker | adaptation | single-select mirror list with region, tier, latency, speed, score | dec:#50 §5;dec:#52 C1 | FR-070,AC-052 |
+| P-TUI-004 | inline progress viewport | adaptation | #45's five progress views drawn inline in every mode except Plain | dec:#50 §7;dec:#52 C5 | FR-072,AC-054 |
+| P-BEH-001 | root requirement and refusal | adaptation | real transactions, sync, clean, update, fetch write, undo/redo/clear require euid 0 | dec:#43 §1;dec:#48 §10;dec:#50 §1.4 | FR-073,AC-056 |
+| P-BEH-002 | exit-code set | adaptation | 0 success/nothing/dry-run/download-only/clean/update; 1 refusal/non-TTY/non-root/missing package/runtime; 2 usage/conflict/N/A/config; xbps failures pass through | dec:#43 §6 | FR-073,AC-056 |
+| P-BEH-003 | stream split and durable output | adaptation | stdout carries only durable output; prompt, progress, hints, notices, errors and forwarded child output go to stderr | dec:#45 §10.1;dec:#50 §13.1 | FR-066,AC-048 |
+| P-BEH-004 | prompt set and answers | adaptation | one prompt with default yes; empty/y/Y/yes proceed, n/N/no refuse, anything else exits 1 without re-prompt, EOF refuses | dec:#43 §6;dec:#45 §5 | FR-015,AC-010 |
+| P-BEH-006 | history store and schema | adaptation | one JSON file per successful transaction under `/var/lib/xbpretty/history`, schema 1, fsync + exclusive link | dec:#46 §1 | FR-029,AC-024 |
+| P-BEH-007 | history list and detail | adaptation | list columns ID/Command/Date/Requested-By/Altered; detail adds Replay of and per-operation tables | dec:#46 §5;dec:#54 §3.3 | FR-030,AC-025,AC-043 |
+| P-BEH-008 | history undo | adaptation | replays the entry's before state through the normal summary/prompt/commit path, pinned to exact versions | dec:#46 §6 | FR-031,AC-026,AC-027 |
+| P-BEH-009 | history redo | adaptation | replays the entry's after state with the same pinned-version algorithm | dec:#46 §7 | FR-032,AC-028 |
+| P-BEH-012 | predownload engine | adaptation | three transfers per host, one task per archive, four attempts, SHA-256, `.part` + atomic rename | dec:#47 §1;dec:#47 §3;dec:#47 §6 | FR-036,FR-037,FR-038,AC-030,AC-031 |
+| P-BEH-013 | download to the current directory | adaptation | named packages only, cwd destination, `Downloads Complete:` block | dec:#47 §8 | FR-039,AC-032 |
+| P-BEH-014 | fetch mirror scoring | adaptation | one 256 KiB ranged GET of `<mirror><path>/<arch>-repodata`, zstd-magic validated | dec:#48 §4 | FR-044,AC-034 |
+| P-BEH-015 | fetch selection rule | adaptation | exactly one mirror, validated against every configured path suffix | dec:#48 §5 | FR-045,AC-034 |
+| P-BEH-016 | fetch write and revert | adaptation | writes masking `/etc/xbps.d/<basename>` files atomically with `.xbpretty-backup` and a manifest | dec:#48 §7;dec:#48 §8 | FR-047,FR-048,AC-035 |
+| P-BEH-017 | machine output for list and search | adaptation | xbps-native NDJSON schema 1, one compact object per line | dec:#44 §8 | FR-027,AC-022 |
+| P-BEH-018 | machine output for show | adaptation | the package row plus a `properties` map per block | dec:#44 §8 | FR-027,AC-022 |
+| P-BEH-019 | machine output for policy | adaptation | package view is an array; global view has `package_files` and `pinned_packages` | dec:#44 §8 | FR-027,AC-022 |
+| P-BEH-020 | --print-uris JSON | adaptation | one object per planned download: package, pkgver, repository, url, signature_url, size, sha256 | dec:#44 §9 | FR-028,AC-023 |
+| P-BEH-021 | machine-schema identity | adaptation | xbpretty does not reproduce rust-apt's apt-shaped `Version` JSON | dec:#44 §8 | FR-027,AC-022 |
+| P-BEH-022 | early update and auto_update | adaptation | `auto_update` gates the upgrade family's implicit sync; `--update` adds a sync step to any transaction | dec:#43 §3;dec:#49 §1.2 | FR-013,AC-008 |
+| P-BEH-023 | implicit autoremove second transaction | adaptation | a second `xbps-remove -n -o [-f]` plan, summary and prompt after a successful primary transaction | dec:#43 §2 | FR-016,AC-013 |
+| P-BEH-024 | sync step | adaptation | a standalone `xbps-install -S` before the dry run, on stderr, root only | dec:#43 §3 | FR-013,AC-008 |
+| P-BEH-025 | N/A flag contract | adaptation | an N/A flag is accepted by the parser and refused before any child with one stderr line and exit 2 | dec:#43 §5 | FR-019,AC-064,AC-066 |
+| P-BEH-026 | non-TTY refusal | adaptation | stdin not a TTY without -y: summary, `-y` hint, exit 1 | dec:#43 §6 | FR-015,AC-012 |
+| P-BEH-027 | colour precedence | adaptation | `--no-color` > explicit `--color` > `[Color] mode` > Auto; Auto is per stream and honours non-empty `NO_COLOR` | dec:#45 §1.3;dec:#49 §7.2 | FR-061,AC-044 |
+| P-BEH-030 | config migration | adaptation | rev-5 flat keys are read, mapped where possible, warned per key, and never rewritten | dec:#54 §1;dec:#54 §4 | FR-056,FR-058,AC-041,AC-042 |
+| P-BEH-031 | the parity matrix itself | extension | two TSVs are the only source; Appendix A and `docs/parity/matrix.md` are generated and freshness-tested | dec:#56 §1;dec:#56 §9 | FR-077,AC-061,AC-062,AC-063 |
+| P-BEH-033 | moo and the no-subcommand path | adaptation | `xbp moo` prints the hidden joke; no subcommand prints help on stdout then a stderr line and exits 1 | src:src/main.rs:146-149 | FR-002,AC-002 |
+| P-BEH-036 | hash algorithm | adaptation | SHA-256 from `filename-sha256` is the only content hash | dec:#47 §5.3;dec:#47 §10 | FR-037,AC-030 |
+| P-PKG-002 | apt sources written by fetch | adaptation | `fetch` writes `/etc/xbps.d/*.conf` `repository=` lines, reverted through the manifest | dec:#48 §7;dec:#55 §10 | FR-047,FR-048,AC-035 |
+| P-PKG-003 | signed apt repository and keyring | adaptation | 9-architecture XBPS repository signed per arch; xbps imports the key on first sync | dec:#55 §8 | FR-076,AC-060 |
+| P-PKG-005 | nala.conf shipped in /etc | adaptation | no `/etc/xbpretty/config.toml` is installed; the example and migration guide ship under `/usr/share/doc/xbpretty/` | dec:#54 §5.1;dec:#55 §5 | FR-060,AC-060 |
+| P-PKG-006 | one binary versus six argv[0] aliases | extension | one binary plus six alias names (`xbp`, `xbp-install`, `xbp-remove`, `xbp-upgrade`, `xbp-autoremove`, `xbp-update`); the set is closed | dec:#55 §2 | FR-001,AC-004,AC-058 |
+| P-PKG-007 | shipped completion files and install paths | adaptation | static generated bash/zsh/fish files at the standard Void paths; runtime lookups for packages and history ids | dec:#55 §3 | FR-005,AC-003,AC-059 |
+| P-PKG-008 | clap_mangen per-subcommand manpages | adaptation | one generated `man/xbpretty.8` plus `man/xbpretty.conf.5`, committed, with six man8 symlinks | dec:#55 §4 | FR-076,AC-059 |
+<!-- END GENERATED: parity -->
+
+## Appendix B — Crosswalks
+
+### B.1 Decision tickets → rev 6
+
+| Ticket | Decision | Sections | Principal FRs / ACs | ADR |
+|---|---|---|---|---|
+| #43 | Transaction commands and shared flags | 3.1, 3.2, 3.10 | FR-001–FR-021, FR-073–FR-074; AC-005–017, AC-056–057, AC-064–066 | 0012 (streams), 0014 (fallback), 0016 (flags) |
+| #44 | Discovery and machine output | 3.3 | FR-022–FR-028; AC-018–023 | — (spec only) |
+| #45 | Inline visual system | 3.8, 3.10, 3.11 | FR-061–FR-066, FR-075; AC-044–048, AC-057, AC-068 | 0012 |
+| #46 | History store and replay | 3.4, 3.10 | FR-029–FR-035; AC-024–029, AC-043, AC-071 | 0013 |
+| #47 | Parallel predownload | 3.5 | FR-036–FR-041; AC-030–033, AC-070 | 0014 |
+| #48 | Void mirror fetch | 3.6, 3.10 | FR-042–FR-050; AC-034–036, AC-065 | 0015 |
+| #49 | Config schema | 3.1, 3.7 | FR-003, FR-051–FR-059; AC-002, AC-037–040, AC-067 | 0016 |
+| #50 | Full-screen TUI | 3.9, 3.10 | FR-067–FR-072; AC-049–055 | 0017 |
+| #51 | Inline prototype | 3.8 (goldens/geometry), A.1/A.4 | FR-062–FR-064; AC-044–046 | 0012 |
+| #52 | TUI engine prototype | 3.9 (engine/viewport) | FR-072; AC-054–055 | 0017 |
+| #54 | Config/log migration | 3.7, 3.10, 3.11 | FR-056, FR-058, FR-060, FR-035; AC-041–043 | 0018 |
+| #55 | Packaging and release | 3.1, 3.11 | FR-001, FR-004–FR-006, FR-076; AC-001, AC-003–004, AC-058–060 | 0019 |
+| #56 | Parity matrix | 3.11, Appendix A | FR-077; AC-061–063 | 0020 |
+
+### B.2 Rev-5 FR → rev-6 FR
+
+| Rev 5 | Rev 6 | Note |
+|---|---|---|
+| FR-001 | FR-001, FR-002 | alias set closed at six; canonical command table |
+| FR-002 | FR-007, FR-013 | install no longer syncs |
+| FR-003 | FR-008 | unchanged intent |
+| FR-004 | FR-011, FR-013 | upgrade family + separate sync |
+| FR-005 | FR-010 | autoremove/autopurge |
+| FR-006 | FR-012 | update count/listing |
+| FR-007, FR-008 | FR-013 | replaced: xbps ignores `-S` under `-n` |
+| FR-009 | FR-015 | prompt/refusal |
+| FR-010 | FR-015 | non-TTY |
+| FR-011 | FR-062, FR-063 | borderless tables + version diff |
+| FR-012 | FR-062 | summary/footer |
+| FR-013 | FR-035, FR-075 | line log, `log`, history split |
+| FR-014 | FR-064, FR-066 | five views, stderr discipline |
+| FR-015 | FR-017 | nothing-to-do/hold-only |
+| FR-015a | FR-075 | reboot hint kept |
+| FR-016 | FR-073 | root/hint |
+| FR-017 | FR-073 | hints |
+| FR-018 | FR-073 | reverse-dependency hint |
+| FR-018a | FR-053, FR-073 | binary path resolution |
+| FR-019 | FR-051, FR-054, FR-055, FR-056 | schema, layers, trust, legacy |
+| FR-020 | FR-061 | colour precedence |
+| FR-021 | FR-003, FR-018 | nala owns the flag namespace |
+| FR-022 | FR-021 | `--` passthrough |
+| FR-023 | FR-003 | verbose |
+| FR-024 | FR-005 | completions |
+| FR-025 | FR-006 | link |
+| FR-026 | FR-004 | version |
+| FR-027 | FR-076 | packaging |
+
+### B.3 Rev-5 AC → rev-6 AC
+
+| Rev 5 | Rev 6 |
+|---|---|
+| AC-001 | AC-010, AC-056 |
+| AC-002 | AC-008 |
+| AC-003 | AC-011 (refusal is 1) |
+| AC-004 | AC-012 |
+| AC-005 | AC-015 |
+| AC-006 | AC-010 |
+| AC-007 | AC-008 |
+| AC-008 | AC-009 |
+| AC-009 | AC-007, AC-014 |
+| AC-010 | AC-044 |
+| AC-011 | AC-014 |
+| AC-012 | AC-024, AC-057 |
+| AC-013 | AC-057 |
+| AC-014 | AC-056 |
+| AC-015 | AC-056 |
+| AC-016 | AC-056 |
+| AC-017 | AC-056 |
+| AC-018 | AC-040 |
+| AC-019 | AC-039, AC-040 |
+| AC-020 | AC-038 |
+| AC-021 | AC-044, AC-048 |
+| AC-022 | AC-001 |
+| AC-023 | AC-017 |
+| AC-024 | AC-002 |
+| AC-025 | AC-059 |
+| AC-026 | AC-004, AC-058 |
+
+### B.4 Superseded decisions
+
+| Superseded | By | Where |
+|---|---|---|
+| ADR-0011 (rounded summary boxes, 5-line spinner widget, `box_style`/`progress_bar`) | ADR-0012; ADR-0011 decision 1 (zero-dependency engine) survives | ADR-0011 status note, ADR-0012 |
+| ADR-0005 #1 (successful plan unread) | Forward the plan's stderr before the summary (#43) | ADR-0005 status note, FR-014 |
+| ADR-0008 command vocabulary (`install`/`remove`/`upgrade`/`autoremove`/`update`) | `purge`, `autopurge`, `undo`, `redo` added; line shape unchanged | ADR-0008 status note, FR-035 |
+| Rev 5 FR-007/FR-008 (`-Sn` dry-run sync) | Separate sync step (#43) | FR-013 |
+| Rev 5 NFR-003/AC-003 (decline exits 0) | Refusal exits 1 (#43) | FR-073, AC-011 |
+| Rev 5 `-n` = dry-run | `-n` = `--assume-no`; `--dry-run` long-only (#43) | FR-003, FR-015 |
+| Rev 5 `box_style`, `progress_bar`, `color`, `verbose` config keys | `[Ui]`/`[Color]` schema; legacy warning window (#45/#49/#54) | FR-051, FR-056 |

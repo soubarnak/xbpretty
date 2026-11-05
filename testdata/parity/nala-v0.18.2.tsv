@@ -1,0 +1,193 @@
+# xbpretty parity inventory — nala v0.18.2
+# source: volitank/nala tag v0.18.2; transcription evidence in docs/research/nala-v0.18.2-cli-surface.md
+# counts: CMD=18 OPT=60 CFG=21 VIS=34 TUI=5 BEH=40 PKG=11 total=189
+# columns: id	kind	surface	aliases	source	notes
+P-CMD-001	CMD	list	—	src/cli/commands.rs:42-76	0..n globs, name=version, :arch; read-only
+P-CMD-002	CMD	search	—	src/cli/commands.rs:78-88	regex over names then short_desc; >=1 pattern
+P-CMD-003	CMD	show	info	src/cli/commands.rs:90-104	Label: value blocks; apt-only labels dropped
+P-CMD-004	CMD	policy	—	src/cli/commands.rs:106-116	apt priorities and pins
+P-CMD-005	CMD	clean	—	src/cli/commands.rs:118-128	--lists, --fetch; root
+P-CMD-006	CMD	download	—	src/cli/commands.rs:130-136	named packages to cwd
+P-CMD-007	CMD	history	—	src/cli/commands.rs:138-213	list/detail/info/undo/redo/clear
+P-CMD-008	CMD	fetch	—	src/cli/commands.rs:215-253	mirror benchmark and source write
+P-CMD-009	CMD	update	—	src/cli/commands.rs:255-262	apt update + count
+P-CMD-010	CMD	upgrade	—	src/cli/commands.rs:264-282	normal upgrade
+P-CMD-011	CMD	full-upgrade	dist-upgrade	src/cli/commands.rs:284-291	allows removals in apt
+P-CMD-012	CMD	safe-upgrade	—	src/cli/commands.rs:293-300	safe apt upgrade
+P-CMD-013	CMD	install	—	src/cli/commands.rs:302-319	summary, prompt, dpkg, history
+P-CMD-014	CMD	remove	uninstall	src/cli/commands.rs:321-336	remove packages
+P-CMD-015	CMD	purge	—	src/cli/commands.rs:338-344	remove with config files
+P-CMD-016	CMD	autoremove	—	src/cli/commands.rs:346-350	orphan removal
+P-CMD-017	CMD	autopurge	—	src/cli/commands.rs:352-358	orphan removal with config
+P-CMD-018	CMD	moo	—	src/cli/commands.rs:12-40	hidden easter egg
+P-OPT-001	OPT	-v/--verbose	—	src/cli/parser.rs:13-15	—
+P-OPT-002	OPT	--debug	—	src/cli/parser.rs:16-18	—
+P-OPT-003	OPT	--config FILE	—	src/cli/parser.rs:20-22	—
+P-OPT-004	OPT	--history-dir DIR	—	src/cli/parser.rs:24-26	—
+P-OPT-005	OPT	--tui	—	src/cli/parser.rs:28-30	—
+P-OPT-006	OPT	--no-tui	—	src/cli/parser.rs:32-34	—
+P-OPT-007	OPT	-o/--option	—	src/cli/parser.rs:36-38	—
+P-OPT-008	OPT	--color <when>	—	src/cli/parser.rs:40-42	—
+P-OPT-009	OPT	--no-color	—	src/cli/parser.rs:44-46	—
+P-OPT-010	OPT	-d/--download-only	—	src/cli/flags.rs:8-10	—
+P-OPT-011	OPT	--simple	—	src/cli/flags.rs:12-14	—
+P-OPT-012	OPT	--update	—	src/cli/flags.rs:16-18	—
+P-OPT-013	OPT	--no-update	—	src/cli/flags.rs:20-22	—
+P-OPT-014	OPT	--allow-unauthenticated	—	src/cli/flags.rs:24-26	—
+P-OPT-015	OPT	-y/--assume-yes	—	src/cli/flags.rs:28-30	—
+P-OPT-016	OPT	-n/--assume-no	—	src/cli/flags.rs:32-34	—
+P-OPT-017	OPT	--remove-essential	—	src/cli/flags.rs:36-38	—
+P-OPT-018	OPT	--purge	—	src/cli/flags.rs:40-42	—
+P-OPT-019	OPT	-f/--fix-broken	—	src/cli/flags.rs:47-50	—
+P-OPT-020	OPT	--no-fix-broken	—	src/cli/flags.rs:52-54	—
+P-OPT-021	OPT	--install-recommends	—	src/cli/flags.rs:60-63	—
+P-OPT-022	OPT	--no-install-recommends	—	src/cli/flags.rs:65-67	—
+P-OPT-023	OPT	--install-suggests	—	src/cli/flags.rs:69-72	—
+P-OPT-024	OPT	--no-install-suggests	—	src/cli/flags.rs:73-75	—
+P-OPT-025	OPT	-a/--all-versions	—	src/cli/flags.rs:79-82	—
+P-OPT-026	OPT	-A/--all-arches	—	src/cli/flags.rs:84-87	—
+P-OPT-027	OPT	--auto-remove/--autoremove	—	src/cli/flags.rs:90-99	—
+P-OPT-028	OPT	--no-auto-remove/--no-autoremove	—	src/cli/flags.rs:100-107	—
+P-OPT-029	OPT	[PKG_NAMES]...	—	src/cli/commands.rs:47-48	—
+P-OPT-030	OPT	--description	—	src/cli/commands.rs:50-52	—
+P-OPT-031	OPT	--summary	—	src/cli/commands.rs:54-56	—
+P-OPT-032	OPT	-i/--installed	—	src/cli/commands.rs:61-63	—
+P-OPT-033	OPT	-u/--upgradable	—	src/cli/commands.rs:65-67	—
+P-OPT-034	OPT	-V/--virtual	—	src/cli/commands.rs:69-71	—
+P-OPT-035	OPT	-m/--machine	—	src/cli/commands.rs:73-75	—
+P-OPT-036	OPT	-n/--names (--names-only)	—	src/cli/commands.rs:81-83	—
+P-OPT-037	OPT	--lists	—	src/cli/commands.rs:121-123	—
+P-OPT-038	OPT	--fetch (clean)	—	src/cli/commands.rs:125-127	—
+P-OPT-039	OPT	--non-free	—	src/cli/commands.rs:217-224	—
+P-OPT-040	OPT	--https-only	—	src/cli/commands.rs:226-228	—
+P-OPT-041	OPT	--sources	—	src/cli/commands.rs:230-232	—
+P-OPT-042	OPT	--auto [N]	—	src/cli/commands.rs:230-237	—
+P-OPT-043	OPT	-c/--country	—	src/cli/commands.rs:239-241	—
+P-OPT-044	OPT	--debian	—	src/cli/commands.rs:243-245	—
+P-OPT-045	OPT	--ubuntu	—	src/cli/commands.rs:247-249	—
+P-OPT-046	OPT	--devuan	—	src/cli/commands.rs:251-253	—
+P-OPT-047	OPT	--remove-config	—	src/cli/commands.rs:343	—
+P-OPT-048	OPT	--reinstall	—	src/cli/commands.rs:309-317	—
+P-OPT-049	OPT	-t/--target-release	—	src/cli/commands.rs:313	—
+P-OPT-050	OPT	--print-uris	—	src/cli/commands.rs:286-291	—
+P-OPT-051	OPT	--exclude	—	src/cli/commands.rs:286-291	—
+P-OPT-052	OPT	--full	—	src/cli/commands.rs:284-291	—
+P-OPT-053	OPT	--no-full	—	src/cli/commands.rs:284-291	—
+P-OPT-054	OPT	--safe	—	src/cli/commands.rs:293-300	—
+P-OPT-055	OPT	-h/--help	—	src/cli/parser.rs:8-11	—
+P-OPT-056	OPT	history clear --all	—	src/cli/commands.rs:190-192	—
+P-OPT-057	OPT	[ID or last]	—	src/cli/commands.rs:176-193	—
+P-OPT-058	OPT	moo --help	—	src/cli/commands.rs:12-40	—
+P-OPT-059	OPT	moo --update	—	src/cli/commands.rs:12-40	—
+P-OPT-060	OPT	moo --no-update	—	src/cli/commands.rs:12-40	—
+P-CFG-001	CFG	[Nala] auto_remove	—	src/config/file.rs:36-45	—
+P-CFG-002	CFG	[Nala] auto_update	—	src/config/file.rs:36-45	—
+P-CFG-003	CFG	[Nala] update_show_packages	—	src/config/file.rs:36-45	—
+P-CFG-004	CFG	[Nala] full_upgrade	—	src/config/file.rs:36-45	—
+P-CFG-005	CFG	[Nala] simple	—	src/config/file.rs:36-45	—
+P-CFG-006	CFG	[Nala] assume_yes	—	src/config/file.rs:36-45	—
+P-CFG-007	CFG	[Ui] mode	—	src/config/file.rs:71-88	—
+P-CFG-008	CFG	[Ui] unit	—	src/config/file.rs:71-88	—
+P-CFG-009	CFG	[Color] mode	—	src/config/color.rs:637-650	—
+P-CFG-010	CFG	[Color.theme] Primary	—	src/config/color.rs:547-604	—
+P-CFG-011	CFG	[Color.theme] Secondary	—	src/config/color.rs:547-604	—
+P-CFG-012	CFG	[Color.theme] Highlight	—	src/config/color.rs:547-604	—
+P-CFG-013	CFG	[Color.theme] Regular	—	src/config/color.rs:547-604	—
+P-CFG-014	CFG	[Color.theme] ProgressFilled	—	src/config/color.rs:547-604	—
+P-CFG-015	CFG	[Color.theme] ProgressUnfilled	—	src/config/color.rs:547-604	—
+P-CFG-016	CFG	[Color.theme] Notice	—	src/config/color.rs:547-604	—
+P-CFG-017	CFG	[Color.theme] Warning	—	src/config/color.rs:547-604	—
+P-CFG-018	CFG	[Color.theme] Error	—	src/config/color.rs:547-604	—
+P-CFG-019	CFG	[Color.theme] Style grammar	—	src/config/color.rs:492-528	—
+P-CFG-020	CFG	[Color.theme] modifier vocabulary	—	src/config/color.rs:281-399	—
+P-CFG-021	CFG	TOML outside the supported subset	—	docs/research/nala-v0.18.2-cli-surface.md §6	—
+P-VIS-001	VIS	nine-role default palette	—	src/config/color.rs:547-604;nala.conf:52-61	—
+P-VIS-002	VIS	section rule =	—	src/summary.rs:150-151	—
+P-VIS-003	VIS	section label line	—	src/summary.rs:152-158	—
+P-VIS-004	VIS	table geometry	—	src/table.rs:5-18	—
+P-VIS-005	VIS	package-name role	—	src/tui/summary/row.rs:80-88	—
+P-VIS-006	VIS	old and new version cells and diff spans	—	src/util/version.rs:3-41	—
+P-VIS-007	VIS	held reason cell	—	src/tui/summary/row.rs:129-134	—
+P-VIS-008	VIS	size column and right alignment	—	src/table.rs:5-18	—
+P-VIS-009	VIS	Summary heading and footer counts	—	src/summary.rs:160-175	—
+P-VIS-010	VIS	size block	—	src/summary.rs:69-102	—
+P-VIS-011	VIS	confirmation prompt	—	src/util/prompt.rs:9-87	—
+P-VIS-012	VIS	Nothing to do.	—	src/summary.rs:299-313	—
+P-VIS-013	VIS	progress widget frame and titles	—	src/tui/progress.rs:125-560	—
+P-VIS-014	VIS	Progress label and percent	—	src/tui/progress.rs:125-560	—
+P-VIS-015	VIS	progress bar	—	src/tui/progress.rs:125-560	—
+P-VIS-016	VIS	widget info and message rows	—	src/tui/progress.rs:155-377	—
+P-VIS-017	VIS	update view Updating:	—	src/tui/progress.rs:155-377	—
+P-VIS-018	VIS	mirror-score Finished:	—	src/tui/progress.rs:155-377	—
+P-VIS-019	VIS	plain progress line	—	src/progress.rs:279-377	—
+P-VIS-020	VIS	discovery row format and order	—	src/cmd/list.rs:11-45	—
+P-VIS-021	VIS	show and policy label format	—	src/cmd/show.rs:35-70;src/cmd/policy.rs:205-316	—
+P-VIS-022	VIS	policy *** marker	—	src/cmd/policy.rs:205-316	—
+P-VIS-023	VIS	prefixes and roles	—	src/summary.rs:152-158	—
+P-VIS-024	VIS	download completion block	—	src/download/downloader.rs:61-71	—
+P-VIS-025	VIS	machine JSON never coloured	—	src/cmd/mod.rs:240-244	—
+P-VIS-026	VIS	--simple layout	—	src/summary.rs:104-134	—
+P-VIS-027	VIS	summary and widget size formatting	—	src/util/units.rs:24-47;src/progress.rs:166	—
+P-VIS-028	VIS	Downgrade section	—	src/libnala/transaction.rs:24-37	—
+P-VIS-029	VIS	held-reason vocabulary beyond Manual hold	—	src/tui/summary/row.rs:129-134	—
+P-VIS-030	VIS	Download view mirror table	—	src/tui/progress.rs:125-560	—
+P-VIS-031	VIS	Fetched ... completion line	—	src/progress.rs:497-538	—
+P-VIS-032	VIS	Nothing to fetch	—	src/progress.rs:497-538	—
+P-VIS-033	VIS	dpkg conffile and status-fd handling	—	src/dpkg.rs:34-42	—
+P-VIS-034	VIS	APT essential-package removal warning	—	src/summary.rs:222-227	—
+P-TUI-001	TUI	transaction summary screen	—	src/tui/summary/mod.rs:374-455	—
+P-TUI-002	TUI	history detail screen	—	src/tui/summary/mod.rs:213-242	—
+P-TUI-003	TUI	fetch picker	—	src/tui/fetch.rs:136-171	—
+P-TUI-004	TUI	inline progress viewport	—	src/tui/progress.rs	—
+P-TUI-005	TUI	release-info	—	src/tui/release_info.rs:32-116	—
+P-BEH-001	BEH	root requirement and refusal	—	src/main.rs:81-86;src/util/privilege.rs:15-27	—
+P-BEH-002	BEH	exit-code set	—	src/main.rs:57-73	—
+P-BEH-003	BEH	stream split and durable output	—	src/config/logger.rs:81-83	—
+P-BEH-004	BEH	prompt set and answers	—	src/util/prompt.rs:9-87	—
+P-BEH-005	BEH	nothing-to-do and hold-only	—	src/summary.rs:264-313	—
+P-BEH-006	BEH	history store and schema	—	src/cmd/history/store.rs:141-241	—
+P-BEH-007	BEH	history list and detail	—	src/cmd/history/view.rs:26-118	—
+P-BEH-008	BEH	history undo	—	src/cmd/history/replay.rs:163-236	—
+P-BEH-009	BEH	history redo	—	src/cmd/history/replay.rs:239-288	—
+P-BEH-010	BEH	history clear	—	src/cmd/history/mod.rs:21-28	—
+P-BEH-011	BEH	legacy history.json import	—	src/cmd/history/legacy.rs:109-147	—
+P-BEH-012	BEH	predownload engine	—	src/download/mod.rs:14-63	—
+P-BEH-013	BEH	download to the current directory	—	src/download/downloader.rs:23-74	—
+P-BEH-014	BEH	fetch mirror scoring	—	src/cmd/fetch/score.rs:16-110	—
+P-BEH-015	BEH	fetch selection rule	—	src/cmd/fetch/mod.rs:86-88	—
+P-BEH-016	BEH	fetch write and revert	—	src/cmd/fetch/output.rs:51-91	—
+P-BEH-017	BEH	machine output for list and search	—	src/cmd/mod.rs:240-244	—
+P-BEH-018	BEH	machine output for show	—	src/cmd/mod.rs:225-229	—
+P-BEH-019	BEH	machine output for policy	—	src/cmd/policy.rs:255-283	—
+P-BEH-020	BEH	--print-uris JSON	—	src/download/uri.rs	—
+P-BEH-021	BEH	machine-schema identity	—	src/iterators/serde.rs	—
+P-BEH-022	BEH	early update and auto_update	—	src/config/configuration.rs:276-293	—
+P-BEH-023	BEH	implicit autoremove second transaction	—	src/summary.rs:264-307	—
+P-BEH-024	BEH	sync step	—	src/config/configuration.rs:276-293	—
+P-BEH-025	BEH	N/A flag contract	—	src/cli/parser.rs	—
+P-BEH-026	BEH	non-TTY refusal	—	src/util/prompt.rs:9-87	—
+P-BEH-027	BEH	colour precedence	—	src/config/color.rs:696-709	—
+P-BEH-028	BEH	dynamic completion protocol	—	src/main.rs:38-39;debian/nala.bash-completion	—
+P-BEH-029	BEH	i18n	—	locales/en-US/main.ftl	—
+P-BEH-030	BEH	config migration	—	src/config/config.go:200-252	—
+P-BEH-031	BEH	the parity matrix itself	—	src/main.rs:146-149	—
+P-BEH-032	BEH	-o APT option passthrough	—	src/cli/parser.rs:36-38	—
+P-BEH-033	BEH	moo and the no-subcommand path	—	src/cmd/mod.rs:278-299;src/main.rs:146-149	—
+P-BEH-034	BEH	config_files_only replay	—	src/cmd/history/model.rs:76-80	—
+P-BEH-035	BEH	per-domain mirror rotation and fairness	—	src/download/mod.rs:37-160	—
+P-BEH-036	BEH	hash algorithm	—	src/hashsum.rs:15-35	—
+P-BEH-037	BEH	APT Acquire proxy keys	—	src/download/proxy.rs:75-171	—
+P-BEH-038	BEH	apt auth config	—	src/download/auth.rs:21-112	—
+P-BEH-039	BEH	q-to-cancel key	—	src/terminal.rs:56-69	—
+P-BEH-040	BEH	direct .deb/URL install	—	src/cmd/install.rs:12-52	—
+P-PKG-001	PKG	debian packaging files	—	debian/control;debian/rules	—
+P-PKG-002	PKG	apt sources written by fetch	—	src/cmd/fetch/output.rs:51-91	—
+P-PKG-003	PKG	signed apt repository and keyring	—	build.rs:27-66	—
+P-PKG-004	PKG	multi-suite PPAs	—	debian/control	—
+P-PKG-005	PKG	nala.conf shipped in /etc	—	nala.conf	—
+P-PKG-006	PKG	one binary versus six argv[0] aliases	—	src/cli/main.go	—
+P-PKG-007	PKG	shipped completion files and install paths	—	debian/nala.bash-completion	—
+P-PKG-008	PKG	clap_mangen per-subcommand manpages	—	build.rs:27-66	—
+P-PKG-009	PKG	package-argument completion source	—	src/cli/completion.rs:60-94	—
+P-PKG-010	PKG	installed-only completion	—	src/cli/completion.rs:60-94	—
+P-PKG-011	PKG	history-id completion	—	src/cli/completion.rs:60-94	—
