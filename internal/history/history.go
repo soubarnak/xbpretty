@@ -459,6 +459,11 @@ func (s *Store) removeStaleTemps() error {
 		}
 		info, err := de.Info()
 		if err != nil {
+			// The writer that owns a live temp may have published and
+			// removed it between ReadDir and this stat.
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return fmt.Errorf("reading %s: %w", s.path(name), err)
 		}
 		if info.ModTime().After(cutoff) {
