@@ -77,6 +77,9 @@ type state struct {
 	simple      bool
 	full        bool
 	historyDir  string
+	// downloadSink receives FR-041's event stream. It is created lazily by the
+	// predownload pass so a run that never downloads allocates nothing.
+	downloadSink downloadSink
 }
 
 // Main runs xbpretty with the process arguments and returns its exit code.

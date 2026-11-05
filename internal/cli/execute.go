@@ -23,6 +23,11 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 	if st.r.parser == nil {
 		st.r.parser = NewStreamParser(len(rows), totalDl)
 	}
+	// FR-041: predownload completions seed the child's parser so xbps's own
+	// fallback transfers continue the same counters.
+	if st.downloadSink != nil {
+		st.downloadSink.Seed(st.r.parser)
+	}
 
 	isInteractive := isTTY(st.stdout) && isTTY(st.stderr)
 	useWidget := st.progressBar && !st.r.verbose && isInteractive

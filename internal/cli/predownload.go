@@ -1,0 +1,275 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"strings"
+	"sync"
+	"syscall"
+
+	"github.com/soubarnak/xbpretty/internal/download"
+	"github.com/soubarnak/xbpretty/internal/xbps"
+)
+
+// defaultCacheDir is where xbps keeps downloaded archives (FR-038). xbps has
+// no configuration key for it: every supported Void layout uses this path.
+const defaultCacheDir = "/var/cache/xbps"
+
+// cacheDirFn resolves the cache directory. Tests replace it; the release
+// binary always uses defaultCacheDir.
+var cacheDirFn = func() string { return defaultCacheDir }
+
+// preflightFn is FR-038's disk-space check. Tests replace it to exercise the
+// skip path without filling a filesystem.
+var preflightFn = download.Preflight
+
+// downloadSink is FR-041's replaceable seam. #66 lands the five-view
+// `Downloading Packages` surface on top of this interface; this build keeps a
+// thin sink that only records completions so the child's own fallback stream
+// continues the same counters.
+type downloadSink interface {
+	Event(download.Event)
+	Seed(*StreamParser)
+}
+
+// newDownloadSink builds the sink for one run. #66 replaces this factory with
+// the real view and never touches the engine.
+var newDownloadSink = func(*state) downloadSink {
+	return &cacheSeedSink{completed: map[string]int64{}}
+}
+
+// cacheSeedSink accumulates predownload completions for StreamParser. `.sig2`
+// ticks and completions are ignored (FR-041).
+type cacheSeedSink struct {
+	mu        sync.Mutex
+	completed map[string]int64
+}
+
+func (s *cacheSeedSink) Event(ev download.Event) {
+	if ev.File == "" || strings.HasSuffix(ev.File, ".sig2") {
+		return
+	}
+	switch ev.Kind {
+	case download.EventCacheHit, download.EventFileDone:
+		size := ev.Total
+		if size < 0 {
+			size = ev.Bytes
+		}
+		s.mu.Lock()
+		s.completed[ev.File] = size
+		s.mu.Unlock()
+	}
+}
+
+func (s *cacheSeedSink) Seed(p *StreamParser) {
+	if p == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for file, size := range s.completed {
+		p.SeedDownloaded(file, size)
+	}
+}
+
+// predownloadOutcome is one cache-fill attempt.
+type predownloadOutcome struct {
+	attempted   int
+	failed      int
+	interrupted bool
+	skipped     error // the pass could not start; xbps must do the work
+	invalid     error // repository metadata yielded an unusable filename
+}
+
+// predownload fills the cache from the plan's download set (FR-036, FR-038)
+// and returns -1 when the run may continue, or an exit code when it must stop.
+// failClosed is the --download-only contract: no child takes over, so a
+// failure is final.
+func (st *state) predownload(rows []xbps.Row, failClosed bool) int {
+	outcome := st.fillCache(rows, failClosed)
+	switch {
+	case outcome.interrupted:
+		return exitInterrupted
+	case outcome.invalid != nil:
+		// FR-037 names the offending metadata; there is nothing to fetch for
+		// that row. A child can still be told to do it, so only the
+		// fail-closed surfaces end here.
+		fmt.Fprintf(st.stderr, "xbpretty: %v\n", outcome.invalid)
+		if failClosed {
+			return exitRuntime
+		}
+		return -1
+	case outcome.skipped != nil:
+		if failClosed {
+			fmt.Fprintf(st.stderr, "xbpretty: predownload: %v\n", outcome.skipped)
+			return exitRuntime
+		}
+		fmt.Fprintf(st.stderr, "xbpretty: predownload skipped: %v; xbps will download the archives\n", outcome.skipped)
+		return -1
+	case outcome.failed > 0:
+		if failClosed {
+			return exitRuntime
+		}
+		fmt.Fprintf(st.stderr, "xbpretty: predownload: %d of %d archives could not be fetched; xbps will download them\n",
+			outcome.failed, outcome.attempted)
+		return -1
+	}
+	return -1
+}
+
+// fillCache does the metadata pass, the disk preflight and the parallel cache
+// fill. It prints the per-package metadata warnings and the fail-closed
+// per-file errors; the caller owns the pass-level outcome.
+func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome {
+	var outcome predownloadOutcome
+
+	if st.predownloadDisabledByPassthru() {
+		if st.r != nil && st.r.verbose {
+			fmt.Fprintln(st.stderr, "verbose: predownload disabled by the -c/-r passthrough")
+		}
+		return outcome
+	}
+
+	// FR-036's download set: downloading actions on http(s) repositories with
+	// a reported size (or an unreported download action). ftp and local rows
+	// are counted, never fetched.
+	planned := download.PlannedDownloadRows(rows)
+	var remote []xbps.Row
+	excludedFTP := 0
+	for _, row := range planned {
+		switch {
+		case download.IsFTPRepository(row.Repo):
+			excludedFTP++
+		case !download.IsRemoteRepository(row.Repo):
+			// Local and file:// repositories are excluded silently: xbps
+			// does not cache local archives.
+		default:
+			if download.IsDownloadRow(row) {
+				remote = append(remote, row)
+			}
+		}
+	}
+	if excludedFTP > 0 {
+		fmt.Fprintf(st.stderr, "%d archive(s) from ftp:// repositories were not predownloaded; xbps will fetch them\n", excludedFTP)
+	}
+	if len(remote) == 0 {
+		return outcome
+	}
+
+	dir := cacheDirFn()
+	if err := prepareCacheDir(dir); err != nil {
+		outcome.skipped = fmt.Errorf("the xbps cache %s is not writable: %w", dir, err)
+		return outcome
+	}
+
+	// FR-037: one bulk offline filename-sha256 pass per run.
+	res, err := st.r.run(st.r.cfg.Xbps.QueryPath, "-R", "-s", "", "-p", "filename-sha256")
+	if err != nil {
+		outcome.skipped = fmt.Errorf("repository metadata unavailable: %w", err)
+		return outcome
+	}
+	if res.exitCode != 0 {
+		outcome.skipped = fmt.Errorf("repository metadata unavailable: xbps-query exited %d", res.exitCode)
+		return outcome
+	}
+	hashes := download.ParseHashes(res.stdout)
+
+	targets, _, _, err := download.TargetsFromRows(planned, hashes)
+	if err != nil {
+		outcome.invalid = err
+		return outcome
+	}
+	if len(targets) == 0 {
+		return outcome
+	}
+	for _, target := range targets {
+		if target.SHA256 == "" {
+			fmt.Fprintf(st.stderr, "%s: no SHA-256 in repository metadata; xbps will verify it at install\n", target.Pkgver)
+		}
+	}
+
+	// FR-038: preflight the plan's sizes against statvfs so a transfer never
+	// starts on a full cache filesystem. A fully cached plan asks for nothing.
+	var need uint64
+	for _, target := range targets {
+		if download.NeedsFetch(target, dir) {
+			need += target.Size
+		}
+	}
+	if err := preflightFn(dir, need); err != nil {
+		outcome.skipped = fmt.Errorf("disk space check failed: %w", err)
+		return outcome
+	}
+
+	engineOpts := download.Options{DestDir: dir, Mode: download.ModeCache}
+	if st.downloadSink == nil {
+		st.downloadSink = newDownloadSink(st)
+	}
+	engineOpts.OnEvent = st.downloadSink.Event
+	if st.r.verbose {
+		engineOpts.Log = func(format string, args ...any) {
+			fmt.Fprintf(st.stderr, "verbose: "+format+"\n", args...)
+		}
+	}
+	engine := download.New(engineOpts)
+
+	// FR-041: Ctrl-C cancels the engine, which removes `.part`, then the run
+	// exits 130 before any child is started.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	results := engine.Fetch(ctx, targets)
+	if ctx.Err() != nil {
+		fmt.Fprintln(st.stderr, "xbpretty: interrupted")
+		outcome.interrupted = true
+		return outcome
+	}
+
+	outcome.attempted = len(results)
+	for _, result := range results {
+		if result.Err == nil {
+			continue
+		}
+		outcome.failed++
+		if failClosed {
+			fmt.Fprintf(st.stderr, "xbpretty: %v\n", result.Err)
+		}
+	}
+	return outcome
+}
+
+// predownloadDisabledByPassthru applies FR-038's passthrough rule: `-c` or
+// `-r` sends xbps to a cache or root xbpretty did not model, so the fill is
+// silently off apart from the verbose line.
+func (st *state) predownloadDisabledByPassthru() bool {
+	if st.opts == nil {
+		return false
+	}
+	for _, token := range st.opts.passthru {
+		if len(token) < 2 || token[0] != '-' || strings.HasPrefix(token, "--") {
+			continue
+		}
+		if strings.ContainsAny(token[1:], "cr") {
+			return true
+		}
+	}
+	return false
+}
+
+// prepareCacheDir makes the cache directory usable and proves it is writable,
+// so the metadata pass never runs for a cache that could not receive a file.
+func prepareCacheDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	probe, err := os.CreateTemp(dir, ".xbpretty-probe-*")
+	if err != nil {
+		return err
+	}
+	name := probe.Name()
+	if err := probe.Close(); err != nil {
+		return err
+	}
+	return os.Remove(name)
+}

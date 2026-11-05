@@ -443,6 +443,23 @@ func (p *StreamParser) FeedStdout(line string) {
 	p.mu.Unlock()
 }
 
+// SeedDownloaded records one predownload completion so the child's own
+// fallback ticks continue from the same counters (FR-041). `.sig2` names are
+// never passed here: the sink filters them.
+func (p *StreamParser) SeedDownloaded(filename string, size int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.completedFiles == nil {
+		p.completedFiles = make(map[string]int64)
+	}
+	p.completedFiles[filename] = size
+	var completedSum int64
+	for _, sz := range p.completedFiles {
+		completedSum += sz
+	}
+	p.state.DownloadedBytes = completedSum
+}
+
 // State returns a copy of the current telemetry state.
 func (p *StreamParser) State() TelemetryState {
 	p.mu.RLock()

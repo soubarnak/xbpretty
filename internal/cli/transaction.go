@@ -259,10 +259,15 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	}
 
 	// FR-040: the download-only stop runs after its prompt/root/non-TTY
-	// checks. #72 owns the predownload; the seam must never fall through to
-	// a real transaction.
+	// checks and never falls through to a real transaction.
 	if opts.downloadOnly {
-		return st.downloadOnlyStop(cmd, opts, rows)
+		return st.downloadOnlyStop(rows)
+	}
+
+	// FR-036/FR-038: fill the cache after every check and before the child. A
+	// failure warns once and leaves the work to xbps, whose exit code stands.
+	if code := st.predownload(rows, false); code >= 0 {
+		return code
 	}
 
 	code = st.execute(cmd, st.binaryFor(cmd), realArgv(cmd, opts, args), rows...)
@@ -504,14 +509,15 @@ func (st *state) printUpgradable(rows []xbps.Row) {
 	}
 }
 
-// downloadOnlyStop is the #72 seam. #72 owns the predownload and its prompt
-// rules; until it lands the flag must never fall through to a real
-// transaction.
-func (st *state) downloadOnlyStop(cmd string, opts *options, rows []xbps.Row) int {
-	// TODO(#72): predownload the plan's archives, then stop with no pkgdb
-	// write, no log and no history entry.
-	fmt.Fprintf(st.stderr, "xbpretty: --download-only for %s is not implemented in this build\n", cmd)
-	return exitRuntime
+// downloadOnlyStop implements FR-040: the plan's download set is filled after
+// the same checks a real transaction makes, then the run stops with no xbps
+// child, no pkgdb write, no implicit autoremove, no log, no history and no
+// completion line. An empty or all-cached set is a verified no-op.
+func (st *state) downloadOnlyStop(rows []xbps.Row) int {
+	if code := st.predownload(rows, true); code >= 0 {
+		return code
+	}
+	return exitOK
 }
 
 // implicitAutoremovePlan is the #64 seam. #64 owns planning the second orphan

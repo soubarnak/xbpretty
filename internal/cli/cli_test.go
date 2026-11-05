@@ -58,6 +58,17 @@ func newEnv(t *testing.T) *env {
 	t.Setenv("XB_STUB_REVDEPS", "")
 	t.Setenv("XB_STUB_QUERY", "figlet-2.2.5_6\n657KB\n")
 
+	// The predownload pass must never reach the machine's real cache or the
+	// network from a unit test. A cache path that cannot be a directory makes
+	// the pass skip itself; predownload tests point cacheDirFn at a temp dir.
+	noCache := filepath.Join(dir, "no-cache")
+	if err := os.WriteFile(noCache, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	origCacheDir := cacheDirFn
+	cacheDirFn = func() string { return noCache }
+	t.Cleanup(func() { cacheDirFn = origCacheDir })
+
 	origTerminal, origEuid := isTerminalFn, euidFn
 	isTerminalFn = func(f *os.File) bool { return e.tty }
 	euidFn = func() int {
