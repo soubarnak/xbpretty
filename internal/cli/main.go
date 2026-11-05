@@ -207,8 +207,10 @@ func (st *state) dispatch(opts *options) int {
 	case "full-upgrade", "safe-upgrade":
 		// The upgrade family is an equivalence in FR-011.
 		return st.runTransaction("upgrade", opts)
+	case "fetch":
+		return st.runFetch(opts)
 	case "purge", "autopurge", "download", "clean", "list", "search", "show",
-		"policy", "history", "undo", "redo", "fetch":
+		"policy", "history", "undo", "redo":
 		return st.runUnimplemented(opts.command, opts)
 	}
 	fmt.Fprintf(st.stderr, "xbpretty: unknown command %q\n", opts.command)
@@ -229,7 +231,13 @@ func validateInvocation(opts *options, err io.Writer) (int, bool) {
 			fmt.Fprintf(err, "xbpretty: %s needs at least one package\n", opts.command)
 			return exitRuntime, true
 		}
-	case "upgrade", "full-upgrade", "safe-upgrade", "autoremove", "autopurge", "update", "clean", "fetch":
+	case "fetch":
+		if len(args) > 0 || opts.dashDash {
+			// FR-042: no positional arguments and no -- passthrough.
+			fmt.Fprintln(err, "xbpretty: fetch takes no arguments and no -- passthrough")
+			return exitUsage, true
+		}
+	case "upgrade", "full-upgrade", "safe-upgrade", "autoremove", "autopurge", "update", "clean":
 		if len(args) > 0 {
 			fmt.Fprintf(err, "xbpretty: %s takes no package arguments\n", opts.command)
 			return exitUsage, true
