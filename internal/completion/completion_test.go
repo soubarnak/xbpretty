@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/soubarnak/xbpretty/internal/spec"
 )
 
 func TestScriptShells(t *testing.T) {
@@ -441,6 +443,36 @@ func TestRev6CompletionSurface(t *testing.T) {
 				}
 				if !strings.Contains(script, "--no-fix-broken") {
 					t.Errorf("%s does not offer the accepted no-op --no-fix-broken", shell)
+				}
+			}
+		})
+	}
+}
+
+// TestEveryCommandOffersItsOwnFlags iterates the shared command table and asks
+// each shell for one command-specific flag per command. A command added to the
+// table without joining the generated scan list fails here.
+func TestEveryCommandOffersItsOwnFlags(t *testing.T) {
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		t.Run(shell, func(t *testing.T) {
+			if _, err := exec.LookPath(shell); err != nil {
+				t.Skipf("%s is not installed", shell)
+			}
+			for _, command := range spec.VisibleCommands() {
+				var flag string
+				for _, candidate := range spec.FlagsFor(command.Name) {
+					if candidate.Global || candidate.Hidden || candidate.Refusal != "" {
+						continue
+					}
+					flag = candidate.Long
+					break
+				}
+				if flag == "" {
+					continue
+				}
+				p := probeCompletion(t, shell, "xbp", command.Name, "-")
+				if !offers(p, "--"+flag) {
+					t.Errorf("%s after %s did not offer --%s: %q", shell, command.Name, flag, p.offered)
 				}
 			}
 		})

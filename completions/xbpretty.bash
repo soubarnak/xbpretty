@@ -104,7 +104,7 @@ _xbpretty_history_ids() {
   fi
 
   case "$sub" in
-    install|download|show|list|search)
+    install|download|list|search|show)
       COMPREPLY=( $(compgen -W "$(_xbpretty_available "$cur")" -- "$cur") ) ;;
     remove|purge|policy|log)
       COMPREPLY=( $(compgen -W "$(_xbpretty_installed)" -- "$cur") ) ;;

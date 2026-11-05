@@ -15,6 +15,8 @@ is an optional TOML configuration file for
 xbpretty(8).
 It uses nala's schema: the [Nala], [Ui], [Color] and [Color.theme] tables plus
 the xbps-only [Xbps] table.
+Table names accept the lowercase aliases [nala], [ui], [color], [color.theme]
+and [xbps].
 Every key is optional.
 Missing files and missing keys resolve to the built-in defaults, and
 command-line flags override configuration values.
@@ -70,16 +72,19 @@ Default: false.
 .Ss Ui
 .Bl -tag -width Ds
 .It Cm mode
-Interface mode: Auto, Plain or Tui.
+Interface mode.
+Values: Auto, Plain, Tui.
 Default: "Auto".
 .It Cm unit
-Size unit: Binary or Decimal.
+Size unit.
+Values: Binary, Decimal.
 Default: "Binary".
 .El
 .Ss Color
 .Bl -tag -width Ds
 .It Cm mode
-Colour mode: Auto, Always or Never.
+Colour mode.
+Values: Auto, Always, Never.
 Default: "Auto".
 .El
 .Ss Color.theme
@@ -90,22 +95,31 @@ The nine roles are:
 .Bl -tag -width Ds
 .It Cm Primary
 Section rules, labels and headings.
+Default: { fg = "BrightGreen" }.
 .It Cm Secondary
 Secondary labels.
+Default: { fg = "BrightBlue" }.
 .It Cm Highlight
 Package names and highlighted values.
+Default: { fg = "Reset" }.
 .It Cm Regular
 Regular body text.
+Default: { fg = "Reset", modifier = "" }.
 .It Cm ProgressFilled
 Filled part of the progress bar.
+Default: { fg = "BrightGreen" }.
 .It Cm ProgressUnfilled
 Unfilled part of the progress bar.
+Default: { fg = "BrightRed" }.
 .It Cm Notice
 Notices and version highlights.
+Default: { fg = "BrightYellow" }.
 .It Cm Warning
 Warnings.
+Default: { fg = "BrightYellow" }.
 .It Cm Error
 Errors.
+Default: { fg = "BrightRed" }.
 .El
 .Ss Xbps
 .Bl -tag -width Ds
@@ -133,18 +147,29 @@ Default: true.
 .El
 .Sh VALUES
 .Ss Colours
-A colour is a named ANSI colour, an indexed colour 0-255, or an RGB triplet.
-Named colours are Reset, Black, Red, Green, Yellow, Blue, Magenta, Cyan, Gray,
-DarkGray, LightRed, LightGreen, LightYellow, LightBlue, LightMagenta,
-LightCyan and White.
-Indexed colours use an integer; RGB colours use rgb(r, g, b).
+A colour is a named ANSI colour, a hexadecimal colour, an indexed colour, or
+an RGB triplet.
+Named colours are case-insensitive and ignore spaces, underscores and hyphens:
+Reset, Black, Red, Green, Yellow, Blue, Magenta (Purple), Cyan, Gray (Grey,
+LightGray, LightGrey), DarkGray (DarkGrey, BrightBlack), LightRed (BrightRed),
+LightGreen (BrightGreen), LightYellow (BrightYellow), LightBlue (BrightBlue),
+LightMagenta (BrightMagenta, LightPurple, BrightPurple), LightCyan
+(BrightCyan) and White (BrightWhite, LightWhite).
+A hexadecimal colour is #rrggbb.
+An integer from 0 to 255, or its quoted form, is an indexed colour.
+The explicit indexed form is { Indexed = N }.
+The RGB form is { Rgb = [r, g, b] } with each component from 0 to 255.
 .Ss Modifiers
-The accepted modifiers are bold, dim, italic, underlined, slow_blink,
-rapid_blink, reversed, hidden and crossed_out.
+Modifiers are case-insensitive and ignore spaces, underscores and hyphens.
+The accepted values are bold, dim, italic, underlined, slow_blink,
+rapid_blink, reversed, hidden and crossed_out (also strikethrough or strike).
+A string separates tokens with a pipe; an array supplies one token per
+element.
 .Ss Enumerations
-[Ui] mode is Auto, Plain or Tui; [Ui] unit is Binary or Decimal; [Color] mode
-is Auto, Always or Never.
-Values are case-sensitive.
+Enumeration values are case-sensitive.
+[Ui] mode is Auto, Plain, Tui.
+[Ui] unit is Binary, Decimal.
+[Color] mode is Auto, Always, Never.
 .Sh LEGACY KEYS
 Rev 6 accepts ten rev-5 top-level flat keys before the first table header.
 They are mapped where possible and never rewritten.

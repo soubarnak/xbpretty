@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/soubarnak/xbpretty/internal/config"
 	"github.com/soubarnak/xbpretty/internal/spec"
 )
 
@@ -67,13 +68,15 @@ func flagTag(f spec.Flag) string {
 	for _, alias := range f.Aliases {
 		add("--" + alias)
 	}
-	if f.Kind != spec.BoolFlag {
-		b.WriteString(" Ar ")
-		if f.ValueName != "" {
-			b.WriteString(f.ValueName)
-		} else {
-			b.WriteString("VALUE")
-		}
+	valueName := f.ValueName
+	if valueName == "" {
+		valueName = "VALUE"
+	}
+	switch f.Kind {
+	case spec.ValueFlag:
+		b.WriteString(" Ar " + valueName)
+	case spec.OptionalValueFlag:
+		b.WriteString(" Op Ar " + valueName)
 	}
 	return b.String()
 }
@@ -83,10 +86,16 @@ func flagDescription(f spec.Flag) string {
 	if f.Summary != "" {
 		parts = append(parts, f.Summary+".")
 	}
-	if f.Global {
+	switch {
+	case f.Long == "version":
+		parts = append(parts, "--version is accepted on every command. At the root the short -V means --version; after list or search, -V means --virtual and the long form --version is still available.")
+	case f.Global:
 		parts = append(parts, "Accepted on every command.")
-	} else if len(f.Commands) > 0 {
+	case len(f.Commands) > 0:
 		parts = append(parts, "Accepted by: "+strings.Join(f.Commands, ", ")+".")
+	}
+	if f.Long == "virtual" {
+		parts = append(parts, "The short -V has this meaning only after list or search.")
 	}
 	if len(f.Values) > 0 {
 		parts = append(parts, "Values: "+strings.Join(f.Values, ", ")+".")
@@ -95,12 +104,18 @@ func flagDescription(f spec.Flag) string {
 		parts = append(parts, "Accepted and ignored.")
 	}
 	if f.Refusal != "" {
-		parts = append(parts, "Not available: "+strings.ReplaceAll(f.Refusal, "--", `\-\-`))
+		parts = append(parts, "Not available: "+manRefusal(f.Refusal))
 	}
 	if f.Hidden {
 		parts = append(parts, "Hidden from --help.")
 	}
 	return strings.Join(parts, " ")
+}
+
+// manRefusal keeps a refusal sentence readable without a bare -- token,
+// which mandoc -T lint flags as a verbatim em dash.
+func manRefusal(text string) string {
+	return strings.ReplaceAll(text, " -- ", " followed by the option terminator ")
 }
 
 func writeFlagList(b *strings.Builder, flags []spec.Flag) {
@@ -131,9 +146,20 @@ func writeText(b *strings.Builder, text string) {
 			text = ""
 		}
 		for _, line := range wrapText(sentence, 78) {
-			b.WriteString(line + "\n")
+			b.WriteString(escapeRoffLine(line) + "\n")
 		}
 	}
+}
+
+// escapeRoffLine protects generated prose from roff interpretation: a
+// backslash becomes a literal backslash and a leading . or ' can never start
+// a macro.
+func escapeRoffLine(line string) string {
+	line = strings.ReplaceAll(line, `\`, `\e`)
+	if strings.HasPrefix(line, ".") || strings.HasPrefix(line, "'") {
+		line = `\&` + line
+	}
+	return line
 }
 
 func sentence(text string) string {
@@ -230,11 +256,11 @@ func Man8() string {
 	b.WriteString(".Sh STREAMS\n")
 	b.WriteString(".Bl -tag -width Ds\n")
 	b.WriteString(".It standard output\n")
-	writeText(b, "Durable output only: the summary, Nothing to do., update counts, discovery rows and NDJSON, download results, the fetch table, --help, --version and completion scripts.")
+	writeText(b, "Durable output only: the summary, Nothing to do., update counts, discovery rows and NDJSON, download results, the fetch table, --help, --version and completion scripts. In Tui mode the transaction summary screen is the screen and standard output is empty for that transaction.")
 	b.WriteString(".It standard error\n")
 	writeText(b, "Everything live, interactive or diagnostic: the prompt, progress widget, verbose lines, forwarded child output, plan output, notices, warnings, hints and errors.")
 	b.WriteString(".It standard input\n")
-	writeText(b, "Answers the confirmation prompt. A non-terminal stdin is never read as a prompt; use -y to proceed.")
+	writeText(b, "Answers the confirmation prompt, carries full-screen keystrokes when a TUI surface is active, and is inherited by xbps children. A non-terminal stdin is never read as a prompt; use -y to proceed.")
 	b.WriteString(".El\n")
 
 	b.WriteString(".Sh ENVIRONMENT\n")
@@ -271,6 +297,12 @@ func Man8() string {
 	writeText(b, "The package cache used by predownload, download-only and undo/redo restores.")
 	b.WriteString(".It Pa /etc/xbps.d\n")
 	writeText(b, "xbps repository configuration written by fetch and clean --fetch, not xbpretty configuration.")
+	b.WriteString(".It Pa /etc/xbps.d/*.xbpretty-backup\n")
+	writeText(b, "Pre-fetch copies of managed repository files, restored by clean --fetch.")
+	b.WriteString(".It Pa /usr/share/xbps.d\n")
+	writeText(b, "Read-only xbps repository configuration, read after /etc/xbps.d.")
+	b.WriteString(".It Pa /var/lib/xbpretty/fetch.json\n")
+	writeText(b, "The fetch manifest recording every file fetch wrote, its backup and its SHA-256. clean --fetch reads it.")
 	b.WriteString(".It Pa /usr/share/bash-completion/completions/xbpretty\n")
 	writeText(b, "Installed bash completion.")
 	b.WriteString(".It Pa /usr/share/zsh/site-functions/_xbpretty\n")
@@ -281,6 +313,12 @@ func Man8() string {
 	writeText(b, "Canonical configuration example; it parses to the built-in defaults.")
 	b.WriteString(".It Pa /usr/share/doc/xbpretty/migration-rev6.md\n")
 	writeText(b, "Rev 5 to rev 6 migration guide.")
+	b.WriteString(".It Pa /usr/share/man/man8/xbpretty.8\n")
+	writeText(b, "This manual page, with the xbp.8, xbp-install.8, xbp-remove.8, xbp-upgrade.8, xbp-autoremove.8 and xbp-update.8 alias links.")
+	b.WriteString(".It Pa /usr/share/man/man5/xbpretty.conf.5\n")
+	writeText(b, "The configuration manual page.")
+	b.WriteString(".It Pa /usr/share/licenses/xbpretty/LICENSE\n")
+	writeText(b, "The MIT licence.")
 	b.WriteString(".El\n")
 
 	b.WriteString(".Sh EXIT STATUS\n")
@@ -311,17 +349,14 @@ func Man8() string {
 	return b.String()
 }
 
-type configKey struct {
-	Name    string
-	Default string
-	Summary string
-}
-
-func writeConfigKeys(b *strings.Builder, keys []configKey) {
+func writeConfigKeys(b *strings.Builder, keys []config.SchemaKey) {
 	b.WriteString(".Bl -tag -width Ds\n")
 	for _, key := range keys {
 		fmt.Fprintf(b, ".It Cm %s\n", key.Name)
 		line := key.Summary
+		if len(key.Values) > 0 {
+			line += " Values: " + strings.Join(key.Values, ", ") + "."
+		}
 		if key.Default != "" {
 			line += " Default: " + key.Default + "."
 		}
@@ -330,55 +365,37 @@ func writeConfigKeys(b *strings.Builder, keys []configKey) {
 	b.WriteString(".El\n")
 }
 
-var (
-	nalaKeys = []configKey{
-		{"auto_remove", "true", "Plan and offer the implicit orphan removal after a successful transaction."},
-		{"auto_update", "true", "Refresh the repository index before the upgrade family."},
-		{"update_show_packages", "false", "With update, list each upgradable package instead of only the count."},
-		{"full_upgrade", "false", "Accepted compatibility switch; xbps -u never removes packages."},
-		{"simple", "false", "Use the one-line-per-operation simple summary."},
-		{"assume_yes", "false", "Skip the confirmation prompt, as -y does."},
+func writeThemeRoles(b *strings.Builder, roles []config.SchemaThemeRole) {
+	b.WriteString(".Bl -tag -width Ds\n")
+	for _, role := range roles {
+		fmt.Fprintf(b, ".It Cm %s\n", role.Name)
+		writeText(b, role.Summary+" Default: "+role.Default+".")
 	}
-	uiKeys = []configKey{
-		{"mode", `"Auto"`, "Interface mode: Auto, Plain or Tui."},
-		{"unit", `"Binary"`, "Size unit: Binary or Decimal."},
+	b.WriteString(".El\n")
+}
+
+func writeLegacyKeys(b *strings.Builder, keys []config.SchemaLegacyKey) {
+	b.WriteString(".Bl -tag -width Ds\n")
+	for _, key := range keys {
+		fmt.Fprintf(b, ".It Cm %s\n", key.Key)
+		writeText(b, key.Summary)
 	}
-	colorKeys = []configKey{
-		{"mode", `"Auto"`, "Colour mode: Auto, Always or Never."},
+	b.WriteString(".El\n")
+}
+
+func manifestValues(m config.SchemaManifest, table, key string) []string {
+	for _, t := range m.Tables {
+		if t.Name != table {
+			continue
+		}
+		for _, k := range t.Keys {
+			if k.Name == key {
+				return k.Values
+			}
+		}
 	}
-	xbpsKeys = []configKey{
-		{"install_path", `"xbps-install"`, "Path to xbps-install; privileged and trust-gated under root."},
-		{"remove_path", `"xbps-remove"`, "Path to xbps-remove; privileged and trust-gated under root."},
-		{"query_path", `"xbps-query"`, "Path to xbps-query; privileged and trust-gated under root."},
-		{"rindex_path", `"xbps-rindex"`, "Path to xbps-rindex; privileged and trust-gated under root."},
-		{"uhelper_path", `"xbps-uhelper"`, "Path to xbps-uhelper; privileged and trust-gated under root."},
-		{"pkgdb_path", `"xbps-pkgdb"`, "Path to xbps-pkgdb; privileged and trust-gated under root."},
-		{"transaction_log", "true", "Append a line to the transaction log after a successful run."},
-	}
-	themeKeys = []configKey{
-		{"Primary", "", "Section rules, labels and headings."},
-		{"Secondary", "", "Secondary labels."},
-		{"Highlight", "", "Package names and highlighted values."},
-		{"Regular", "", "Regular body text."},
-		{"ProgressFilled", "", "Filled part of the progress bar."},
-		{"ProgressUnfilled", "", "Unfilled part of the progress bar."},
-		{"Notice", "", "Notices and version highlights."},
-		{"Warning", "", "Warnings."},
-		{"Error", "", "Errors."},
-	}
-	legacyKeys = []configKey{
-		{"assume_yes", "", "Rename to [Nala] assume_yes."},
-		{"sync", "", "Rename to [Nala] auto_update."},
-		{"log", "", "Rename to [Xbps] transaction_log."},
-		{"xbps_install_path", "", "Rename to [Xbps] install_path."},
-		{"xbps_remove_path", "", "Rename to [Xbps] remove_path."},
-		{"xbps_query_path", "", "Rename to [Xbps] query_path."},
-		{"color", "", "Rename to [Color] mode and map auto/always/never to Auto/Always/Never."},
-		{"verbose", "", "Retired; pass -v on the command line."},
-		{"box_style", "", "Retired; the summary has no box."},
-		{"progress_bar", "", "Retired; use [Ui] mode = \"Plain\"."},
-	}
-)
+	return nil
+}
 
 // Conf5 renders xbpretty.conf(5): keys, layers, trust, legacy keys and the
 // security rules around the optional system layer.
@@ -394,7 +411,7 @@ func Conf5() string {
 	b.WriteString(".Sh DESCRIPTION\n")
 	b.WriteString(".Nm\n")
 	writeText(b, "is an optional TOML configuration file for")
-	writeText(b, "xbpretty(8). It uses nala's schema: the [Nala], [Ui], [Color] and [Color.theme] tables plus the xbps-only [Xbps] table. Every key is optional. Missing files and missing keys resolve to the built-in defaults, and command-line flags override configuration values.")
+	writeText(b, "xbpretty(8). It uses nala's schema: the [Nala], [Ui], [Color] and [Color.theme] tables plus the xbps-only [Xbps] table. Table names accept the lowercase aliases [nala], [ui], [color], [color.theme] and [xbps]. Every key is optional. Missing files and missing keys resolve to the built-in defaults, and command-line flags override configuration values.")
 	b.WriteString(".Pp\n")
 	writeText(b, "A rev 6 run never writes, rewrites, converts or backs up a configuration file. It writes no marker and no cache. Configuration warnings never change the command's exit status.")
 
@@ -410,30 +427,40 @@ func Conf5() string {
 	b.WriteString(".El\n")
 	writeText(b, "Each existing layer is parsed and validated independently. A missing default layer is silent; an existing unreadable or invalid layer is a hard error and exits 2. A missing explicit --config file is also a hard error. XBPRETTY_CONFIG is not supported.")
 
+	manifest := config.Manifest()
 	b.WriteString(".Sh KEYS\n")
-	b.WriteString(".Ss Nala\n")
-	writeConfigKeys(b, nalaKeys)
-	b.WriteString(".Ss Ui\n")
-	writeConfigKeys(b, uiKeys)
-	b.WriteString(".Ss Color\n")
-	writeConfigKeys(b, colorKeys)
-	b.WriteString(".Ss Color.theme\n")
-	writeText(b, "Each theme role is an inline table of the form { fg = \"BrightGreen\" }, optionally with bg and modifier. An omitted modifier means bold; an empty modifier means none. The nine roles are:")
-	writeConfigKeys(b, themeKeys)
-	b.WriteString(".Ss Xbps\n")
-	writeConfigKeys(b, xbpsKeys)
+	for _, table := range manifest.Tables {
+		b.WriteString(".Ss " + table.Name + "\n")
+		if table.Name == "Color.theme" {
+			writeText(b, "Each theme role is an inline table of the form { fg = \"BrightGreen\" }, optionally with bg and modifier. An omitted modifier means bold; an empty modifier means none. The nine roles are:")
+			writeThemeRoles(b, manifest.ThemeRoles)
+			continue
+		}
+		writeConfigKeys(b, table.Keys)
+	}
 
 	b.WriteString(".Sh VALUES\n")
 	b.WriteString(".Ss Colours\n")
-	writeText(b, "A colour is a named ANSI colour, an indexed colour 0-255, or an RGB triplet. Named colours are Reset, Black, Red, Green, Yellow, Blue, Magenta, Cyan, Gray, DarkGray, LightRed, LightGreen, LightYellow, LightBlue, LightMagenta, LightCyan and White. Indexed colours use an integer; RGB colours use rgb(r, g, b).")
+	writeText(b, "A colour is a named ANSI colour, a hexadecimal colour, an indexed colour, or an RGB triplet. Named colours are case-insensitive and ignore spaces, underscores and hyphens: Reset, Black, Red, Green, Yellow, Blue, Magenta (Purple), Cyan, Gray (Grey, LightGray, LightGrey), DarkGray (DarkGrey, BrightBlack), LightRed (BrightRed), LightGreen (BrightGreen), LightYellow (BrightYellow), LightBlue (BrightBlue), LightMagenta (BrightMagenta, LightPurple, BrightPurple), LightCyan (BrightCyan) and White (BrightWhite, LightWhite). A hexadecimal colour is #rrggbb. An integer from 0 to 255, or its quoted form, is an indexed colour.")
+	writeText(b, "The explicit indexed form is { Indexed = N }.")
+	writeText(b, "The RGB form is { Rgb = [r, g, b] } with each component from 0 to 255.")
 	b.WriteString(".Ss Modifiers\n")
-	writeText(b, "The accepted modifiers are bold, dim, italic, underlined, slow_blink, rapid_blink, reversed, hidden and crossed_out.")
+	writeText(b, "Modifiers are case-insensitive and ignore spaces, underscores and hyphens. The accepted values are bold, dim, italic, underlined, slow_blink, rapid_blink, reversed, hidden and crossed_out (also strikethrough or strike). A string separates tokens with a pipe; an array supplies one token per element.")
 	b.WriteString(".Ss Enumerations\n")
-	writeText(b, "[Ui] mode is Auto, Plain or Tui; [Ui] unit is Binary or Decimal; [Color] mode is Auto, Always or Never. Values are case-sensitive.")
+	writeText(b, "Enumeration values are case-sensitive.")
+	for _, table := range []string{"Ui", "Color"} {
+		for _, key := range []string{"mode", "unit"} {
+			values := manifestValues(manifest, table, key)
+			if len(values) == 0 {
+				continue
+			}
+			writeText(b, "["+table+"] "+key+" is "+strings.Join(values, ", ")+".")
+		}
+	}
 
 	b.WriteString(".Sh LEGACY KEYS\n")
 	writeText(b, "Rev 6 accepts ten rev-5 top-level flat keys before the first table header. They are mapped where possible and never rewritten. Alias keys warn once per key; the three retired keys warn and are ignored. All legacy keys are removed in rev 7, where they become unknown keys and exit 2.")
-	writeConfigKeys(b, legacyKeys)
+	writeLegacyKeys(b, manifest.Legacy)
 	writeText(b, "Within a file the canonical key wins. Across layers the later layer wins regardless of spelling. Rev 6 also accepts rev-5 value forms for the ten legacy keys only: quoted booleans and bare strings at top level. Everything else remains strict TOML, and duplicate keys are an error.")
 	b.WriteString(".Pp\n")
 	writeText(b, "When any legacy key is seen, one aggregate warning is printed once per run. --debug adds one line per legacy key and a summary. Warnings never change the exit code.")

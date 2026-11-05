@@ -4,9 +4,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/soubarnak/xbpretty/internal/config"
 	"github.com/soubarnak/xbpretty/internal/spec"
 )
 
@@ -23,6 +25,16 @@ func TestGeneratedManpagesAreCurrent(t *testing.T) {
 		if string(got) != file.Content {
 			t.Errorf("manpages are stale: run make manpages (%s)", file.Name)
 		}
+	}
+}
+
+func TestAliasMan8LinkSetIsExact(t *testing.T) {
+	got := append([]string(nil), AliasLinks()...)
+	want := []string{"xbp.8", "xbp-install.8", "xbp-remove.8", "xbp-upgrade.8", "xbp-autoremove.8", "xbp-update.8"}
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("AliasLinks() = %v, want exactly %v", got, want)
 	}
 }
 
@@ -50,8 +62,8 @@ func TestAliasMan8LinksResolve(t *testing.T) {
 func TestMan8CoversTheCommandSurface(t *testing.T) {
 	text := Man8()
 	for _, command := range spec.Commands {
-		if !strings.Contains(text, command.Name) {
-			t.Errorf("xbpretty.8 is missing command %q", command.Name)
+		if !strings.Contains(text, ".It Cm "+command.Name) {
+			t.Errorf("xbpretty.8 is missing the command item for %q", command.Name)
 		}
 		for _, alias := range command.Aliases {
 			if !strings.Contains(text, alias) {
@@ -74,8 +86,15 @@ func TestMan8CoversTheCommandSurface(t *testing.T) {
 	for _, want := range []string{
 		"auto", "always", "never", "bash", "zsh", "fish",
 		"standard output", "standard error", "standard input",
+		"keystrokes", "inherited by xbps children",
+		"after list or search", "--virtual",
 		"EXIT STATUS", "FILES", "SECURITY", "SEE ALSO",
 		"UID 0", "trust", "history", "--print-uris", "--machine",
+		".It Cm --auto Op Ar N",
+		".It Cm --progress-bar Op Ar BOOL",
+		"/var/lib/xbpretty/fetch.json",
+		".xbpretty-backup",
+		"/usr/share/xbps.d",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("xbpretty.8 is missing %q", want)
@@ -83,24 +102,84 @@ func TestMan8CoversTheCommandSurface(t *testing.T) {
 	}
 }
 
+func section(text, heading string) string {
+	marker := ".Ss " + heading + "\n"
+	start := strings.Index(text, marker)
+	if start < 0 {
+		return ""
+	}
+	rest := text[start+len(marker):]
+	for _, end := range []string{"\n.Ss ", "\n.Sh "} {
+		if i := strings.Index(rest, end); i >= 0 {
+			rest = rest[:i]
+		}
+	}
+	return rest
+}
+
 func TestConf5CoversConfig(t *testing.T) {
 	text := Conf5()
+	manifest := config.Manifest()
+	for _, table := range manifest.Tables {
+		body := section(text, table.Name)
+		if body == "" {
+			t.Errorf("xbpretty.conf.5 is missing the %s section", table.Name)
+			continue
+		}
+		if table.Name == "Color.theme" {
+			for _, role := range manifest.ThemeRoles {
+				if !strings.Contains(body, ".It Cm "+role.Name) {
+					t.Errorf("[Color.theme] section is missing role %q", role.Name)
+				}
+			}
+			continue
+		}
+		for _, key := range table.Keys {
+			if !strings.Contains(body, ".It Cm "+key.Name) {
+				t.Errorf("[%s] section is missing key %q", table.Name, key.Name)
+			}
+		}
+		for _, alias := range table.Aliases {
+			if !strings.Contains(text, "["+alias+"]") {
+				t.Errorf("xbpretty.conf.5 does not document the [%s] alias", alias)
+			}
+		}
+	}
+	legacy := text[strings.Index(text, ".Sh LEGACY KEYS"):]
+	for _, key := range manifest.Legacy {
+		if !strings.Contains(legacy, ".It Cm "+key.Key) {
+			t.Errorf("LEGACY KEYS is missing %q", key.Key)
+		}
+		if key.Target != "" && !strings.Contains(legacy, key.Target) {
+			t.Errorf("LEGACY KEYS for %q is missing target %q", key.Key, key.Target)
+		}
+	}
 	for _, want := range []string{
-		"[Nala]", "[Ui]", "[Color]", "[Color.theme]", "[Xbps]",
-		"auto_remove", "auto_update", "update_show_packages", "full_upgrade",
-		"simple", "assume_yes", "mode", "unit", "Auto", "Plain", "Tui",
-		"Binary", "Decimal", "Always", "Never", "Primary", "Secondary",
-		"Highlight", "Regular", "ProgressFilled", "ProgressUnfilled",
-		"Notice", "Warning", "Error", "install_path", "remove_path",
-		"query_path", "rindex_path", "uhelper_path", "pkgdb_path",
-		"transaction_log", "system layer", "user layer", "--config",
-		"trust", "UID 0", "group", "world", "assume_yes",
-		"xbps_install_path", "xbps_query_path", "color", "sync", "log",
-		"verbose", "box_style", "progress_bar", "rev 7",
+		"system layer", "user layer", "--config", "trust", "UID 0",
+		"group", "world", "rev 7",
+		"#rrggbb", "{ Indexed = N }", "{ Rgb = [r, g, b] }",
+		"BrightGreen", "BrightRed",
 		"EXIT STATUS", "SECURITY", "SEE ALSO",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("xbpretty.conf.5 is missing %q", want)
+		}
+	}
+	if strings.Contains(text, "rgb(") {
+		t.Error("xbpretty.conf.5 documents rgb(...), which the parser rejects")
+	}
+}
+
+func TestRoffTextLinesAreEscaped(t *testing.T) {
+	tests := map[string]string{
+		".nm injected": `\&.nm injected`,
+		"'br injected": `\&'br injected`,
+		`a\b`:          `a\eb`,
+		"plain text":   "plain text",
+	}
+	for in, want := range tests {
+		if got := escapeRoffLine(in); got != want {
+			t.Errorf("escapeRoffLine(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

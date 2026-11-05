@@ -117,7 +117,9 @@ print this help.
 Accepted on every command.
 .It Cm -V , --version
 print version information.
-Accepted on every command.
+--version is accepted on every command.
+At the root the short -V means --version; after list or search, -V means
+--virtual and the long form --version is still available.
 .It Cm -v , --verbose
 print every xbps command before running it.
 Accepted on every command.
@@ -125,7 +127,7 @@ Accepted on every command.
 dump the resolved configuration.
 Accepted on every command.
 .It Cm --config Ar FILE
-read FILE instead of the user config file.
+read FILE instead of the system and user config files.
 Accepted on every command.
 .It Cm --color Ar WHEN
 colour output: auto, always or never.
@@ -150,6 +152,7 @@ Hidden from --help.
 .It Cm -V , --virtual
 list virtual packages.
 Accepted by: list, search.
+The short -V has this meaning only after list or search.
 .It Cm -c , --country Ar COUNTRY
 restrict mirrors to a country or region (repeatable).
 Accepted by: fetch.
@@ -225,7 +228,7 @@ Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
 full-upgrade, safe-upgrade.
 Values: rounded, classic, ascii.
 Hidden from --help.
-.It Cm --progress-bar Ar BOOL
+.It Cm --progress-bar Op Ar BOOL
 force the progress widget on or off.
 Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
 full-upgrade, safe-upgrade.
@@ -243,67 +246,66 @@ Hidden from --help.
 .It Cm --allow-unauthenticated
 Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
 full-upgrade, safe-upgrade.
-Not available: \-\-allow-unauthenticated is not available on xbps: xbps
-verifies repository signatures and has no unauthenticated mode.
+Not available: --allow-unauthenticated is not available on xbps: xbps verifies
+repository signatures and has no unauthenticated mode.
 .It Cm -o , --option Ar OPTION
 Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
 full-upgrade, safe-upgrade.
-Not available: -o/\-\-option is not available on xbps: apt configuration
-options have no xbps equivalent; repository settings live in
-/etc/xbps.d/*.conf.
+Not available: -o/--option is not available on xbps: apt configuration options
+have no xbps equivalent; repository settings live in /etc/xbps.d/*.conf.
 .It Cm -f , --fix-broken
 Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
 full-upgrade, safe-upgrade.
-Not available: -f/\-\-fix-broken is not available on xbps: xbps has no
+Not available: -f/--fix-broken is not available on xbps: xbps has no
 broken-dependency repair mode.
-Check the pkgdb with xbps-pkgdb \-\-checks dependencies, or force a reinstall
-with xbp install \-\- -f PKG.
+Check the pkgdb with xbps-pkgdb --checks dependencies, or force a reinstall
+with xbp install followed by the option terminator -f PKG.
 .It Cm -t , --target-release Ar RELEASE
 Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
 full-upgrade, safe-upgrade.
-Not available: -t/\-\-target-release is not available on xbps: xbps has no
+Not available: -t/--target-release is not available on xbps: xbps has no
 default-release targeting; pin a repository with a repository= line in
 /etc/xbps.d.
 .It Cm --install-recommends
 Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
 full-upgrade, safe-upgrade.
-Not available: \-\-install-recommends is not available on xbps: xbps has no
+Not available: --install-recommends is not available on xbps: xbps has no
 recommends metadata; every declared run_depends dependency is installed.
 .It Cm --install-suggests
 Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
 full-upgrade, safe-upgrade.
-Not available: \-\-install-suggests is not available on xbps: xbps has no
+Not available: --install-suggests is not available on xbps: xbps has no
 suggests metadata.
 .It Cm --remove-essential
 Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
 full-upgrade, safe-upgrade.
-Not available: \-\-remove-essential is not available on xbps: xbps has no
+Not available: --remove-essential is not available on xbps: xbps has no
 essential-package protection to override.
 .It Cm --remove-config
 Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
 full-upgrade, safe-upgrade.
-Not available: \-\-remove-config is not available on xbps: xbps has no
+Not available: --remove-config is not available on xbps: xbps has no
 config-files state; xbps-remove -f removes files, it does not create a
 config-only removal.
 .It Cm --exclude Ar PATTERN
 Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
 full-upgrade, safe-upgrade.
-Not available: \-\-exclude is not available on xbps: xbps has no upgrade
+Not available: --exclude is not available on xbps: xbps has no upgrade
 exclusion; hold the package with xbps-pkgdb -m hold PKG (release with -m
 unhold).
 .It Cm --sources
 Accepted by: fetch.
-Not available: \-\-sources is not available: Void repositories contain no
-source packages
+Not available: --sources is not available: Void repositories contain no source
+packages
 .It Cm --debian
 Accepted by: fetch.
-Not available: \-\-debian is not available: xbpretty targets Void Linux only
+Not available: --debian is not available: xbpretty targets Void Linux only
 .It Cm --ubuntu
 Accepted by: fetch.
-Not available: \-\-ubuntu is not available: xbpretty targets Void Linux only
+Not available: --ubuntu is not available: xbpretty targets Void Linux only
 .It Cm --devuan
 Accepted by: fetch.
-Not available: \-\-devuan is not available: xbpretty targets Void Linux only
+Not available: --devuan is not available: xbpretty targets Void Linux only
 .It Cm --no-fix-broken
 Accepted by: install, remove, purge, autoremove, autopurge, upgrade,
 full-upgrade, safe-upgrade.
@@ -353,7 +355,7 @@ Accepted by: clean.
 .It Cm --all
 with history clear: delete every entry.
 Accepted by: history.
-.It Cm --auto Ar N
+.It Cm --auto Op Ar N
 validate the N fastest mirrors (default 3).
 Accepted by: fetch.
 .It Cm --https-only
@@ -369,12 +371,15 @@ Accepted by: fetch.
 Durable output only: the summary, Nothing to do., update counts, discovery
 rows and NDJSON, download results, the fetch table, --help, --version and
 completion scripts.
+In Tui mode the transaction summary screen is the screen and standard output
+is empty for that transaction.
 .It standard error
 Everything live, interactive or diagnostic: the prompt, progress widget,
 verbose lines, forwarded child output, plan output, notices, warnings, hints
 and errors.
 .It standard input
-Answers the confirmation prompt.
+Answers the confirmation prompt, carries full-screen keystrokes when a TUI
+surface is active, and is inherited by xbps children.
 A non-terminal stdin is never read as a prompt; use -y to proceed.
 .El
 .Sh ENVIRONMENT
@@ -418,6 +423,14 @@ The package cache used by predownload, download-only and undo/redo restores.
 .It Pa /etc/xbps.d
 xbps repository configuration written by fetch and clean --fetch, not xbpretty
 configuration.
+.It Pa /etc/xbps.d/*.xbpretty-backup
+Pre-fetch copies of managed repository files, restored by clean --fetch.
+.It Pa /usr/share/xbps.d
+Read-only xbps repository configuration, read after /etc/xbps.d.
+.It Pa /var/lib/xbpretty/fetch.json
+The fetch manifest recording every file fetch wrote, its backup and its
+SHA-256.
+clean --fetch reads it.
 .It Pa /usr/share/bash-completion/completions/xbpretty
 Installed bash completion.
 .It Pa /usr/share/zsh/site-functions/_xbpretty
@@ -428,6 +441,13 @@ Installed fish completion.
 Canonical configuration example; it parses to the built-in defaults.
 .It Pa /usr/share/doc/xbpretty/migration-rev6.md
 Rev 5 to rev 6 migration guide.
+.It Pa /usr/share/man/man8/xbpretty.8
+This manual page, with the xbp.8, xbp-install.8, xbp-remove.8, xbp-upgrade.8,
+xbp-autoremove.8 and xbp-update.8 alias links.
+.It Pa /usr/share/man/man5/xbpretty.conf.5
+The configuration manual page.
+.It Pa /usr/share/licenses/xbpretty/LICENSE
+The MIT licence.
 .El
 .Sh EXIT STATUS
 .Bl -tag -width Ds
