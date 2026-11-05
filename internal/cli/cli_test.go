@@ -104,6 +104,13 @@ func (e *env) setAnswers(answers string) {
 // set writes a stub environment variable for the rest of the test.
 func (e *env) set(key, value string) { e.t.Setenv(key, value) }
 
+// disableAutoRemove pins [Nala] auto_remove = false for tests that predate
+// FR-016's implicit orphan transaction and assert only the primary argv.
+func (e *env) disableAutoRemove() {
+	e.t.Helper()
+	e.writeConfig("", "", "[Nala]", "auto_remove = false")
+}
+
 // run invokes Main and returns its exit code, stdout and stderr.
 func (e *env) run(argv ...string) (int, string, string) {
 	e.t.Helper()
@@ -673,6 +680,7 @@ func TestAC022Argv0Dispatch(t *testing.T) {
 
 func TestAC002InstallNeverSyncsInsideTheTransaction(t *testing.T) {
 	e := newEnv(t)
+	e.disableAutoRemove()
 	e.root = true
 	e.tty = true
 	e.setAnswers("\n")
@@ -1114,7 +1122,8 @@ func (e *env) transactionCalls() []string {
 	var out []string
 	for _, c := range e.commands() {
 		switch {
-		case c == "-H", strings.HasPrefix(c, "-p "), strings.HasPrefix(c, "-X "):
+		case c == "-H", c == "-l", c == "-m", c == "--list-repolock-pkgs",
+			strings.HasPrefix(c, "-p "), strings.HasPrefix(c, "-X "):
 			continue
 		}
 		out = append(out, c)
@@ -1161,6 +1170,7 @@ func TestUpgradeHonoursTheSyncRules(t *testing.T) {
 	})
 	t.Run("the real run has no -S in its argv", func(t *testing.T) {
 		e := newEnv(t)
+		e.disableAutoRemove()
 		e.root = true
 		e.tty = true
 		e.setAnswers("\n")

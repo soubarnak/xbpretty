@@ -191,6 +191,11 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	// FR-008: not-installed remove targets are reported and filtered before
 	// the dry run. Purge and the orphan commands use the same binary but do
 	// not filter their named targets.
+	//
+	// The all-filtered case keeps FR-008's early Nothing to do. and does not
+	// check orphans: the command has no target rather than an empty plan, and
+	// FR-008 places its Nothing to do. before the dry run (and so before
+	// FR-016's implicit-autoremove check).
 	args := opts.args
 	if cmd == "remove" {
 		var code int
@@ -226,20 +231,22 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	}
 
 	if len(rows) == 0 {
-		// FR-014/FR-016: the implicit-autoremove check still runs before
-		// Nothing to do. #64 owns that second transaction; the seam reports
-		// that it has nothing to add for now.
-		if extra, ok := st.implicitAutoremovePlan(cmd, opts); ok && len(extra) > 0 {
-			rows = extra
+		// FR-014/FR-016: the orphan check still runs before Nothing to do,
+		// and its plan drives the normal summary, prompt and execution path.
+		orphans, orphanCode := st.planImplicitAutoremove(cmd, opts)
+		if len(orphans) > 0 {
+			return st.runOrphanOnly(cmd, opts, orphans)
 		}
-	}
-	if len(rows) == 0 {
-		// FR-017: nothing to do is not an error.
+		if orphanCode >= 0 {
+			return orphanCode
+		}
+		// FR-017: nothing to do is not an error, and it prints only when
+		// both the primary and the orphan plan are empty.
 		fmt.Fprintln(st.stdout, "Nothing to do.")
 		return exitNothingToDo
 	}
 
-	if code := st.renderSummary(rows); code >= 0 {
+	if code := st.renderSummary(summaryCommand(cmd, opts), rows); code >= 0 {
 		return code
 	}
 
@@ -273,9 +280,9 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		return exitRuntime
 	}
 	if !autoAccept {
-		ok, refused := st.prompt()
-		if !ok {
-			return refused
+		result := st.prompt()
+		if !result.proceed {
+			return result.code
 		}
 	}
 
@@ -286,9 +293,19 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		return st.downloadOnlyStop(cmd, opts, rows)
 	}
 
-	code = st.execute(cmd, st.binaryFor(cmd), realArgv(cmd, opts, args), rows...)
+	// FR-030/FR-031: the before snapshot is taken after the prompt and
+	// before the real child. executePhases commits the entry once the whole
+	// command (every phase for a replay) exited 0, before the line log, the
+	// reboot hint and any implicit autoremove.
+	st.beginHistory(cmd, opts, rows)
+	code = st.executePhases(cmd, realArgv(cmd, opts, args), rows,
+		xbpsPhase{bin: st.binaryFor(cmd), args: realArgv(cmd, opts, args), rows: rows})
 	if code == 0 {
-		st.implicitAutoremoveAfterSuccess(cmd, opts, rows)
+		// FR-016: a successful real transaction runs the implicit orphan
+		// transaction. Its failure replaces the primary result.
+		if orphanCode := st.runImplicitAutoremoveAfterSuccess(cmd, opts); orphanCode >= 0 {
+			return orphanCode
+		}
 	}
 	return code
 }
@@ -303,20 +320,12 @@ func commandBinaries(cmd string) []string {
 	return append([]string(nil), c.Binaries...)
 }
 
-// renderSummary draws the read-only summary for a non-empty plan.
-func (st *state) renderSummary(rows []xbps.Row) int {
-	sum := st.planToSummary(rows)
-	if st.opts != nil {
-		sum.Command = st.opts.command
-		if purgeRequested(st.opts.command, st.opts) {
-			switch st.opts.command {
-			case "remove":
-				sum.Command = "purge"
-			case "autoremove":
-				sum.Command = "autopurge"
-			}
-		}
-	}
+// renderSummary draws the read-only summary for a non-empty plan. The
+// command, not the rows, supplies FR-062's operation label: an implicit
+// orphan transaction must render as AutoRemove/AutoPurge even though it
+// follows an install or purge.
+func (st *state) renderSummary(cmd string, rows []xbps.Row) int {
+	sum := st.planToSummary(cmd, rows)
 	stdoutTTY := isTTY(st.stdout)
 	// FR-062: the rule width is the stdout terminal width, else a positive
 	// COLUMNS, else 80, and it is used even when piped. Table expansion is a
@@ -370,8 +379,13 @@ func allHeld(rows []xbps.Row) bool {
 // planTransaction runs the dry run and returns the parsed rows, or a
 // non-negative exit code when the run should stop.
 func (st *state) planTransaction(cmd string, opts *options, args []string) ([]xbps.Row, int) {
-	bin := st.binaryFor(cmd)
-	res, err := st.r.run(bin, dryRunArgv(cmd, opts, args)...)
+	return st.planWith(st.binaryFor(cmd), dryRunArgv(cmd, opts, args)...)
+}
+
+// planWith runs one dry-run argv and parses its plan, forwarding xbps's
+// stderr and any matching hint before the summary (§3.2.3, FR-073).
+func (st *state) planWith(bin string, argv ...string) ([]xbps.Row, int) {
+	res, err := st.r.run(bin, argv...)
 	if err != nil {
 		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
 		return nil, exitRuntime
@@ -558,21 +572,176 @@ func (st *state) downloadOnlyStop(cmd string, opts *options, rows []xbps.Row) in
 	return exitRuntime
 }
 
-// implicitAutoremovePlan is the #64 seam. #64 owns planning the second orphan
-// transaction; it returns ok=false until then, so Nothing to do still prints
-// only when both plans are empty.
-func (st *state) implicitAutoremovePlan(cmd string, opts *options) ([]xbps.Row, bool) {
-	// TODO(#64): plan `xbps-remove -n -o` (with -f when the primary purged)
-	// when auto_remove applies, and hand the rows back to the normal summary,
-	// prompt and execution path.
-	return nil, false
+// implicitAutoremoveEligible reports whether the implicit orphan transaction
+// may run for cmd (FR-016). Only a successful real install, remove, purge or
+// upgrade-family run applies, never replay, update, clean, download or fetch.
+// [Nala] auto_remove must be on, and with -y/assume_yes the run is skipped
+// unless --auto-remove was explicit.
+func (st *state) implicitAutoremoveEligible(cmd string, opts *options) bool {
+	switch cmd {
+	case "install", "remove", "purge", "upgrade":
+	default:
+		return false
+	}
+	if !st.autoRemove {
+		return false
+	}
+	if st.assumeYes && !opts.autoRemovePos {
+		return false
+	}
+	return true
 }
 
-// implicitAutoremoveAfterSuccess is the other #64 seam: the second confirmed
-// transaction after a successful primary one.
-func (st *state) implicitAutoremoveAfterSuccess(cmd string, opts *options, rows []xbps.Row) {
-	// TODO(#64): plan, confirm and run the orphan transaction after success;
-	// skip under assume_yes unless --auto-remove was explicit.
+// summaryCommand is FR-062's operation label for the command that produced a
+// plan. A remove-family command carrying -f renders as its purge form, so the
+// label follows the argv rather than the command spelling alone.
+func summaryCommand(cmd string, opts *options) string {
+	if !purgeRequested(cmd, opts) {
+		return cmd
+	}
+	switch cmd {
+	case "remove":
+		return "purge"
+	case "autoremove":
+		return "autopurge"
+	}
+	return cmd
+}
+
+// orphanActionFlags is the orphan transaction's action set: -o, plus -f when
+// the primary command purged (FR-009, §3.2's argv table).
+func orphanActionFlags(cmd string, opts *options) []string {
+	flags := []string{"-o"}
+	if purgeRequested(cmd, opts) {
+		flags = append(flags, "-f")
+	}
+	return flags
+}
+
+// orphanDryArgv is `xbps-remove -n -o [-f]`.
+func orphanDryArgv(cmd string, opts *options) []string {
+	return append([]string{"-n"}, orphanActionFlags(cmd, opts)...)
+}
+
+// orphanRealArgv is `xbps-remove -y -o [-f]`.
+func orphanRealArgv(cmd string, opts *options) []string {
+	return append([]string{"-y"}, orphanActionFlags(cmd, opts)...)
+}
+
+// orphanCommand names the orphan transaction for its log and history entry:
+// autopurge when it carries -f, autoremove otherwise.
+func orphanCommand(cmd string, opts *options) string {
+	if purgeRequested(cmd, opts) {
+		return "autopurge"
+	}
+	return "autoremove"
+}
+
+// planImplicitAutoremove plans the second `xbps-remove -n -o [-f]`
+// transaction when FR-016 applies. It returns the parsed rows and -1 to
+// continue, or a non-negative exit code when the check itself failed.
+func (st *state) planImplicitAutoremove(cmd string, opts *options) ([]xbps.Row, int) {
+	if !st.implicitAutoremoveEligible(cmd, opts) {
+		return nil, -1
+	}
+	if err := st.r.cfg.ResolveFor("remove"); err != nil {
+		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		return nil, exitRuntime
+	}
+	return st.planWith(st.r.cfg.Xbps.RemovePath, orphanDryArgv(cmd, opts)...)
+}
+
+// runOrphanOnly runs the orphan transaction when the primary plan was empty:
+// the orphan plan is the whole run, so its refusal is the normal exit-1
+// refusal and Nothing to do was never printed.
+func (st *state) runOrphanOnly(cmd string, opts *options, rows []xbps.Row) int {
+	if code := st.renderSummary(orphanCommand(cmd, opts), rows); code >= 0 {
+		return code
+	}
+	if allHeld(rows) {
+		return exitOK
+	}
+	if opts.dryRun {
+		return exitOK
+	}
+	if opts.assumeNo {
+		return st.refuse()
+	}
+	autoAccept := st.assumeYes
+	if euidFn() != 0 {
+		st.privHint(cmd, opts)
+		return exitRuntime
+	}
+	if !autoAccept && !isTTY(st.stdin) {
+		fmt.Fprintln(st.stderr, "xbpretty: stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed")
+		return exitRuntime
+	}
+	if !autoAccept {
+		result := st.prompt()
+		if !result.proceed {
+			return result.code
+		}
+	}
+	if opts.downloadOnly {
+		// FR-016: --download-only never runs the orphan transaction.
+		return st.downloadOnlyStop(cmd, opts, rows)
+	}
+	return st.executeOrphan(cmd, opts, rows)
+}
+
+// runImplicitAutoremoveAfterSuccess is FR-016's second real transaction. It
+// returns -1 when it did not run, so the caller keeps the primary result; a
+// declined prompt also returns -1 (the primary result stands), while a failed
+// orphan transaction returns its own code.
+func (st *state) runImplicitAutoremoveAfterSuccess(cmd string, opts *options) int {
+	rows, code := st.planImplicitAutoremove(cmd, opts)
+	if code >= 0 {
+		return code
+	}
+	if len(rows) == 0 {
+		return -1
+	}
+	if code := st.renderSummary(orphanCommand(cmd, opts), rows); code >= 0 {
+		return code
+	}
+	// A hold-only orphan plan changes nothing: the summary is read-only.
+	if allHeld(rows) {
+		return -1
+	}
+	if !st.assumeYes {
+		result := st.prompt()
+		if !result.proceed {
+			if result.invalid {
+				// An invalid answer is FR-015's error, not a decline.
+				return result.code
+			}
+			// Declining the orphan prompt leaves the primary result and
+			// exits 0; the primary transaction already committed.
+			return -1
+		}
+	}
+	return st.executeOrphan(cmd, opts, rows)
+}
+
+// executeOrphan runs the confirmed orphan transaction. Its history entry is
+// begun before the child starts with implicit true; executePhases publishes
+// the pending entry from finishHistory once the orphan committed, before its
+// line log and reboot hint.
+func (st *state) executeOrphan(cmd string, opts *options, rows []xbps.Row) int {
+	orphan := orphanCommand(cmd, opts)
+	argv := orphanRealArgv(cmd, opts)
+	st.beginImplicitAutoremoveHistory(orphan, opts, rows)
+	return st.executePhases(orphan, argv, rows,
+		xbpsPhase{bin: st.r.cfg.Xbps.RemovePath, args: argv, rows: rows})
+}
+
+// beginImplicitAutoremoveHistory begins FR-030's entry for the implicit
+// orphan transaction. It is called BEFORE the child runs, so #69's
+// finishHistory inside executePhases can publish it after a successful
+// commit.
+func (st *state) beginImplicitAutoremoveHistory(cmd string, opts *options, rows []xbps.Row) {
+	st.beginHistoryEntry(cmd, opts, rows, st.commandLine,
+		requestedTargets(cmd, opts), true, nil, "")
 }
 
 // lookupOld fills in the pre-upgrade version and installed size the summary
@@ -734,24 +903,34 @@ func isTerminal(f *os.File) bool {
 	return errno == 0
 }
 
-// prompt asks FR-015's question once. It returns ok=false and the exit code
-// when the user refuses, answers something else, or sends EOF; an invalid
-// answer is never re-prompted.
-func (st *state) prompt() (bool, int) {
-	scanner := bufio.NewScanner(st.stdin)
+// promptResult is one answer to FR-015's question. proceed is false when the
+// run stops; invalid separates a malformed answer (an error) from a refusal
+// (a decision), which the implicit orphan prompt treats differently.
+type promptResult struct {
+	proceed bool
+	code    int
+	invalid bool
+}
+
+// prompt asks FR-015's question once. An invalid answer is never re-prompted.
+func (st *state) prompt() promptResult {
+	if st.promptScanner == nil {
+		st.promptScanner = bufio.NewScanner(st.stdin)
+	}
+	scanner := st.promptScanner
 	fmt.Fprint(st.stderr, "Do you want to continue? [Y/n] ")
 	if !scanner.Scan() {
-		return false, st.refuse()
+		return promptResult{code: st.refuse()}
 	}
 	answer := strings.TrimSpace(scanner.Text())
 	switch strings.ToLower(answer) {
 	case "", "y", "yes":
-		return true, exitOK
+		return promptResult{proceed: true, code: exitOK}
 	case "n", "no":
-		return false, st.refuse()
+		return promptResult{code: st.refuse()}
 	default:
 		fmt.Fprintf(st.stderr, "xbpretty: '%s' is not a valid response\n", answer)
-		return false, exitRuntime
+		return promptResult{code: exitRuntime, invalid: true}
 	}
 }
 
@@ -789,8 +968,9 @@ func rebootHint(rows []xbps.Row) string {
 }
 
 // planToSummary converts parsed rows into a summary, looking up the old
-// versions and hold state the summary needs.
-func (st *state) planToSummary(rows []xbps.Row) *summary.Summary {
+// versions and hold state the summary needs, and carrying the command that
+// labels the Remove family section.
+func (st *state) planToSummary(cmd string, rows []xbps.Row) *summary.Summary {
 	held := st.heldPackages()
 	srows := make([]summary.Row, 0, len(rows))
 	var oldNames []string
@@ -813,7 +993,9 @@ func (st *state) planToSummary(rows []xbps.Row) *summary.Summary {
 		}
 	}
 	old := st.lookupOld(oldNames)
-	return summary.Build(srows, held, old)
+	sum := summary.Build(srows, held, old)
+	sum.Command = cmd
+	return sum
 }
 
 // isTTY reports whether v is attached to a terminal. A resilient writer wraps

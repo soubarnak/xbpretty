@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -78,6 +79,17 @@ type state struct {
 	simple      bool
 	full        bool
 	historyDir  string
+
+	// promptScanner is the one reader over stdin. A transaction can ask twice
+	// (primary then implicit orphan), so a single scanner keeps the answers
+	// the first read may have buffered.
+	promptScanner *bufio.Scanner
+
+	// commandLine is argv without the program name, as typed, for FR-030's
+	// history `command` field. pendingHistory carries one real transaction's
+	// recording context between the prompt and a zero exit.
+	commandLine    []string
+	pendingHistory *historyPending
 }
 
 // Main runs xbpretty with the process arguments and returns its exit code.
@@ -117,6 +129,13 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		return exitUsage
 	}
 	st := &state{stdout: newResilientWriter(out), stderr: err, stdin: in}
+	// FR-030: the entry's command is the invocation without the program name.
+	// A link invocation (xbp-install ...) prepends its canonical verb.
+	if knownCmd != "" {
+		st.commandLine = append([]string{knownCmd}, args...)
+	} else {
+		st.commandLine = append([]string{}, args...)
+	}
 
 	// moo is hidden and never touches config or xbps.
 	if opts.command == "moo" {
@@ -229,9 +248,14 @@ func (st *state) dispatch(opts *options) int {
 	case "download":
 		return st.runDownload(opts)
 	case "clean":
-		// TODO(#64): cache and repodata cleaning belongs to #64.
-		return st.runUnimplemented(opts.command, opts)
-	case "history", "undo", "redo":
+		return st.runClean(opts)
+	case "history":
+		if opts.subcommand == "clear" {
+			// TODO(#70): history clear <id|last> and --all belong to #70.
+			return st.runUnimplemented("history", opts)
+		}
+		return st.runHistory(opts)
+	case "undo", "redo":
 		return st.runUnimplemented(opts.command, opts)
 	}
 	fmt.Fprintf(st.stderr, "xbpretty: unknown command %q\n", opts.command)
