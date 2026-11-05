@@ -218,8 +218,20 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		return exitNothingToDo
 	}
 
-	if code := st.renderSummary(rows); code >= 0 {
-		return code
+	// FR-067: Tui mode may replace this transaction's stdout with the S1
+	// full-screen summary. A refusal or a signal ends the run here; an
+	// unavailable screen leaves the normal text path untouched.
+	confirmedByScreen := false
+	if outcome, code := st.maybeRunSummaryScreen(opts, rows); outcome != screenUnavailable {
+		if outcome == screenExited {
+			return code
+		}
+		confirmedByScreen = true
+	}
+	if !confirmedByScreen {
+		if code := st.renderSummary(rows); code >= 0 {
+			return code
+		}
 	}
 
 	// FR-017: a hold-only plan is read-only. Its summary prints, but there is
@@ -238,7 +250,7 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	if opts.assumeNo {
 		return st.refuse()
 	}
-	autoAccept := st.assumeYes
+	autoAccept := st.assumeYes || confirmedByScreen
 	// FR-073: the non-root check is unconditional and comes before the
 	// non-TTY check, so a non-root run always gets the summary and the
 	// elevation hint.
