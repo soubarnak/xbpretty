@@ -49,10 +49,19 @@ func (st *state) runFetchPicker(ranked []fetch.Result) (index int, ok bool, code
 	}
 	scr, err := openScreenFn(in, out, st.color, false)
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: full-screen interface unavailable (%v); showing the mirror shortlist\n", err)
+		fmt.Fprintf(st.stderr, "xbpretty: full-screen interface unavailable (%v); showing the text summary\n", err)
 		return 0, false, fetchPickerUnavailable
 	}
 	defer scr.Close()
+	// FR-074/AC-054: a panic restores the terminal before it is re-raised, and
+	// the one warning line names the failed surface.
+	defer func() {
+		if r := recover(); r != nil {
+			scr.Close()
+			fmt.Fprintf(st.stderr, "xbpretty: full-screen interface failed (%v)\n", r)
+			panic(r)
+		}
+	}()
 
 	model := &tui.FetchModel{Rows: fetchRows(ranked)}
 	draw := func(w, h int) error {
@@ -65,7 +74,7 @@ func (st *state) runFetchPicker(ranked []fetch.Result) (index int, ok bool, code
 	fail := func(err error) (int, bool, int) {
 		// Restore before warning so the line survives the alternate screen.
 		scr.Close()
-		fmt.Fprintf(st.stderr, "xbpretty: full-screen interface failed (%v); showing the mirror shortlist\n", err)
+		fmt.Fprintf(st.stderr, "xbpretty: full-screen interface failed (%v); showing the text summary\n", err)
 		return 0, false, fetchPickerUnavailable
 	}
 
@@ -74,6 +83,9 @@ func (st *state) runFetchPicker(ranked []fetch.Result) (index int, ok bool, code
 	// Mouse reporting stays off: FR-070 ignores mouse input entirely.
 	if err := draw(w, h); err != nil {
 		return fail(err)
+	}
+	if screenPanic() {
+		panic("injected full-screen panic")
 	}
 	for {
 		ev := <-scr.Events()

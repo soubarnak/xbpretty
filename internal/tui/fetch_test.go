@@ -191,6 +191,121 @@ func TestFetchColumnsC1(t *testing.T) {
 	}
 }
 
+// TestFetchLongLocationKeepsBorderAndScore is C1's untrusted-data guard: a
+// long Location is dropped rather than pushing Latency/Score over the border.
+func TestFetchLongLocationKeepsBorderAndScore(t *testing.T) {
+	rows := []FetchRow{{
+		URL:      "https://repo.voidlinux.org/current",
+		Location: strings.Repeat("Very Long Province Name, ", 20),
+		Region:   "EU",
+		Tier:     1,
+		Latency:  "1234567890123456789 ms",
+		Speed:    "12345678901234567890",
+		Score:    "1234567890",
+	}}
+	cols, _ := fetchColumnLayout(120, rows)
+	var keys []string
+	for _, c := range cols {
+		keys = append(keys, c.key)
+	}
+	if got := strings.Join(keys, " "); got != "url lat score" {
+		t.Errorf("long Location columns = %q, want the Location dropped and Latency/Score kept", got)
+	}
+	buf := RenderFetch(&FetchModel{Rows: rows}, 120, 30, DefaultTheme())
+	assertFetchBorders(t, buf.Text(), 120)
+	grid := buf.Text()
+	if strings.Contains(grid, "Location:") {
+		t.Errorf("long Location was not dropped:\n%s", grid)
+	}
+	if !strings.Contains(grid, "Score:") || !strings.Contains(grid, "1234567890") {
+		t.Errorf("long Location pushed Score off the frame:\n%s", grid)
+	}
+}
+
+// TestFetchLongNumericCellsKeepBorder renders the 60x18 pathological columns:
+// the border survives and the Score header stays visible even when the fixed
+// cells overflow the interior.
+func TestFetchLongNumericCellsKeepBorder(t *testing.T) {
+	rows := goldenMirrors()
+	rows[0] = FetchRow{
+		URL: "https://repo.voidlinux.org/current", Region: "EU", Tier: 1,
+		Latency: "1234567890123456789 ms", Speed: "12345678901234567890", Score: "1234567890",
+	}
+	buf := RenderFetch(&FetchModel{Rows: rows}, 60, 18, DefaultTheme())
+	assertFetchBorders(t, buf.Text(), 60)
+	grid := buf.Text()
+	for _, col := range []string{"Mirrors:", "Latency:", "Score:"} {
+		if !strings.Contains(grid, col) {
+			t.Errorf("overflowed 60x18 frame lost %q:\n%s", col, grid)
+		}
+	}
+	if strings.Contains(grid, "Location:") || strings.Contains(grid, "Region:") {
+		t.Errorf("overflowed 60x18 frame kept a dropped column:\n%s", grid)
+	}
+}
+
+// TestFetchInfoUsesThemeRegularBase proves the info band keeps the theme's
+// Regular base (including a custom background) and only adds italic.
+func TestFetchInfoUsesThemeRegularBase(t *testing.T) {
+	theme := DefaultTheme()
+	theme.Regular = term.Style{FG: term.ANSI(2), BG: term.ANSI(0), Mods: term.Bold}
+	buf := RenderFetch(&FetchModel{Rows: goldenMirrors()}, 80, 24, theme)
+	y := -1
+	for i, line := range strings.Split(buf.Text(), "\n") {
+		if strings.Contains(line, "Score is how many milliseconds") {
+			y = i
+			break
+		}
+	}
+	if y < 0 {
+		t.Fatalf("info band missing:\n%s", buf.Text())
+	}
+	x := -1
+	for col := 0; col < buf.W; col++ {
+		if buf.Get(col, y).R == 'S' {
+			x = col
+			break
+		}
+	}
+	if x < 0 {
+		t.Fatalf("info text missing at row %d", y)
+	}
+	want := theme.Regular
+	want.Mods |= term.Italic
+	if got := buf.Get(x, y).S; got != want {
+		t.Errorf("info style = %+v, want theme Regular + italic %+v", got, want)
+	}
+}
+
+// assertFetchBorders proves every row keeps its left border and the rounded
+// right border, so no untrusted cell width can paint over the frame.
+func assertFetchBorders(t *testing.T, grid string, w int) {
+	t.Helper()
+	lines := strings.Split(grid, "\n")
+	for i, line := range lines {
+		runes := []rune(line)
+		if len(runes) == 0 {
+			t.Errorf("row %d is empty", i)
+			continue
+		}
+		if i == 0 {
+			if runes[0] != '╭' || runes[len(runes)-1] != '╮' {
+				t.Errorf("top border overwritten: %q", line)
+			}
+			continue
+		}
+		if i == len(lines)-1 {
+			if runes[0] != '╰' || runes[len(runes)-1] != '╯' {
+				t.Errorf("bottom border overwritten: %q", line)
+			}
+			continue
+		}
+		if runes[0] != '│' || runes[len(runes)-1] != '│' {
+			t.Errorf("row %d border overwritten (%d cells, want %d): %q", i, len(runes), w, line)
+		}
+	}
+}
+
 // TestFetchNoColorKeepsGlyphs is AC-055's fetch slice: --color never removes
 // SGR but keeps every frame glyph.
 func TestFetchNoColorKeepsGlyphs(t *testing.T) {

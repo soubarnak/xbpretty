@@ -19,6 +19,7 @@ import (
 //	XBPRETTY_TEST_TUI_DUMP=<dir>  write each frame as <seq>.txt
 //	XBPRETTY_TEST_TUI_FAIL=init   fail tui.Open
 //	XBPRETTY_TEST_TUI_FAIL=render fail the first Screen.Draw
+//	XBPRETTY_TEST_TUI_FAIL=panic  panic after the first draw
 func init() {
 	if dir := os.Getenv("XBPRETTY_TEST_TUI_DUMP"); dir != "" {
 		var mu sync.Mutex
@@ -55,5 +56,7 @@ func init() {
 			}
 			return scr.Draw(buf)
 		}
+	case "panic":
+		screenPanic = func() bool { return true }
 	}
 }

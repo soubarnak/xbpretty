@@ -249,9 +249,10 @@ func (st *state) fetchPickerAllowed(opts *options) bool {
 }
 
 // chooseMirror implements FR-045's shortlist rule. --auto N validates the N
-// fastest in rank order; without it the top 3 are tried. The picker returns a
-// single index whose choice is validated once: a failed validation is an
-// error, never a silent second choice.
+// fastest in rank order. Without --auto the picker returns one index (or, when
+// the screen is unavailable, the top-3 shortlist runs); the picked row is
+// validated once: a failed validation is an error, never a silent second
+// choice.
 func (st *state) chooseMirror(client *http.Client, ranked []fetch.Result, suffixes []string, arch, userAgent string, opts *options, allowPicker bool) (fetch.Result, int, bool) {
 	validate := func(candidate fetch.Result) error {
 		return fetch.Validate(context.Background(), fetch.ValidationOptions{

@@ -57,7 +57,11 @@ type fetchCol struct {
 // fetchColumnLayout decides which columns survive and how wide the URL column
 // is (FR-070's C1 rule). Location appears only from 120 terminal columns;
 // Region, Tier and Speed drop in that order while the URL cannot keep its
-// 24-cell floor. Latency and Score are never dropped.
+// 24-cell floor. Latency and Score are never dropped. The rev 6 golden reads
+// the Location threshold as the terminal width (120), not the 118-cell
+// interior; keeping that reading preserves the checked-in 120x30 frame.
+// Location is untrusted mirror data, so after the ordered drops it is the
+// last column removed if the remaining fixed cells still overflow.
 func fetchColumnLayout(w int, rows []FetchRow) (cols []fetchCol, urlW int) {
 	interior := w - 2
 	url := fetchCol{key: "url", name: "Mirrors:"}
@@ -85,11 +89,7 @@ func fetchColumnLayout(w int, rows []FetchRow) (cols []fetchCol, urlW int) {
 		middle = append([]fetchCol{loc}, middle...)
 	}
 	for len(middle) > 2 {
-		total := 2 + 24 + len(middle) // border + gaps
-		for _, c := range middle {
-			total += c.w
-		}
-		if total <= interior {
+		if layoutTotal(middle) <= interior {
 			break
 		}
 		drop := -1
@@ -104,6 +104,17 @@ func fetchColumnLayout(w int, rows []FetchRow) (cols []fetchCol, urlW int) {
 		}
 		middle = append(middle[:drop], middle[drop+1:]...)
 	}
+	// Location is the only column outside the C1 drop order. It is untrusted
+	// network data, so never let a long value push Latency or Score past the
+	// border: drop it after Region/Tier/Speed could not make room.
+	if layoutTotal(middle) > interior {
+		for i, c := range middle {
+			if c.key == "loc" {
+				middle = append(middle[:i], middle[i+1:]...)
+				break
+			}
+		}
+	}
 	fixed := 0
 	for _, c := range middle {
 		fixed += c.w
@@ -114,6 +125,16 @@ func fetchColumnLayout(w int, rows []FetchRow) (cols []fetchCol, urlW int) {
 	}
 	cols = append([]fetchCol{url}, middle...)
 	return cols, urlW
+}
+
+// layoutTotal is the width the URL floor plus the middle columns need,
+// including the border and one gap between every pair.
+func layoutTotal(middle []fetchCol) int {
+	total := 2 + 24 + len(middle)
+	for _, c := range middle {
+		total += c.w
+	}
+	return total
 }
 
 // fetchValues returns the cells for the visible columns.
@@ -167,7 +188,7 @@ func RenderFetch(m *FetchModel, w, h int, t Theme) *Buffer {
 		if i > 0 {
 			x++
 		}
-		drawAligned(buf, x, 1, cw, c.name, t.style(RoleRegular), boolAlign(c.right))
+		drawAligned(buf, x, 1, clampToInterior(cw, w, x), c.name, t.style(RoleRegular), boolAlign(c.right))
 		x += cw
 	}
 
@@ -201,7 +222,7 @@ func RenderFetch(m *FetchModel, w, h int, t Theme) *Buffer {
 				st = t.style(RoleSecondary)
 				st.Mods |= term.Reverse
 			}
-			drawAligned(buf, x, rowY, cw, values[ci], st, boolAlign(c.right))
+			drawAligned(buf, x, rowY, clampToInterior(cw, w, x), values[ci], st, boolAlign(c.right))
 			x += cw
 		}
 	}
@@ -209,7 +230,9 @@ func RenderFetch(m *FetchModel, w, h int, t Theme) *Buffer {
 	// Two-row info band, then the two-line help band (FR-070).
 	infoY := 1 + listH
 	info := "Score is how many milliseconds it takes to download the repository index."
-	buf.DrawTextCenter(1, infoY+1, w-2, info, term.Style{Mods: term.Italic})
+	infoStyle := t.style(RoleRegular)
+	infoStyle.Mods |= term.Italic
+	buf.DrawTextCenter(1, infoY+1, w-2, info, infoStyle)
 	helpY := infoY + 2
 	for i, line := range []string{
 		"Use ↓↑ to move, Home/End to go top/bottom,",
@@ -256,6 +279,19 @@ func drawFetchTitle(buf *Buffer, w int, t Theme) {
 		buf.Set(x, 0, ' ', st)
 	}
 	buf.DrawTextLimit(start, 0, title, st, w-2)
+}
+
+// clampToInterior limits a draw so it can never paint over the right border.
+// The clamp is a safety net for pathological untrusted widths; the layout
+// above normally makes every column fit.
+func clampToInterior(cw, w, x int) int {
+	if avail := (w - 1) - x; cw > avail {
+		cw = avail
+	}
+	if cw < 0 {
+		cw = 0
+	}
+	return cw
 }
 
 func boolAlign(right bool) int {

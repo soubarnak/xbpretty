@@ -4,11 +4,15 @@ package cli
 
 import (
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -143,14 +147,40 @@ func (h *fetchPickerHarness) with(overrides map[string]string) map[string]string
 	return out
 }
 
+// fiveDigitListener forces the fixture onto a five-digit port so the
+// fixed-width placeholder in the PTY golden always substitutes one-for-one.
+func fiveDigitListener(t *testing.T) net.Listener {
+	t.Helper()
+	for attempt := 0; attempt < 100; attempt++ {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listening for the picker fixture: %v", err)
+		}
+		if port := listener.Addr().(*net.TCPAddr).Port; port >= 10000 && port <= 99999 {
+			return listener
+		}
+		listener.Close()
+	}
+	t.Fatal("could not reserve a five-digit fixture port")
+	return nil
+}
+
 func fetchPickerFixture(t *testing.T) *fetchFixture {
 	t.Helper()
-	return newFetchFixture(t, []fetchMirror{
+	f := &fetchFixture{t: t, mirrors: []fetchMirror{
 		{name: "eu", region: "EU", location: "Finland", tier: 1},
 		{name: "de", region: "EU", location: "Germany", tier: 2},
 		{name: "us", region: "NA", location: "United States", tier: 2},
 		{name: "jp", region: "AS", location: "Japan", tier: 3},
-	})
+	}}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(f.handle))
+	// Replace the unstarted server's ephemeral listener with the forced port.
+	srv.Listener.Close()
+	srv.Listener = fiveDigitListener(t)
+	srv.Start()
+	f.srv = srv
+	t.Cleanup(srv.Close)
+	return f
 }
 
 // fixturePort returns the five-digit fixture port the goldens replace.
@@ -158,7 +188,7 @@ func fixturePort(t *testing.T, base string) string {
 	t.Helper()
 	port := base[strings.LastIndex(base, ":")+1:]
 	if len(port) != len(fetchPickerPlaceholder) {
-		t.Skipf("fixture port %q is not five digits; the PTY golden uses a fixed-width placeholder", port)
+		t.Fatalf("fixture port %q is not five digits", port)
 	}
 	return port
 }
@@ -446,6 +476,209 @@ func TestFetchPickerC1At60x18(t *testing.T) {
 	r.send(t, "q")
 	if code := r.exitCode(t); code != 0 {
 		t.Fatalf("exit = %d, want 0\nstderr:\n%s", code, r.stderr.String())
+	}
+}
+
+// assertPickerRestored proves the terminal guard unwound on the normal,
+// cancel, signal and panic paths: termios equal to the pre-run state and the
+// alternate screen, cursor and paste modes restored.
+func assertPickerRestored(t *testing.T, r *ptyRun) {
+	t.Helper()
+	out := waitCapture(t, r, "the screen restore", func(s string) bool {
+		return strings.Contains(s, term.AltLeave) &&
+			strings.Contains(s, term.CursorShow) &&
+			strings.Contains(s, term.PasteOff)
+	})
+	if !strings.Contains(out, term.MouseOff) && strings.Contains(out, term.MouseOn) {
+		t.Errorf("mouse reporting was enabled but not restored")
+	}
+	after, err := term.GetState(r.slave)
+	if err != nil {
+		t.Fatalf("GetState after: %v", err)
+	}
+	if !after.Equal(r.before) {
+		t.Errorf("termios flags not restored after the picker")
+	}
+}
+
+// TestFetchPickerRestoresTerminal covers AC-054's lifecycle on the picker:
+// confirm and SIGTERM both leave the alternate screen, cursor and paste clean.
+func TestFetchPickerRestoresTerminal(t *testing.T) {
+	bin := buildTuiBinary(t)
+	t.Run("confirm", func(t *testing.T) {
+		fixture := fetchPickerFixture(t)
+		h := newFetchPickerHarness(t, fixture, "Auto")
+		r := startPty(t, bin, h.with(nil), []string{"fetch"}, 80, 24)
+		waitFetchFrame(t, r, h.dump, 1)
+		r.send(t, "q")
+		if code := r.exitCode(t); code != 0 {
+			t.Fatalf("confirm exit = %d, want 0\nstderr:\n%s", code, r.stderr.String())
+		}
+		assertPickerRestored(t, r)
+	})
+	t.Run("SIGTERM", func(t *testing.T) {
+		fixture := fetchPickerFixture(t)
+		h := newFetchPickerHarness(t, fixture, "Auto")
+		r := startPty(t, bin, h.with(nil), []string{"fetch"}, 80, 24)
+		waitFetchFrame(t, r, h.dump, 1)
+		if err := r.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			t.Fatalf("SIGTERM: %v", err)
+		}
+		if code := r.exitCode(t); code != 143 {
+			t.Errorf("SIGTERM exit = %d, want 143\nstderr:\n%s", code, r.stderr.String())
+		}
+		assertPickerRestored(t, r)
+	})
+}
+
+// TestFetchPickerResizeNoticeAndReturn is FR-071's below-floor path: a 50x15
+// resize paints the notice, q is ignored there, and growing back restores the
+// full frame. Esc cancels from the small frame in the second subtest.
+func TestFetchPickerResizeNoticeAndReturn(t *testing.T) {
+	bin := buildTuiBinary(t)
+	fixture := fetchPickerFixture(t)
+	start := func(t *testing.T) (*fetchPickerHarness, *ptyRun) {
+		t.Helper()
+		h := newFetchPickerHarness(t, fixture, "Auto")
+		r := startPty(t, bin, h.with(nil), []string{"fetch"}, 80, 24)
+		waitFetchFrame(t, r, h.dump, 1)
+		if err := setPtySize(r.slave, 50, 15); err != nil {
+			t.Fatalf("setPtySize 50x15: %v", err)
+		}
+		if err := r.cmd.Process.Signal(syscall.SIGWINCH); err != nil {
+			t.Fatalf("SIGWINCH: %v", err)
+		}
+		return h, r
+	}
+	t.Run("q ignored and back", func(t *testing.T) {
+		h, r := start(t)
+		frames := waitFrameCount(t, r, h.dump, 2)
+		if !strings.Contains(frames[1], "Terminal too small (60x18 minimum; now 50x15)") {
+			t.Fatalf("50x15 notice missing:\n%s", frames[1])
+		}
+		r.send(t, "q")
+		time.Sleep(120 * time.Millisecond)
+		if got := len(dumpedFrames(t, h.dump)); got != 2 {
+			t.Fatalf("q below the floor drew a frame: %d, want 2", got)
+		}
+		if err := setPtySize(r.slave, 80, 24); err != nil {
+			t.Fatalf("setPtySize 80x24: %v", err)
+		}
+		if err := r.cmd.Process.Signal(syscall.SIGWINCH); err != nil {
+			t.Fatalf("SIGWINCH back: %v", err)
+		}
+		frames = waitFrameCount(t, r, h.dump, 3)
+		if strings.Contains(frames[2], "Terminal too small") || !strings.Contains(frames[2], "xbpretty Fetch") {
+			t.Fatalf("frame did not return after growing back:\n%s", frames[2])
+		}
+		r.send(t, "q")
+		if code := r.exitCode(t); code != 0 {
+			t.Fatalf("confirm after resize exit = %d, want 0\nstderr:\n%s", code, r.stderr.String())
+		}
+		assertPickerRestored(t, r)
+	})
+	t.Run("Esc cancels", func(t *testing.T) {
+		h, r := start(t)
+		frames := waitFrameCount(t, r, h.dump, 2)
+		if !strings.Contains(frames[1], "Terminal too small (60x18 minimum; now 50x15)") {
+			t.Fatalf("50x15 notice missing:\n%s", frames[1])
+		}
+		r.send(t, "\x1b")
+		if code := r.exitCode(t); code != 1 {
+			t.Errorf("small-frame Esc exit = %d, want 1\nstderr:\n%s", code, r.stderr.String())
+		}
+		if !strings.Contains(r.stderr.String(), "xbpretty: no mirror was selected") {
+			t.Errorf("small-frame cancel line = %q", r.stderr.String())
+		}
+		assertPickerRestored(t, r)
+	})
+}
+
+// TestFetchPickerEntryBelowFloor uses the text path with no screen and no
+// warning (FR-067), writing the shortlist's choice.
+func TestFetchPickerEntryBelowFloor(t *testing.T) {
+	bin := buildTuiBinary(t)
+	fixture := fetchPickerFixture(t)
+	h := newFetchPickerHarness(t, fixture, "Auto")
+	r := startPty(t, bin, h.with(nil), []string{"fetch"}, 50, 15)
+	if code := r.exitCode(t); code != 0 {
+		t.Fatalf("below-floor exit = %d, want 0\nstderr:\n%s", code, r.stderr.String())
+	}
+	if strings.Contains(r.cap.String(), term.AltEnter) || strings.Contains(r.cap.String(), "xbpretty Fetch") {
+		t.Errorf("the picker opened below 60x18:\n%q", r.cap.String())
+	}
+	if strings.Contains(r.stderr.String(), "full-screen interface") {
+		t.Errorf("below-floor entry warned:\n%s", r.stderr.String())
+	}
+	written, err := os.ReadFile(h.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(written), fixture.srv.URL+"/eu/current") {
+		t.Errorf("below-floor shortlist did not write its choice:\n%s", written)
+	}
+}
+
+// TestFetchPickerFailedScreenWarnsOnceAndFallsBack covers init and render
+// failures: one exact FR-067 warning, no picker, and the shortlist write path.
+func TestFetchPickerFailedScreenWarnsOnceAndFallsBack(t *testing.T) {
+	bin := buildTuiBinary(t)
+	for _, tc := range []struct {
+		name string
+		fail string
+		want string
+	}{
+		{"init", "init", "xbpretty: full-screen interface unavailable (injected init failure); showing the text summary"},
+		{"render", "render", "xbpretty: full-screen interface failed (injected render failure); showing the text summary"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := fetchPickerFixture(t)
+			h := newFetchPickerHarness(t, fixture, "Auto")
+			r := startPty(t, bin, h.with(map[string]string{"XBPRETTY_TEST_TUI_FAIL": tc.fail}), []string{"fetch"}, 80, 24)
+			if code := r.exitCode(t); code != 0 {
+				t.Fatalf("%s-failure exit = %d, want 0\nstderr:\n%s", tc.name, code, r.stderr.String())
+			}
+			if got := strings.Count(r.stderr.String(), "full-screen interface"); got != 1 {
+				t.Errorf("%s warning count = %d, want 1\nstderr:\n%s", tc.name, got, r.stderr.String())
+			}
+			if !strings.Contains(r.stderr.String(), tc.want) {
+				t.Errorf("%s warning = %q, want %q", tc.name, r.stderr.String(), tc.want)
+			}
+			if tc.name == "init" && strings.Contains(r.cap.String(), term.AltEnter) {
+				t.Errorf("a failed init still entered the alternate screen")
+			}
+			written, err := os.ReadFile(h.repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(written), fixture.srv.URL+"/eu/current") {
+				t.Errorf("%s fallback did not write the shortlist choice:\n%s", tc.name, written)
+			}
+		})
+	}
+}
+
+// TestFetchPickerPanicRestores is AC-054's panic path through the built
+// binary: the guard restores, the exact warning lands after the restore, and
+// the panic is re-raised.
+func TestFetchPickerPanicRestores(t *testing.T) {
+	bin := buildTuiBinary(t)
+	fixture := fetchPickerFixture(t)
+	h := newFetchPickerHarness(t, fixture, "Auto")
+	original, err := os.ReadFile(h.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := startPty(t, bin, h.with(map[string]string{"XBPRETTY_TEST_TUI_FAIL": "panic"}), []string{"fetch"}, 80, 24)
+	if code := r.exitCode(t); code != 2 {
+		t.Errorf("panic exit = %d, want 2\nstderr:\n%s", code, r.stderr.String())
+	}
+	if !strings.Contains(r.stderr.String(), "xbpretty: full-screen interface failed (injected full-screen panic)") {
+		t.Errorf("panic warning missing:\n%s", r.stderr.String())
+	}
+	assertPickerRestored(t, r)
+	if got, readErr := os.ReadFile(h.repo); readErr != nil || string(got) != string(original) {
+		t.Errorf("a panic wrote the repository: %q, %v; want %q", got, readErr, original)
 	}
 }
 
