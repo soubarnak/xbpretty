@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -144,6 +147,8 @@ func (f *fetchFixture) counts() (list, probes, heads int, ranges, headPaths []st
 func newFetchEnv(t *testing.T, fixture *fetchFixture) (*env, string) {
 	t.Helper()
 	e := newEnv(t)
+	e.set("XB_STUB_RUN_STDOUT", "")
+	e.set("XB_STUB_RUN_STDERR", "")
 	xbpsd := filepath.Join(e.dir, "xbps.d")
 	if err := os.MkdirAll(xbpsd, 0o755); err != nil {
 		t.Fatal(err)
@@ -153,18 +158,20 @@ func newFetchEnv(t *testing.T, fixture *fetchFixture) (*env, string) {
 		t.Fatal(err)
 	}
 
-	origURL, origDirs, origArch, origClient, origPick, origEvents, origPrevious :=
-		fetchMirrorListURL, fetchXBPSDDirs, fetchArch, fetchHTTPClient, pickMirror, mirrorScoreEvents, fetchPreviousHosts
+	origURL, origDirs, origArch, origClient, origPick, origEvents, origPrevious, origWriteDir, origManifest :=
+		fetchMirrorListURL, fetchXBPSDDirs, fetchArch, fetchHTTPClient, pickMirror, mirrorScoreEvents, fetchPreviousHosts, fetchWriteDir, fetchManifestPath
 	fetchMirrorListURL = fixture.srv.URL + "/mirrors.lst"
 	fetchXBPSDDirs = []string{xbpsd}
+	fetchWriteDir = xbpsd
+	fetchManifestPath = filepath.Join(e.dir, "fetch.json")
 	fetchArch = "x86_64"
 	fetchHTTPClient = fixture.srv.Client
 	pickMirror = nil
 	mirrorScoreEvents = func(fetch.ProgressEvent) {}
 	fetchPreviousHosts = func() []string { return nil }
 	t.Cleanup(func() {
-		fetchMirrorListURL, fetchXBPSDDirs, fetchArch, fetchHTTPClient, pickMirror, mirrorScoreEvents, fetchPreviousHosts =
-			origURL, origDirs, origArch, origClient, origPick, origEvents, origPrevious
+		fetchMirrorListURL, fetchXBPSDDirs, fetchArch, fetchHTTPClient, pickMirror, mirrorScoreEvents, fetchPreviousHosts, fetchWriteDir, fetchManifestPath =
+			origURL, origDirs, origArch, origClient, origPick, origEvents, origPrevious, origWriteDir, origManifest
 	})
 	return e, xbpsd
 }
@@ -334,24 +341,227 @@ func TestFetchDryRunAsRootWritesNothing(t *testing.T) {
 	}
 }
 
-func TestFetchRootReachesWriteSeamOnly(t *testing.T) {
+// writeFetchConf sets the one managed configuration file the write path
+// masks. It returns the original bytes.
+func writeFetchConf(t *testing.T, dir string) []byte {
+	t.Helper()
+	if err := os.Remove(filepath.Join(dir, "00-repository-main.conf")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	original := []byte("# system comment\n" +
+		"architecture=x86_64\n" +
+		"repository=https://repo-default.voidlinux.org/current\n" +
+		"ignorepkg=foo bar\n" +
+		"bestmatching=true\n" +
+		"repository=https://example.com/custom\n" +
+		"repository=/var/cache/local\n")
+	if err := os.WriteFile(filepath.Join(dir, "10-repository-main.conf"), original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return original
+}
+
+func fetchSHA256Of(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func TestFetchWritesMaskingFileBackupManifestAndSyncs(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "Helsinki, Finland", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	original := writeFetchConf(t, xbpsd)
+	target := filepath.Join(xbpsd, "10-repository-main.conf")
+
+	code, out, errs := e.run("xbpretty", "fetch")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, out, errs)
+	}
+	if errs != "" {
+		t.Errorf("successful fetch wrote stderr:\n%s", errs)
+	}
+	written, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, body, ok := strings.Cut(string(written), "\n")
+	if !ok {
+		t.Fatalf("written file has no header line:\n%s", written)
+	}
+	const prefix = "# Written by xbpretty fetch on "
+	const suffix = "; revert with 'xbp clean --fetch'."
+	if !strings.HasPrefix(header, prefix) || !strings.HasSuffix(header, suffix) {
+		t.Errorf("header = %q, want %q...%q", header, prefix, suffix)
+	}
+	stamp := strings.TrimSuffix(strings.TrimPrefix(header, prefix), suffix)
+	if _, err := time.Parse(time.RFC3339, stamp); err != nil {
+		t.Errorf("header timestamp %q is not RFC3339: %v", stamp, err)
+	}
+	wantBody := "# system comment\n" +
+		"architecture=x86_64\n" +
+		"repository=" + fixture.srv.URL + "/one/current\n" +
+		"ignorepkg=foo bar\n" +
+		"bestmatching=true\n" +
+		"repository=https://example.com/custom\n" +
+		"repository=/var/cache/local\n"
+	if body != wantBody {
+		t.Errorf("written body:\n%s\nwant:\n%s", body, wantBody)
+	}
+
+	backup := target + fetch.BackupSuffix
+	backupContent, err := os.ReadFile(backup)
+	if err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	if string(backupContent) != string(original) {
+		t.Errorf("backup = %q, want the original bytes", backupContent)
+	}
+	for _, path := range []string{target, backup} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o644 {
+			t.Errorf("%s mode = %o, want 0644", path, info.Mode().Perm())
+		}
+	}
+
+	manifest, err := fetch.ReadManifestFor(fetchManifestPath, xbpsd)
+	if err != nil {
+		t.Fatalf("manifest: %v", err)
+	}
+	if manifest.SchemaVersion != 1 || manifest.Mirror != fixture.srv.URL+"/one" ||
+		manifest.Arch != "x86_64" || manifest.WrittenAt == "" {
+		t.Errorf("manifest header = %+v", manifest)
+	}
+	if len(manifest.Files) != 1 {
+		t.Fatalf("manifest files = %+v, want one", manifest.Files)
+	}
+	entry := manifest.Files[0]
+	if entry.Path != target || entry.Backup != backup || entry.Created || entry.SHA256 != fetchSHA256Of(written) {
+		t.Errorf("manifest entry = %+v", entry)
+	}
+
+	cmds := e.commands()
+	if len(cmds) != 1 || cmds[0] != "-S" {
+		t.Errorf("children = %q, want exactly xbps-install -S", cmds)
+	}
+	if !strings.Contains(out, "Sources have been written to "+target) {
+		t.Errorf("stdout does not name the written file:\n%s", out)
+	}
+}
+
+func TestFetchSyncErrorOnWrittenRepositoryRestoresPreviousConfiguration(t *testing.T) {
 	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
 	e, xbpsd := newFetchEnv(t, fixture)
 	e.root = true
+	original := writeFetchConf(t, xbpsd)
+	target := filepath.Join(xbpsd, "10-repository-main.conf")
+	e.set("XB_STUB_RUN_STDERR", fmt.Sprintf(
+		"ERROR: [reposync] failed to fetch file '%s/one/current/x86_64-repodata': Not Found\n", fixture.srv.URL))
 
-	code, out, errs := e.run("xbpretty", "fetch")
+	code, _, errs := e.run("xbpretty", "fetch")
 	if code != 1 {
-		t.Fatalf("exit = %d, want 1\n%s\n%s", code, out, errs)
+		t.Fatalf("exit = %d, want 1\n%s", code, errs)
 	}
-	if !strings.Contains(errs, "writing the repository configuration is not implemented in this build") {
-		t.Errorf("stderr does not name the #74 write seam:\n%s", errs)
+	restored, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(out, "Mirror") {
-		t.Errorf("table was not printed before the write seam:\n%s", out)
+	if string(restored) != string(original) {
+		t.Errorf("target was not restored:\n%s", restored)
 	}
-	assertNoFiles(t, xbpsd)
-	if cmds := e.commands(); len(cmds) != 0 {
-		t.Errorf("#73 started a child: %v", cmds)
+	if _, err := os.Stat(fetchManifestPath); !os.IsNotExist(err) {
+		t.Errorf("manifest survived a full revert: %v", err)
+	}
+	for _, want := range []string{
+		"ERROR: [reposync] failed to fetch file",
+		"xbpretty: repository sync failed; previous configuration restored",
+	} {
+		if !strings.Contains(errs, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, errs)
+		}
+	}
+}
+
+func TestFetchSyncForeignErrorIsForwardedWithoutRevert(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	writeFetchConf(t, xbpsd)
+	e.set("XB_STUB_RUN_STDERR", "ERROR: [reposync] failed to fetch file 'https://example.com/custom/x86_64-repodata': Not Found\n")
+
+	code, _, errs := e.run("xbpretty", "fetch")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 for a foreign repository error\n%s", code, errs)
+	}
+	written, err := os.ReadFile(filepath.Join(xbpsd, "10-repository-main.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(written), fixture.srv.URL+"/one/current") {
+		t.Errorf("the new configuration was reverted:\n%s", written)
+	}
+	if _, err := os.Stat(fetchManifestPath); err != nil {
+		t.Errorf("manifest missing after a successful sync: %v", err)
+	}
+	for _, want := range []string{
+		"ERROR: [reposync] failed to fetch file 'https://example.com/custom/x86_64-repodata'",
+		"xbpretty: repository sync reported errors; review the output above",
+	} {
+		if !strings.Contains(errs, want) {
+			t.Errorf("stderr lacks %q:\n%s", want, errs)
+		}
+	}
+	if strings.Contains(errs, "previous configuration restored") {
+		t.Errorf("a foreign error reverted the configuration:\n%s", errs)
+	}
+}
+
+func TestFetchNonZeroSyncExitRevertsAndPassesTheChildCode(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	original := writeFetchConf(t, xbpsd)
+	e.set("XB_STUB_EXIT", "42")
+
+	code, _, errs := e.run("xbpretty", "fetch")
+	if code != 42 {
+		t.Fatalf("exit = %d, want 42 (xbps-install's code)\n%s", code, errs)
+	}
+	restored, err := os.ReadFile(filepath.Join(xbpsd, "10-repository-main.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restored) != string(original) {
+		t.Errorf("target was not restored on a non-zero sync exit:\n%s", restored)
+	}
+	if !strings.Contains(errs, "xbpretty: repository sync failed; previous configuration restored") {
+		t.Errorf("stderr lacks the restore line:\n%s", errs)
+	}
+}
+
+func TestFetchSyncKeepsStdinAvailableForTheKeyPrompt(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	writeFetchConf(t, xbpsd)
+
+	// The sync child is the only reader. If xbpretty consumed stdin first, the
+	// stub would see EOF instead of the answer.
+	script := filepath.Join(t.TempDir(), "xbps-install-sync")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nread line\nprintf 'READ:%s\\n' \"$line\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.writeConfig(script)
+	e.setAnswers("key-import-answer\n")
+
+	code, _, errs := e.run("xbpretty", "fetch")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	if !strings.Contains(errs, "READ:key-import-answer") {
+		t.Errorf("the sync child did not receive stdin; xbpretty consumed it:\n%s", errs)
 	}
 }
 
@@ -655,10 +865,11 @@ func TestFetchPickerSeamGatesAndValidatesOnce(t *testing.T) {
 		return 0, true
 	}
 
-	// Root + TTY + no --auto + no --dry-run runs the picker seam exactly once.
+	// Root + TTY + no --auto + no --dry-run runs the picker seam exactly once
+	// and writes its single choice.
 	code, out, errs := e.run("xbpretty", "fetch")
-	if code != 1 { // #74's write seam still refuses
-		t.Fatalf("exit = %d, want 1\n%s\n%s", code, out, errs)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s\n%s", code, out, errs)
 	}
 	if calls != 1 {
 		t.Errorf("picker calls = %d, want 1", calls)
@@ -890,5 +1101,366 @@ func TestFetchMalformedMirrorRowsOnlyUnderVerbose(t *testing.T) {
 	}
 	if !strings.Contains(errs, "verbose: mirror list: line 2") {
 		t.Errorf("malformed row was not reported under -v:\n%s", errs)
+	}
+}
+
+func TestFetchNonFreeWritesTheDerivedRepositoryFile(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	writeFetchConf(t, xbpsd)
+
+	code, out, errs := e.run("xbpretty", "fetch", "--non-free")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	}
+	derived := filepath.Join(xbpsd, "10-repository-nonfree.conf")
+	content, err := os.ReadFile(derived)
+	if err != nil {
+		t.Fatalf("derived non-free file: %v", err)
+	}
+	header, body, ok := strings.Cut(string(content), "\n")
+	if !ok || !strings.HasPrefix(header, "# Written by xbpretty fetch on ") ||
+		!strings.HasSuffix(header, "; revert with 'xbp clean --fetch'.") {
+		t.Errorf("derived header = %q", header)
+	}
+	wantBody := "repository=" + fixture.srv.URL + "/one/current/nonfree\n"
+	if body != wantBody {
+		t.Errorf("derived body = %q, want %q", body, wantBody)
+	}
+	info, err := os.Stat(derived)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("derived mode = %o, want 0644", info.Mode().Perm())
+	}
+	manifest, err := fetch.ReadManifestFor(fetchManifestPath, xbpsd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Files) != 2 {
+		t.Fatalf("manifest files = %d, want the managed file plus the derived one", len(manifest.Files))
+	}
+	var derivedEntry *fetch.ManifestFile
+	for i := range manifest.Files {
+		if manifest.Files[i].Path == derived {
+			derivedEntry = &manifest.Files[i]
+		}
+	}
+	if derivedEntry == nil {
+		t.Fatalf("manifest lacks the derived file: %+v", manifest.Files)
+	}
+	if !derivedEntry.Created || derivedEntry.Backup != "" || derivedEntry.SHA256 != fetchSHA256Of(content) {
+		t.Errorf("derived manifest entry = %+v", *derivedEntry)
+	}
+	if strings.Count(out, "Sources have been written to ") != 2 {
+		t.Errorf("stdout should name two written files:\n%s", out)
+	}
+}
+
+func TestFetchTwiceDoesNotDoubleTheMirrorBaseOrStackHeaders(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	writeFetchConf(t, xbpsd)
+	target := filepath.Join(xbpsd, "10-repository-main.conf")
+
+	code, _, errs := e.run("xbpretty", "fetch")
+	if code != 0 {
+		t.Fatalf("first fetch exit = %d\n%s", code, errs)
+	}
+	first, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, firstBody, _ := strings.Cut(string(first), "\n")
+
+	code, _, errs = e.run("xbpretty", "fetch")
+	if code != 0 {
+		t.Fatalf("second fetch exit = %d\n%s", code, errs)
+	}
+	second, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(second), "# Written by xbpretty fetch on ") != 1 {
+		t.Errorf("second fetch stacked provenance headers:\n%s", second)
+	}
+	_, secondBody, _ := strings.Cut(string(second), "\n")
+	if secondBody != firstBody {
+		t.Errorf("second fetch changed the body:\nfirst:\n%s\nsecond:\n%s", firstBody, secondBody)
+	}
+	if strings.Contains(secondBody, "/one/one") {
+		t.Errorf("second fetch doubled the mirror's base path:\n%s", secondBody)
+	}
+	if !strings.Contains(secondBody, "repository="+fixture.srv.URL+"/one/current\n") {
+		t.Errorf("second fetch wrote an unexpected repository:\n%s", secondBody)
+	}
+}
+
+func TestFetchMasksAStockSystemFileUnderEtc(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, _ := newFetchEnv(t, fixture)
+	e.root = true
+	etcDir := filepath.Join(e.dir, "etc-xbps.d")
+	shareDir := filepath.Join(e.dir, "usr-share-xbps.d")
+	for _, dir := range []string{etcDir, shareDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const name = "10-repository-main.conf"
+	original := []byte("repository=https://repo-default.voidlinux.org/current\n")
+	if err := os.WriteFile(filepath.Join(shareDir, name), original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fetchXBPSDDirs = []string{etcDir, shareDir}
+	fetchWriteDir = etcDir
+
+	code, _, errs := e.run("xbpretty", "fetch")
+	if code != 0 {
+		t.Fatalf("exit = %d\n%s", code, errs)
+	}
+	target := filepath.Join(etcDir, name)
+	written, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("the /etc mask was not written: %v", err)
+	}
+	if !strings.Contains(string(written), "repository="+fixture.srv.URL+"/one/current") {
+		t.Errorf("written mask = %q", written)
+	}
+	if _, err := os.Stat(target + fetch.BackupSuffix); !os.IsNotExist(err) {
+		t.Errorf("masking a /usr/share file created a backup: %v", err)
+	}
+	manifest, err := fetch.ReadManifestFor(fetchManifestPath, etcDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Files) != 1 || !manifest.Files[0].Created || manifest.Files[0].Backup != "" {
+		t.Errorf("manifest entry = %+v, want created with no backup", manifest.Files)
+	}
+	system, err := os.ReadFile(filepath.Join(shareDir, name))
+	if err != nil || string(system) != string(original) {
+		t.Errorf("/usr/share file was modified: %q %v", system, err)
+	}
+}
+
+func TestFetchNonFreeSyncErrorOnDerivedURLReverts(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	original := writeFetchConf(t, xbpsd)
+	e.set("XB_STUB_RUN_STDERR", fmt.Sprintf(
+		"ERROR: [reposync] failed to fetch file '%s/one/current/nonfree/x86_64-repodata': Not Found\n", fixture.srv.URL))
+
+	code, _, errs := e.run("xbpretty", "fetch", "--non-free")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, errs)
+	}
+	restored, err := os.ReadFile(filepath.Join(xbpsd, "10-repository-main.conf"))
+	if err != nil || string(restored) != string(original) {
+		t.Errorf("derived-URL sync error did not restore the main file: %q %v", restored, err)
+	}
+	if _, err := os.Stat(filepath.Join(xbpsd, "10-repository-nonfree.conf")); !os.IsNotExist(err) {
+		t.Errorf("derived file survived the revert: %v", err)
+	}
+	if _, err := os.Stat(fetchManifestPath); !os.IsNotExist(err) {
+		t.Errorf("manifest survived the revert: %v", err)
+	}
+}
+
+func TestFetchIgnoresACorruptPreviousManifest(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	writeFetchConf(t, xbpsd)
+	if err := os.MkdirAll(filepath.Dir(fetchManifestPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fetchManifestPath, []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errs := e.run("xbpretty", "fetch")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 despite a corrupt previous manifest\n%s", code, errs)
+	}
+	if _, err := fetch.ReadManifestFor(fetchManifestPath, xbpsd); err != nil {
+		t.Errorf("fetch did not replace the corrupt manifest: %v", err)
+	}
+}
+
+func TestFetchCleanEditFetchCleanSnapshotsAfresh(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	original := writeFetchConf(t, xbpsd)
+	target := filepath.Join(xbpsd, "10-repository-main.conf")
+
+	if code, _, errs := e.run("xbpretty", "fetch"); code != 0 {
+		t.Fatalf("first fetch exit = %d\n%s", code, errs)
+	}
+	if code, _, errs := e.run("xbpretty", "clean", "--fetch"); code != 0 {
+		t.Fatalf("first clean exit = %d\n%s", code, errs)
+	}
+	restored, _ := os.ReadFile(target)
+	if string(restored) != string(original) {
+		t.Fatalf("first clean did not restore the original:\n%s", restored)
+	}
+	if _, err := os.Stat(target + fetch.BackupSuffix); !os.IsNotExist(err) {
+		t.Fatalf("clean left the consumed backup behind: %v", err)
+	}
+
+	edited := []byte("repository=https://repo-default.voidlinux.org/current\nignorepkg=hand-edited\n")
+	if err := os.WriteFile(target, edited, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errs := e.run("xbpretty", "fetch"); code != 0 {
+		t.Fatalf("second fetch exit = %d\n%s", code, errs)
+	}
+	if backup, err := os.ReadFile(target + fetch.BackupSuffix); err != nil || string(backup) != string(edited) {
+		t.Fatalf("second fetch did not snapshot the edited file: %q %v", backup, err)
+	}
+	if code, _, errs := e.run("xbpretty", "clean", "--fetch"); code != 0 {
+		t.Fatalf("second clean exit = %d\n%s", code, errs)
+	}
+	restored, _ = os.ReadFile(target)
+	if string(restored) != string(edited) {
+		t.Errorf("second clean restored %q, want the edited bytes", restored)
+	}
+}
+
+func TestFetchRevertFailureKeepsTheManifestAndReportsTheStep(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write through a read-only directory")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "10-repository-main.conf")
+	if err := os.WriteFile(target, []byte("current\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	var buf bytes.Buffer
+	st := &state{stderr: &buf}
+	st.revertFetchWrites(
+		[]fetch.PreImage{{Path: target, Existed: true, Content: []byte("previous\n")}},
+		fetch.Manifest{Files: []fetch.ManifestFile{{Path: target}}},
+	)
+	if !strings.Contains(buf.String(), "xbpretty: reverting "+target+": ") {
+		t.Errorf("revert failure was not reported:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "previous configuration restored") {
+		t.Errorf("a failed revert claimed the configuration was restored:\n%s", buf.String())
+	}
+}
+
+func TestFetchMissingSyncBinaryFailsBeforeWriting(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	original := writeFetchConf(t, xbpsd)
+	missing := filepath.Join(e.dir, "missing-xbps-install")
+	e.writeConfig(missing)
+
+	code, _, errs := e.run("xbpretty", "fetch")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, errs)
+	}
+	if !strings.Contains(errs, "xbpretty: xbps binary not found: "+missing) {
+		t.Errorf("stderr lacks the exact missing-binary error:\n%s", errs)
+	}
+	target := filepath.Join(xbpsd, "10-repository-main.conf")
+	content, err := os.ReadFile(target)
+	if err != nil || string(content) != string(original) {
+		t.Errorf("a missing binary changed the target: %q %v", content, err)
+	}
+	if _, err := os.Stat(target + fetch.BackupSuffix); !os.IsNotExist(err) {
+		t.Errorf("a missing binary created a backup: %v", err)
+	}
+	if _, err := os.Stat(fetchManifestPath); !os.IsNotExist(err) {
+		t.Errorf("a missing binary wrote a manifest: %v", err)
+	}
+}
+
+func TestFetchNonFreeRefusesToClobberAnExistingDerivedBasename(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	original := writeFetchConf(t, xbpsd)
+	custom := filepath.Join(xbpsd, "10-repository-nonfree.conf")
+	customBody := []byte("repository=https://custom.example/nonfree\n")
+	if err := os.WriteFile(custom, customBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, errs := e.run("xbpretty", "fetch", "--non-free")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\n%s", code, errs)
+	}
+	if !strings.Contains(errs, "refusing to overwrite "+custom) {
+		t.Errorf("stderr does not name the refused file:\n%s", errs)
+	}
+	content, err := os.ReadFile(custom)
+	if err != nil || string(content) != string(customBody) {
+		t.Errorf("custom non-free file was clobbered: %q %v", content, err)
+	}
+	main, err := os.ReadFile(filepath.Join(xbpsd, "10-repository-main.conf"))
+	if err != nil || string(main) != string(original) {
+		t.Errorf("the main file changed despite the refusal: %q %v", main, err)
+	}
+	if _, err := os.Stat(fetchManifestPath); !os.IsNotExist(err) {
+		t.Errorf("a refused fetch wrote a manifest: %v", err)
+	}
+}
+
+func TestFetchFailedRefetchRestoresThePreRunConfiguration(t *testing.T) {
+	fixture := newFetchFixture(t, []fetchMirror{{name: "one", region: "EU", location: "", tier: 1}})
+	e, xbpsd := newFetchEnv(t, fixture)
+	e.root = true
+	original := writeFetchConf(t, xbpsd)
+	target := filepath.Join(xbpsd, "10-repository-main.conf")
+
+	if code, _, errs := e.run("xbpretty", "fetch"); code != 0 {
+		t.Fatalf("first fetch exit = %d\n%s", code, errs)
+	}
+	first, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.set("XB_STUB_RUN_STDERR", fmt.Sprintf(
+		"ERROR: [reposync] failed to fetch file '%s/one/current/x86_64-repodata': Not Found\n", fixture.srv.URL))
+
+	code, _, errs := e.run("xbpretty", "fetch")
+	if code != 1 {
+		t.Fatalf("second fetch exit = %d, want 1\n%s", code, errs)
+	}
+	after, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(first) {
+		t.Errorf("a failed refetch restored the pre-first-fetch file instead of the pre-run configuration:\n%s", after)
+	}
+	manifest, err := fetch.ReadManifestFor(fetchManifestPath, xbpsd)
+	if err != nil {
+		t.Fatalf("the first fetch's manifest was not kept: %v", err)
+	}
+	if len(manifest.Files) != 1 || manifest.Files[0].Created || !strings.HasSuffix(manifest.Files[0].Backup, fetch.BackupSuffix) {
+		t.Errorf("kept manifest = %+v, want the first fetch's entry", manifest.Files)
+	}
+	backup, err := os.ReadFile(target + fetch.BackupSuffix)
+	if err != nil || string(backup) != string(original) {
+		t.Errorf("the manifest backup was not kept for clean --fetch: %q %v", backup, err)
+	}
+	if code, _, errs := e.run("xbpretty", "clean", "--fetch"); code != 0 {
+		t.Fatalf("clean after the failed refetch exit = %d\n%s", code, errs)
+	}
+	restored, _ := os.ReadFile(target)
+	if string(restored) != string(original) {
+		t.Errorf("clean after the failed refetch = %q, want the original", restored)
 	}
 }

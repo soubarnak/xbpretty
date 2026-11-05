@@ -11,6 +11,8 @@ import "os"
 //	XBPRETTY_TEST_FETCH_XBPSD=<dir>       read repository= lines from <dir>
 //	XBPRETTY_TEST_FETCH_MIRROR_LIST=<url> fetch the mirror list from <url>
 //	XBPRETTY_TEST_FETCH_ARCH=<arch>       probe <arch>-repodata
+//	XBPRETTY_TEST_FETCH_WRITE_DIR=<dir>   write masking files under <dir>
+//	XBPRETTY_TEST_FETCH_MANIFEST=<path>   read/write the fetch manifest at <path>
 func init() {
 	if v := os.Getenv("XBPRETTY_TEST_FETCH_XBPSD"); v != "" {
 		fetchXBPSDDirs = []string{v}
@@ -20,5 +22,11 @@ func init() {
 	}
 	if v := os.Getenv("XBPRETTY_TEST_FETCH_ARCH"); v != "" {
 		fetchArch = v
+	}
+	if v := os.Getenv("XBPRETTY_TEST_FETCH_WRITE_DIR"); v != "" {
+		fetchWriteDir = v
+	}
+	if v := os.Getenv("XBPRETTY_TEST_FETCH_MANIFEST"); v != "" {
+		fetchManifestPath = v
 	}
 }

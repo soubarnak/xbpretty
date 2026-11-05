@@ -146,19 +146,34 @@ func parseXbpsDConfig(path string) (arch string, repositories []string) {
 // ClassifyRepositories marks the rewriteable repository lines and derives the
 // primary path and required suffix set. A line is managed when its host is
 // repo-default.voidlinux.org, a host from the mirror list, or the previous
-// chosen host recorded in the manifest (dec:#48 §3.2). Custom/local/file://
+// chosen mirror recorded in the manifest (dec:#48 §3.2). Custom/local/file://
 // lines are preserved verbatim and never probed or validated.
-func ClassifyRepositories(cfg RepositoryConfig, mirrorHosts, previousHosts []string) (RepositorySet, error) {
+//
+// mirrorBases and previousBases are mirror URLs or bare hostnames. Their paths
+// are the bases a written repository URL is relative to: the embedded mirror
+// list has path-bearing entries (26 of 33), so a second fetch must not treat
+// <base>/current as a new /base/current suffix and double the base.
+func ClassifyRepositories(cfg RepositoryConfig, mirrorBases, previousBases []string) (RepositorySet, error) {
 	allowed := map[string]bool{DefaultRepositoryHost: true}
-	for _, host := range mirrorHosts {
-		if host = normaliseHost(host); host != "" {
-			allowed[host] = true
+	basesByHost := map[string][]string{}
+	addBase := func(raw string) {
+		host, base := splitRepositoryBase(raw)
+		if host == "" {
+			return
 		}
+		allowed[host] = true
+		for _, existing := range basesByHost[host] {
+			if existing == base {
+				return
+			}
+		}
+		basesByHost[host] = append(basesByHost[host], base)
 	}
-	for _, host := range previousHosts {
-		if host = normaliseHost(host); host != "" {
-			allowed[host] = true
-		}
+	for _, base := range mirrorBases {
+		addBase(base)
+	}
+	for _, base := range previousBases {
+		addBase(base)
 	}
 
 	set := RepositorySet{Arch: cfg.Arch, Lines: append([]RepositoryLine(nil), cfg.Lines...)}
@@ -171,10 +186,11 @@ func ClassifyRepositories(cfg RepositoryConfig, mirrorHosts, previousHosts []str
 			continue // local path or file://: preserved, never managed
 		}
 		line.Host = strings.ToLower(u.Hostname())
-		line.Suffix = strings.TrimRight(u.Path, "/")
-		if line.Suffix == "/" {
-			line.Suffix = ""
+		fullPath := strings.TrimRight(u.Path, "/")
+		if fullPath == "/" {
+			fullPath = ""
 		}
+		line.Suffix = relativeSuffix(fullPath, basesByHost[line.Host])
 		line.Managed = allowed[line.Host]
 		if !line.Managed {
 			continue
@@ -194,6 +210,53 @@ func ClassifyRepositories(cfg RepositoryConfig, mirrorHosts, previousHosts []str
 	}
 	set.Primary = set.Suffixes[0]
 	return set, nil
+}
+
+// splitRepositoryBase accepts a mirror URL or a bare hostname and returns the
+// lower-case host and its path base without a trailing slash.
+func splitRepositoryBase(raw string) (host, base string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", ""
+	}
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			return "", ""
+		}
+		base = strings.TrimRight(u.Path, "/")
+		if base == "/" {
+			base = ""
+		}
+		return strings.ToLower(u.Hostname()), base
+	}
+	host = normaliseHost(raw)
+	return host, ""
+}
+
+// relativeSuffix returns the configured path relative to the longest matching
+// mirror base for that host. No matching base keeps the whole path.
+func relativeSuffix(fullPath string, bases []string) string {
+	fullPath = strings.TrimRight(fullPath, "/")
+	if fullPath == "/" {
+		fullPath = ""
+	}
+	best := ""
+	for _, base := range bases {
+		base = strings.TrimRight(base, "/")
+		if base == "" {
+			continue
+		}
+		if fullPath == base || strings.HasPrefix(fullPath, base+"/") {
+			if len(base) > len(best) {
+				best = base
+			}
+		}
+	}
+	if best != "" {
+		return strings.TrimPrefix(fullPath, best)
+	}
+	return fullPath
 }
 
 // MirrorHosts returns the hostnames of every mirror in the loaded list.
