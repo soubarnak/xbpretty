@@ -265,7 +265,13 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		return st.downloadOnlyStop(cmd, opts, rows)
 	}
 
-	code = st.execute(cmd, st.binaryFor(cmd), realArgv(cmd, opts, args), rows...)
+	// FR-030/FR-031: the before snapshot is taken after the prompt and
+	// before the real child. executePhases commits the entry once the whole
+	// command (every phase for a replay) exited 0, before the line log, the
+	// reboot hint and any implicit autoremove.
+	st.beginHistory(cmd, opts, rows)
+	code = st.executePhases(cmd, realArgv(cmd, opts, args), rows,
+		xbpsPhase{bin: st.binaryFor(cmd), args: realArgv(cmd, opts, args), rows: rows})
 	if code == 0 {
 		st.implicitAutoremoveAfterSuccess(cmd, opts, rows)
 	}

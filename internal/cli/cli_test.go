@@ -1113,7 +1113,8 @@ func (e *env) transactionCalls() []string {
 	var out []string
 	for _, c := range e.commands() {
 		switch {
-		case c == "-H", strings.HasPrefix(c, "-p "), strings.HasPrefix(c, "-X "):
+		case c == "-H", c == "-l", c == "-m", c == "--list-repolock-pkgs",
+			strings.HasPrefix(c, "-p "), strings.HasPrefix(c, "-X "):
 			continue
 		}
 		out = append(out, c)
