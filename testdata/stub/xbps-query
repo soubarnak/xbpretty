@@ -29,7 +29,7 @@ case "$*" in
     exit 0 ;;
   *"-R -s  -p filename-sha256"*)
     printf '%s' "${XB_STUB_HASHES:-}"
-    exit 0 ;;
+    exit "${XB_STUB_HASH_EXIT:-0}" ;;
   *"-R -s  -p architecture"*)
     printf '%s' "${XB_STUB_ARCH:-}"
     exit 0 ;;

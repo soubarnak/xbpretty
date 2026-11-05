@@ -116,19 +116,30 @@ func (st *state) wantsSync(cmd string, opts *options) bool {
 // xbps's own code and a hint; xbps exits 0 when every fetch fails, so an exit
 // of 0 continues to the dry run (FR-013). It returns -1 when the policy allows
 // the caller to continue.
-func (st *state) syncStep() int {
+func (st *state) syncStep() (int, hints.Output, error) {
+	// The update command owns the inline Updating Package Lists view
+	// (FR-064, FR-071); every other sync call leaves it off. The caller is
+	// responsible for tearing a live view down before printing the captured
+	// streams and the hint.
+	if st.r.live && st.r.liveProgress != nil {
+		code, err := st.r.stream(st.r.cfg.Xbps.InstallPath, "-S")
+		output := hints.Output{Stdout: st.r.lastStdout, Stderr: st.r.lastStderr}
+		if err != nil {
+			return exitRuntime, output, err
+		}
+		if code != 0 {
+			return code, output, nil
+		}
+		return -1, output, nil
+	}
 	code, output, err := st.r.streamStderr(st.r.cfg.Xbps.InstallPath, "-S")
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
-		return exitRuntime
+		return exitRuntime, output, err
 	}
 	if code != 0 {
-		if h := hints.Lookup(code, output); h != nil {
-			fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
-		}
-		return code
+		return code, output, nil
 	}
-	return -1
+	return -1, output, nil
 }
 
 // runTransaction drives one command from the plan through the prompt to the
@@ -199,8 +210,18 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	if syncWanted {
 		if euidFn() != 0 {
 			fmt.Fprintln(st.stderr, "warning: not running as root, so the repository index was not refreshed; it may be stale")
-		} else if code := st.syncStep(); code >= 0 {
-			return code
+		} else {
+			code, output, err := st.syncStep()
+			if err != nil {
+				fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+				return exitRuntime
+			}
+			if code >= 0 {
+				if h := hints.Lookup(code, output); h != nil {
+					fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
+				}
+				return code
+			}
 		}
 	}
 
@@ -225,8 +246,23 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		return exitNothingToDo
 	}
 
-	if code := st.renderSummary(summaryCommand(cmd, opts), rows); code >= 0 {
+	summaryCmd := summaryCommand(cmd, opts)
+	// FR-067: Tui mode may replace this transaction's stdout with the S1
+	// full-screen summary. A refusal or a signal ends the run here; an
+	// unavailable screen leaves the normal text path untouched.
+	confirmedByScreen := false
+	switch outcome, code := st.maybeRunSummaryScreen(opts, summaryCmd, rows); outcome {
+	case screenConfirmed:
+		confirmedByScreen = true
+	case screenRefused:
+		return st.refuse()
+	case screenExited:
 		return code
+	}
+	if !confirmedByScreen {
+		if code := st.renderSummary(summaryCmd, rows); code >= 0 {
+			return code
+		}
 	}
 
 	// FR-017: a hold-only plan is read-only. Its summary prints, but there is
@@ -245,7 +281,7 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	if opts.assumeNo {
 		return st.refuse()
 	}
-	autoAccept := st.assumeYes
+	autoAccept := st.assumeYes || confirmedByScreen
 	// FR-073: the non-root check is unconditional and comes before the
 	// non-TTY check, so a non-root run always gets the summary and the
 	// elevation hint.
@@ -266,10 +302,15 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	}
 
 	// FR-040: the download-only stop runs after its prompt/root/non-TTY
-	// checks. #72 owns the predownload; the seam must never fall through to
-	// a real transaction.
+	// checks and never falls through to a real transaction.
 	if opts.downloadOnly {
-		return st.downloadOnlyStop(cmd, opts, rows)
+		return st.downloadOnlyStop(rows)
+	}
+
+	// FR-036/FR-038: fill the cache after every check and before the child. A
+	// failure warns once and leaves the work to xbps, whose exit code stands.
+	if code := st.predownload(rows, false); code >= 0 {
+		return code
 	}
 
 	// FR-030/FR-031: the before snapshot is taken after the prompt and
@@ -454,12 +495,35 @@ func (st *state) runUpdate(opts *options) int {
 	}
 	// update never nests a sync: this is its one index step, whatever the
 	// --update/--no-update flags say.
-	if code := st.syncStep(); code >= 0 {
+	live := st.beginUpdateLive()
+	if live != nil {
+		defer st.endLive(live)
+	}
+	code, output, syncErr := st.syncStep()
+	// Clear the live surface before any captured output or hint is printed;
+	// otherwise the teardown would erase the diagnostic.
+	st.endLive(live)
+	if syncErr != nil {
+		if live != nil {
+			fmt.Fprint(st.stderr, st.r.lastStdout)
+			fmt.Fprint(st.stderr, st.r.lastStderr)
+		}
+		fmt.Fprintf(st.stderr, "xbpretty: %v\n", syncErr)
+		return exitRuntime
+	}
+	if code >= 0 {
+		if live != nil {
+			fmt.Fprint(st.stderr, st.r.lastStdout)
+			fmt.Fprint(st.stderr, st.r.lastStderr)
+		}
+		if h := hints.Lookup(code, output); h != nil {
+			fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
+		}
 		return code
 	}
-	rows, code := st.planUpdate()
-	if code >= 0 {
-		return code
+	rows, planCode := st.planUpdate()
+	if planCode >= 0 {
+		return planCode
 	}
 	upgradable := make([]xbps.Row, 0, len(rows))
 	for _, row := range rows {
@@ -518,14 +582,15 @@ func (st *state) printUpgradable(rows []xbps.Row) {
 	}
 }
 
-// downloadOnlyStop is the #72 seam. #72 owns the predownload and its prompt
-// rules; until it lands the flag must never fall through to a real
-// transaction.
-func (st *state) downloadOnlyStop(cmd string, opts *options, rows []xbps.Row) int {
-	// TODO(#72): predownload the plan's archives, then stop with no pkgdb
-	// write, no log and no history entry.
-	fmt.Fprintf(st.stderr, "xbpretty: --download-only for %s is not implemented in this build\n", cmd)
-	return exitRuntime
+// downloadOnlyStop implements FR-040: the plan's download set is filled after
+// the same checks a real transaction makes, then the run stops with no xbps
+// child, no pkgdb write, no implicit autoremove, no log, no history and no
+// completion line. An empty or all-cached set is a verified no-op.
+func (st *state) downloadOnlyStop(rows []xbps.Row) int {
+	if code := st.predownload(rows, true); code >= 0 {
+		return code
+	}
+	return exitOK
 }
 
 // implicitAutoremoveEligible reports whether the implicit orphan transaction
@@ -611,8 +676,20 @@ func (st *state) planImplicitAutoremove(cmd string, opts *options) ([]xbps.Row, 
 // the orphan plan is the whole run, so its refusal is the normal exit-1
 // refusal and Nothing to do was never printed.
 func (st *state) runOrphanOnly(cmd string, opts *options, rows []xbps.Row) int {
-	if code := st.renderSummary(orphanCommand(cmd, opts), rows); code >= 0 {
+	summaryCmd := orphanCommand(cmd, opts)
+	confirmedByScreen := false
+	switch outcome, code := st.maybeRunSummaryScreen(opts, summaryCmd, rows); outcome {
+	case screenConfirmed:
+		confirmedByScreen = true
+	case screenRefused:
+		return st.refuse()
+	case screenExited:
 		return code
+	}
+	if !confirmedByScreen {
+		if code := st.renderSummary(summaryCmd, rows); code >= 0 {
+			return code
+		}
 	}
 	if allHeld(rows) {
 		return exitOK
@@ -623,7 +700,7 @@ func (st *state) runOrphanOnly(cmd string, opts *options, rows []xbps.Row) int {
 	if opts.assumeNo {
 		return st.refuse()
 	}
-	autoAccept := st.assumeYes
+	autoAccept := st.assumeYes || confirmedByScreen
 	if euidFn() != 0 {
 		st.privHint(cmd, opts)
 		return exitRuntime
@@ -639,8 +716,10 @@ func (st *state) runOrphanOnly(cmd string, opts *options, rows []xbps.Row) int {
 		}
 	}
 	if opts.downloadOnly {
-		// FR-016: --download-only never runs the orphan transaction.
-		return st.downloadOnlyStop(cmd, opts, rows)
+		// FR-016: --download-only never runs the orphan transaction. Its
+		// rows are removals, so the stop is a verified no-op with no
+		// download set and no child.
+		return st.downloadOnlyStop(rows)
 	}
 	return st.executeOrphan(cmd, opts, rows)
 }
@@ -657,14 +736,28 @@ func (st *state) runImplicitAutoremoveAfterSuccess(cmd string, opts *options) in
 	if len(rows) == 0 {
 		return -1
 	}
-	if code := st.renderSummary(orphanCommand(cmd, opts), rows); code >= 0 {
+	summaryCmd := orphanCommand(cmd, opts)
+	confirmedByScreen := false
+	switch outcome, code := st.maybeRunSummaryScreen(opts, summaryCmd, rows); outcome {
+	case screenConfirmed:
+		confirmedByScreen = true
+	case screenRefused:
+		// FR-016: declining the implicit transaction leaves the primary
+		// result untouched, including its success exit code.
+		return -1
+	case screenExited:
 		return code
+	}
+	if !confirmedByScreen {
+		if code := st.renderSummary(summaryCmd, rows); code >= 0 {
+			return code
+		}
 	}
 	// A hold-only orphan plan changes nothing: the summary is read-only.
 	if allHeld(rows) {
 		return -1
 	}
-	if !st.assumeYes {
+	if !st.assumeYes && !confirmedByScreen {
 		result := st.prompt()
 		if !result.proceed {
 			if result.invalid {
@@ -906,6 +999,12 @@ func (st *state) privHint(cmd string, opts *options) {
 	if len(opts.args) > 0 {
 		line += " " + strings.Join(opts.args, " ")
 	}
+	// The hint has to reproduce the invocation that was refused, stop flags
+	// included: telling a --download-only user to run a full install would
+	// do more than they asked for.
+	if opts.downloadOnly {
+		line += " --download-only"
+	}
 	fmt.Fprintf(st.stderr, "hint: rerun as root: %s %s\n", elevate, line)
 }
 
@@ -979,4 +1078,35 @@ func asFile(v any) (*os.File, bool) {
 // relativeDir is the directory used when resolving a link target.
 func relativeDir(path string) string {
 	return filepath.Dir(path)
+}
+
+// beginUpdateLive starts the adapted Updating Package Lists view when the
+// suppression matrix allows a live surface.
+func (st *state) beginUpdateLive() *liveProgress {
+	mode := st.liveMode()
+	if mode == liveOff {
+		return nil
+	}
+	model := newProgressModel("update", nil, nil)
+	model.setRepositoryTotal(repositoryCount())
+	live := newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode, model, st.theme)
+	parser := NewStreamParser(0, 0)
+	parser.OnRepoUpdate = func(url string) {
+		live.Apply(true, func(m *progressModel) { m.repository(url) })
+	}
+	st.r.parser = parser
+	st.r.live = true
+	st.r.liveProgress = live
+	live.Request(true)
+	return live
+}
+
+// endLive tears a live surface down and restores the forwarding state.
+func (st *state) endLive(live *liveProgress) {
+	if live == nil {
+		return
+	}
+	live.Finish()
+	st.r.live = false
+	st.r.liveProgress = nil
 }

@@ -22,6 +22,11 @@ const removePlanFixture = "wget-1.25.0_1 remove x86_64 https://repo-default.void
 // xbps 0.60.7 (see testdata/parser/README.md).
 const planFixture = "figlet-2.2.5_6 install x86_64 https://repo-default.voidlinux.org/current 672593 94372\n"
 
+// localPlanFixture is the same row on a filesystem repository. FR-036 excludes
+// it from the predownload set, so a built-binary test can run a real-looking
+// transaction with no network while still rendering a summary.
+const localPlanFixture = "figlet-2.2.5_6 install x86_64 /var/cache/xbps 672593 94372\n"
+
 // env is one test's world: a config file pointing at stub xbps binaries,
 // fixture variables for those stubs, and the command log.
 type env struct {
@@ -49,6 +54,7 @@ func newEnv(t *testing.T) *env {
 	t.Setenv("XDG_CONFIG_HOME", cfgDir)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm")
 	t.Setenv("XB_STUB_LOG", filepath.Join(dir, "commands.log"))
 	t.Setenv("XB_STUB_STDOUT", planFixture)
 	t.Setenv("XB_STUB_STDERR", "")
@@ -57,6 +63,17 @@ func newEnv(t *testing.T) *env {
 	t.Setenv("XB_STUB_OLD", "")
 	t.Setenv("XB_STUB_REVDEPS", "")
 	t.Setenv("XB_STUB_QUERY", "figlet-2.2.5_6\n657KB\n")
+
+	// The predownload pass must never reach the machine's real cache or the
+	// network from a unit test. A cache path that cannot be a directory makes
+	// the pass skip itself; predownload tests point cacheDirFn at a temp dir.
+	noCache := filepath.Join(dir, "no-cache")
+	if err := os.WriteFile(noCache, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	origCacheDir := cacheDirFn
+	cacheDirFn = func() string { return noCache }
+	t.Cleanup(func() { cacheDirFn = origCacheDir })
 
 	origTerminal, origEuid := isTerminalFn, euidFn
 	isTerminalFn = func(f *os.File) bool { return e.tty }
@@ -1821,11 +1838,13 @@ func TestCLIRunDirectSeam(t *testing.T) {
 	}
 }
 
+// TestHybridPTYExecutionInteractiveVsNonInteractive pins the stream layout the
+// live surfaces depend on and FR-066's forwarding rule: child output goes to
+// stderr, never to xbpretty's stdout.
 func TestHybridPTYExecutionInteractiveVsNonInteractive(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 
-	// Custom stub script that checks whether stdout is a TTY and whether stderr is a TTY.
 	stubScript := filepath.Join(e.dir, "custom-xbps-install")
 	scriptContent := `#!/bin/sh
 case "${1:-}" in
@@ -1835,7 +1854,6 @@ case "${1:-}" in
     ;;
 esac
 
-# Check TTY status of stdout (fd 1) and stderr (fd 2)
 if [ -t 1 ] && ! [ -t 2 ]; then
   echo "HYBRID_PTY_PIPE_OK"
 elif ! [ -t 1 ] && ! [ -t 2 ]; then
@@ -1850,58 +1868,58 @@ exit 0
 	}
 	e.pointInstallAt(stubScript)
 
-	// Case 1: Interactive mode (tty = true, no verbose) -> should spawn PTY on stdout and Pipe on stderr
 	e.tty = true
 	code, out, errs := e.run("xbpretty", "install", "-y", "--no-progress", "figlet")
 	if code != 0 {
 		t.Fatalf("interactive run failed code %d: %s", code, errs)
 	}
-	if !strings.Contains(out, "HYBRID_PTY_PIPE_OK") {
+	if !strings.Contains(errs, "HYBRID_PTY_PIPE_OK") {
 		t.Errorf("expected interactive run to use PTY on stdout and pipe on stderr, got out:\n%s\nerr:\n%s", out, errs)
 	}
+	if strings.Contains(out, "HYBRID_PTY_PIPE_OK") {
+		t.Errorf("child output leaked to stdout:\n%s", out)
+	}
 
-	// Case 2: Non-interactive mode (tty = false) -> should fall back to direct pipes
 	e.tty = false
 	code, out, errs = e.run("xbpretty", "install", "-y", "figlet")
 	if code != 0 {
 		t.Fatalf("non-interactive run failed code %d: %s", code, errs)
 	}
-	if !strings.Contains(out, "DIRECT_PIPES_OK") {
+	if !strings.Contains(errs, "DIRECT_PIPES_OK") {
 		t.Errorf("expected non-interactive run to use direct pipes, got out:\n%s\nerr:\n%s", out, errs)
 	}
 
-	// Case 3: Verbose mode with tty = true -> should fall back to direct pipes
 	e.tty = true
 	code, out, errs = e.run("xbpretty", "install", "-v", "-y", "figlet")
 	if code != 0 {
 		t.Fatalf("verbose run failed code %d: %s", code, errs)
 	}
-	if !strings.Contains(out, "DIRECT_PIPES_OK") {
+	if !strings.Contains(errs, "DIRECT_PIPES_OK") {
 		t.Errorf("expected verbose run to use direct pipes, got out:\n%s\nerr:\n%s", out, errs)
 	}
 
-	// Case 4: Interactive mode with progress widget active (default, without --no-progress)
-	// -> child stdout should be consumed by the widget/parser and NOT leaked to stdout!
+	// With the widget active the child stdout is consumed by the parser and
+	// never reaches stdout. There is no completion line any more.
 	e.tty = true
 	code, out, errs = e.run("xbpretty", "install", "-y", "figlet")
 	if code != 0 {
 		t.Fatalf("interactive run with widget failed code %d: %s", code, errs)
 	}
 	if strings.Contains(out, "HYBRID_PTY_PIPE_OK") {
-		t.Errorf("expected child stdout to be suppressed from stdout when widget is active, got:\n%s", out)
+		t.Errorf("child stdout was not suppressed when the widget is active:\n%s", out)
 	}
-	if !strings.Contains(errs, "Transaction complete:") {
-		t.Errorf("expected completion message on stderr, got:\n%s", errs)
+	if !strings.Contains(errs, "Downloading Packages") {
+		t.Errorf("expected the widget on stderr, got:\n%s", errs)
+	}
+	if strings.Contains(errs, "Transaction complete") {
+		t.Errorf("the widget printed a completion line:\n%s", errs)
 	}
 }
-
 func TestHybridPTYLineBufferingDuringUnpack(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.tty = true
 
-	// Custom stub script that writes a line ending in \n, then sleeps.
-	// In a PTY, line-buffered output is flushed immediately on \n without waiting 4KB.
 	stubScript := filepath.Join(e.dir, "buffering-stub")
 	scriptContent := `#!/bin/sh
 case "${1:-}" in
@@ -1921,30 +1939,25 @@ exit 0
 	}
 	e.pointInstallAt(stubScript)
 
-	start := time.Now()
 	code, out, errs := e.run("xbpretty", "install", "-y", "--no-progress", "figlet")
-	duration := time.Since(start)
-
 	if code != 0 {
 		t.Fatalf("run failed code %d: %s", code, errs)
 	}
-	if duration < 350*time.Millisecond {
-		t.Logf("child ran in %v", duration)
+	if !strings.Contains(errs, "figlet-2.2.5_6: unpacking ...") {
+		t.Errorf("expected unpacking line on stderr, got:\n%s", errs)
 	}
-	if !strings.Contains(out, "figlet-2.2.5_6: unpacking ...") {
-		t.Errorf("expected unpacking line in stdout, got:\n%s", out)
+	if !strings.Contains(errs, "figlet-2.2.5_6: installed successfully.") {
+		t.Errorf("expected installed line on stderr, got:\n%s", errs)
 	}
-	if !strings.Contains(out, "figlet-2.2.5_6: installed successfully.") {
-		t.Errorf("expected installed line in stdout, got:\n%s", out)
+	if strings.Contains(out, "figlet-2.2.5_6: unpacking ...") {
+		t.Errorf("child stdout leaked to stdout:\n%s", out)
 	}
 }
-
 func TestHybridTelemetryStreamParsingWithStub(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.tty = true
 
-	// Stub simulates real xbps streaming stderr download ticks and stdout unpacking lines
 	stubScript := filepath.Join(e.dir, "telemetry-stub")
 	scriptContent := `#!/bin/sh
 case "${1:-}" in
@@ -1954,11 +1967,9 @@ case "${1:-}" in
     ;;
 esac
 
-# Simulate stderr download ticks (TTY format with \r)
 printf '[ 0%%] figlet-2.2.5_6.x86_64.xbps: [87KB 50%%] 12MB/s ETA: 00m01s\033[K\r' >&2
 printf 'figlet-2.2.5_6.x86_64.xbps: 87KB [avg rate: 12MB/s]\033[K\n' >&2
 
-# Simulate stdout phase and unpack/configure lines
 printf '[*] Unpacking packages\n'
 printf 'figlet-2.2.5_6: unpacking ...\n'
 printf '[*] Configuring unpacked packages\n'
@@ -1976,15 +1987,17 @@ exit 0
 	if code != 0 {
 		t.Fatalf("run failed code %d: %s", code, errs)
 	}
-
-	if !strings.Contains(out, "figlet-2.2.5_6: unpacking ...") {
-		t.Errorf("expected unpack output in stdout, got:\n%s", out)
+	if !strings.Contains(errs, "figlet-2.2.5_6: unpacking ...") {
+		t.Errorf("expected unpack output on stderr, got:\n%s", errs)
 	}
-	if !strings.Contains(out, "figlet-2.2.5_6: configuring ...") {
-		t.Errorf("expected configure output in stdout, got:\n%s", out)
+	if !strings.Contains(errs, "figlet-2.2.5_6: configuring ...") {
+		t.Errorf("expected configure output on stderr, got:\n%s", errs)
 	}
 	if !strings.Contains(errs, "figlet-2.2.5_6.x86_64.xbps: 87KB [avg rate: 12MB/s]") {
 		t.Errorf("expected download completion line in stderr, got:\n%s", errs)
+	}
+	if strings.Contains(out, "figlet-2.2.5_6: unpacking ...") {
+		t.Errorf("child stdout leaked to stdout:\n%s", out)
 	}
 }
 
@@ -2141,6 +2154,9 @@ func TestProgressBarOptionsAndFlags(t *testing.T) {
 	}
 }
 
+// TestProgressWidgetEndToEndInteractiveSuccess drives AC-046 through a real
+// child: the Download view appears, the handover reaches the Install view,
+// and success tears the box down with no completion line.
 func TestProgressWidgetEndToEndInteractiveSuccess(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
@@ -2155,11 +2171,11 @@ case "${1:-}" in
     ;;
 esac
 
-# Simulate stderr download ticks
 printf '[ 50%%] figlet-2.2.5_6.x86_64.xbps: [45KB 50%%] 10MB/s ETA: 00m01s\033[K\r' >&2
 printf 'figlet-2.2.5_6.x86_64.xbps: 92KB [avg rate: 10MB/s]\033[K\n' >&2
 
-# Simulate stdout unpack / configure lines
+printf '[*] Verifying package integrity\n'
+printf 'figlet-2.2.5_6: verifying SHA256 hash...\n'
 printf '[*] Unpacking packages\n'
 printf 'figlet-2.2.5_6: unpacking ...\n'
 printf '[*] Configuring unpacked packages\n'
@@ -2178,44 +2194,31 @@ exit 0
 		t.Fatalf("run failed code %d: %s", code, errs)
 	}
 
-	// 1. Verify Download Phase container rendered in stderr
-	if !strings.Contains(errs, "Downloading...") {
-		t.Errorf("expected Download Phase container in stderr, got:\n%s", errs)
+	if !strings.Contains(errs, "Downloading Packages") {
+		t.Errorf("expected the Download view on stderr, got:\n%s", errs)
 	}
-	if !strings.Contains(errs, "Total Packages:") {
-		t.Errorf("expected Total Packages in stderr, got:\n%s", errs)
+	if !strings.Contains(errs, "Installing Packages") {
+		t.Errorf("expected the handover to the Install view, got:\n%s", errs)
 	}
-
-	// 2. Verify Unpack/Configure Phase container rendered in stderr
-	if !strings.Contains(errs, "Running xbps...") {
-		t.Errorf("expected Running xbps container in stderr, got:\n%s", errs)
+	if !strings.Contains(errs, " Progress ") {
+		t.Errorf("expected the centred Progress label, got:\n%s", errs)
 	}
-	if !strings.Contains(errs, "Current Target:") {
-		t.Errorf("expected Current Target in stderr, got:\n%s", errs)
+	if !strings.Contains(errs, "\x1b[") {
+		t.Errorf("expected in-place redraws on stderr, got:\n%s", errs)
 	}
-
-	// 3. Verify in-place cursor movement in stderr
-	if !strings.Contains(errs, "\x1b[5A\r") {
-		t.Errorf("expected cursor jumps in stderr, got:\n%s", errs)
+	if strings.Contains(errs, "Transaction complete") || strings.Contains(errs, "✔") {
+		t.Errorf("success printed a completion line:\n%s", errs)
 	}
-
-	// 4. Verify permanent completion line in stderr
-	if !strings.Contains(errs, "✔ Transaction complete:") {
-		t.Errorf("expected completion line in stderr, got:\n%s", errs)
+	if !strings.HasSuffix(errs, "\x1b[J") {
+		t.Errorf("teardown did not clear the box last: %q", errs)
 	}
-	if !strings.Contains(errs, "1 installed") {
-		t.Errorf("expected '1 installed' in summary, got:\n%s", errs)
+	if !strings.Contains(out, "Packages To Install") && !strings.Contains(out, "Install") {
+		t.Errorf("expected the plan summary on stdout, got:\n%s", out)
 	}
-
-	// 5. Verify stdout holds strictly the plan summary (ADR-0005)
-	if !strings.Contains(out, "Install") {
-		t.Errorf("expected plan summary in stdout, got:\n%s", out)
-	}
-	if strings.Contains(out, "Downloading...") || strings.Contains(out, "Running xbps...") {
-		t.Errorf("interactive widget lines leaked to stdout:\n%s", out)
+	if strings.Contains(out, "Downloading Packages") || strings.Contains(out, "Installing Packages") {
+		t.Errorf("widget lines leaked to stdout:\n%s", out)
 	}
 }
-
 func TestProgressWidgetEndToEndFailureClearsBoxAndPrintsStderr(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
@@ -2243,127 +2246,80 @@ exit 1
 	if code != 1 {
 		t.Fatalf("expected code 1, got %d. out:\n%s\nerrs:\n%s", code, out, errs)
 	}
-
-	// Widget should clear 5 lines in stderr using atomic clear
-	if !strings.Contains(errs, "\x1b[5A\r\x1b[0J") {
-		t.Errorf("expected cursor jump clearing box on failure in stderr, got:\n%s", errs)
+	if !strings.Contains(errs, "Downloading Packages") {
+		t.Errorf("expected the widget before the failure, got:\n%s", errs)
 	}
-	// Completion banner should NOT be present
-	if strings.Contains(errs, "✔ Transaction complete:") || strings.Contains(out, "✔ Transaction complete:") {
-		t.Errorf("completion banner should not appear on failure:\n%s", errs)
+	if !strings.Contains(errs, "\x1b[J") {
+		t.Errorf("expected the box to clear on failure, got:\n%s", errs)
 	}
-	// Raw error must be in stderr
+	if strings.Contains(errs, "Transaction complete") || strings.Contains(out, "✔") {
+		t.Errorf("completion banner appeared on failure:\n%s", errs)
+	}
 	if !strings.Contains(errs, "ERROR: [trans] failed to download figlet") {
-		t.Errorf("stderr missing error message:\n%s", errs)
+		t.Errorf("stderr missing the captured child error:\n%s", errs)
 	}
 }
 
-func TestProgressWidgetSuppressedWhenNoProgressOrNonTTY(t *testing.T) {
-	e := newEnv(t)
-	e.root = true
-
-	stubScript := filepath.Join(e.dir, "widget-suppress-stub")
-	scriptContent := `#!/bin/sh
+// TestProgressSuppressionMatrix pins FR-065's suppression matrix: Plain mode,
+// --no-progress, TERM=dumb, -v and a non-TTY stderr all disable the live
+// surface, and the child output is forwarded verbatim on stderr instead.
+func TestProgressSuppressionMatrix(t *testing.T) {
+	stubScript := func(t *testing.T) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "suppress-stub")
+		script := `#!/bin/sh
 case "${1:-}" in
   -*n*)
     printf '%s' "${XB_STUB_STDOUT:-}"
     exit 0
     ;;
 esac
-
-printf 'figlet-2.2.5_6.x86_64.xbps: 92KB [avg rate: 10MB/s]\n' >&2
-printf '[*] Unpacking packages\n'
-printf 'figlet-2.2.5_6: unpacking ...\n'
+printf 'child stdout line\n'
+printf 'child stderr line\n' >&2
 exit 0
 `
-	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	e.pointInstallAt(stubScript)
-
-	// Case 1: --no-progress flag
-	e.tty = true
-	code, out, errs := e.run("xbpretty", "install", "-y", "--no-progress", "figlet")
-	if code != 0 {
-		t.Fatalf("code %d: %s", code, errs)
-	}
-	if strings.Contains(out, "\x1b[5A\r") {
-		t.Errorf("--no-progress should not emit cursor jumps:\n%s", out)
-	}
-	if strings.Contains(out, "╭── Downloading...") {
-		t.Errorf("--no-progress should not render container:\n%s", out)
-	}
-	if !strings.Contains(out, "figlet-2.2.5_6: unpacking ...") {
-		t.Errorf("--no-progress should stream raw lines directly:\n%s", out)
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
 	}
 
-	// Case 2: non-TTY stream (e.tty = false)
-	e.tty = false
-	code, out, errs = e.run("xbpretty", "install", "-y", "figlet")
-	if code != 0 {
-		t.Fatalf("code %d: %s", code, errs)
+	cases := []struct {
+		name   string
+		tty    bool
+		term   string
+		argv   []string
+		config []string
+	}{
+		{name: "--no-progress", tty: true, term: "xterm", argv: []string{"--no-progress"}},
+		{name: "TERM=dumb", tty: true, term: "dumb", argv: nil},
+		{name: "verbose", tty: true, term: "xterm", argv: []string{"-v"}},
+		{name: "non-TTY stderr", tty: false, term: "xterm", argv: nil},
+		{name: "Plain mode", tty: true, term: "xterm", argv: nil, config: []string{"[Ui]", `mode = "Plain"`}},
 	}
-	if strings.Contains(out, "\x1b[5A\r") {
-		t.Errorf("non-TTY should not emit cursor jumps:\n%s", out)
-	}
-	if strings.Contains(out, "╭── Downloading...") {
-		t.Errorf("non-TTY should not render container:\n%s", out)
-	}
-}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.root = true
+			e.tty = tc.tty
+			e.set("TERM", tc.term)
+			e.writeConfig(stubScript(t), tc.config...)
 
-func TestProgressWidgetBoxStylesEndToEnd(t *testing.T) {
-	e := newEnv(t)
-	e.root = true
-	e.tty = true
-
-	stubScript := filepath.Join(e.dir, "widget-style-stub")
-	scriptContent := `#!/bin/sh
-case "${1:-}" in
-  -*n*)
-    printf '%s' "${XB_STUB_STDOUT:-}"
-    exit 0
-    ;;
-esac
-
-printf '[ 50%%] figlet-2.2.5_6.x86_64.xbps: [45KB 50%%] 10MB/s ETA: 00m01s\033[K\r' >&2
-printf '[*] Unpacking packages\n'
-printf 'figlet-2.2.5_6: unpacking ...\n'
-exit 0
-`
-	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	e.pointInstallAt(stubScript)
-
-	// Test classic box style
-	code, out, errs := e.run("xbpretty", "install", "-y", "--box-style=classic", "figlet")
-	if code != 0 {
-		t.Fatalf("classic code %d: %s", code, errs)
-	}
-	if !strings.Contains(out, "Install") {
-		t.Errorf("stdout missing classic plan summary:\n%s", out)
-	}
-	plain := ansiEscape.ReplaceAllString(errs, "")
-	if !strings.Contains(plain, "┌── Downloading...") {
-		t.Errorf("classic style missing classic download header in stderr:\n%s", errs)
-	}
-	if !strings.Contains(plain, "┌── Running xbps...") {
-		t.Errorf("classic style missing classic running header in stderr:\n%s", errs)
-	}
-
-	// Test ascii box style
-	code, out, errs = e.run("xbpretty", "install", "-y", "--box-style=ascii", "figlet")
-	if code != 0 {
-		t.Fatalf("ascii code %d: %s", code, errs)
-	}
-	if !strings.Contains(out, "Install") {
-		t.Errorf("stdout missing ascii plan summary:\n%s", out)
-	}
-	plain = ansiEscape.ReplaceAllString(errs, "")
-	if !strings.Contains(plain, "+-- Downloading...") {
-		t.Errorf("ascii style missing ascii download header in stderr:\n%s", errs)
-	}
-	if !strings.Contains(plain, "+-- Running xbps...") {
-		t.Errorf("ascii style missing ascii running header in stderr:\n%s", errs)
+			argv := append([]string{"xbpretty", "install", "-y"}, tc.argv...)
+			argv = append(argv, "figlet")
+			code, out, errs := e.run(argv...)
+			if code != 0 {
+				t.Fatalf("exit = %d\n%s", code, errs)
+			}
+			if !strings.Contains(errs, "child stdout line") || !strings.Contains(errs, "child stderr line") {
+				t.Errorf("child output was not forwarded on stderr:\n%s", errs)
+			}
+			if strings.Contains(errs, "Downloading Packages") || strings.Contains(errs, "\r\x1b[2K") {
+				t.Errorf("a live surface drew under suppression:\n%q", errs)
+			}
+			if strings.Contains(out, "child stdout line") {
+				t.Errorf("child stdout leaked to stdout:\n%s", out)
+			}
+		})
 	}
 }

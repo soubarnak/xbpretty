@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/soubarnak/xbpretty/internal/config"
@@ -97,14 +100,69 @@ func (st *state) runFetch(opts *options) int {
 		}
 	}
 
-	report := fetch.ProbeAll(context.Background(), fetch.ProbeOptions{
+	// FR-064's Testing Mirrors view is fed from #73's ProgressEvent stream.
+	// Ctrl-C cancels the round: xbpretty owns these requests, so it tears the
+	// view down, prints the interruption and exits 130 (FR-072).
+	var live *liveProgress
+	progress := mirrorScoreEvents
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	var (
+		sigMu     sync.Mutex
+		delivered os.Signal
+	)
+	go func() {
+		select {
+		case sig := <-sigCh:
+			sigMu.Lock()
+			delivered = sig
+			sigMu.Unlock()
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	if mode := st.mirrorLiveMode(opts); mode != liveOff {
+		model := newProgressModel("mirror", nil, nil)
+		live = newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode, model, st.theme)
+		st.r.live = true
+		st.r.liveProgress = live
+		defer live.Finish()
+		// Seed the known total before the first frame so it never renders as
+		// an empty or every-mirror-done box.
+		live.Apply(true, func(m *progressModel) { m.mirrorTotal = len(mirrors) })
+		progress = func(event fetch.ProgressEvent) {
+			mirrorScoreEvents(event)
+			live.Apply(true, func(m *progressModel) {
+				m.mirrorEvent(event.Finished, event.Done, event.Total, event.Elapsed)
+			})
+		}
+	}
+	report := fetch.ProbeAll(ctx, fetch.ProbeOptions{
 		Client:      client,
 		Mirrors:     mirrors,
 		PrimaryPath: repos.Primary,
 		Arch:        arch,
 		UserAgent:   userAgent,
-		Progress:    mirrorScoreEvents,
+		Progress:    progress,
 	})
+	if live != nil {
+		live.Finish()
+		st.r.live = false
+		st.r.liveProgress = nil
+	}
+	if ctx.Err() != nil {
+		sigMu.Lock()
+		interruptedBy := delivered
+		sigMu.Unlock()
+		fmt.Fprintln(st.stderr, "xbpretty: interrupted")
+		if interruptedBy == syscall.SIGTERM {
+			return 128 + int(syscall.SIGTERM)
+		}
+		return exitInterrupted
+	}
 	if len(report.Failures) > 0 {
 		if st.r != nil && st.r.verbose {
 			for _, failure := range report.Failures {
@@ -382,4 +440,13 @@ func runtimeXBPSArch() string {
 	default:
 		return runtime.GOARCH
 	}
+}
+
+// mirrorLiveMode applies the suppression matrix to the fetch probe: the
+// MirrorScore view is part of a real run, not a dry run.
+func (st *state) mirrorLiveMode(opts *options) liveMode {
+	if opts.dryRun {
+		return liveOff
+	}
+	return st.liveMode()
 }

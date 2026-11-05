@@ -46,11 +46,12 @@ type runner struct {
 	lastStdout string
 	quiet      bool
 
-	stdout io.Writer
-	stderr io.Writer
-	stdin  io.Reader
-	parser *StreamParser
-	widget *ProgressWidget
+	stdout       io.Writer
+	stderr       io.Writer
+	stdin        io.Reader
+	parser       *StreamParser
+	live         bool
+	liveProgress *liveProgress
 
 	// verboseMu serialises the verbose line written by the discovery worker
 	// pool, where several xbps-query children run at once.
@@ -78,6 +79,9 @@ type state struct {
 	simple      bool
 	full        bool
 	historyDir  string
+	// downloadSink receives FR-041's event stream. It is created lazily by the
+	// predownload pass so a run that never downloads allocates nothing.
+	downloadSink downloadSink
 
 	// promptScanner is the one reader over stdin. A transaction can ask twice
 	// (primary then implicit orphan), so a single scanner keeps the answers
@@ -255,6 +259,10 @@ func (st *state) dispatch(opts *options) int {
 		}
 		return st.runHistory(opts)
 	case "undo", "redo":
+		// #70 owns replay. When undo/redo start running a real transaction
+		// (FR-033), they are real transactions under FR-036 too: their plan
+		// closure must go through st.predownload between the checks and the
+		// child, exactly like the six transaction commands above.
 		return st.runUnimplemented(opts.command, opts)
 	}
 	fmt.Fprintf(st.stderr, "xbpretty: unknown command %q\n", opts.command)

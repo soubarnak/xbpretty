@@ -167,30 +167,41 @@ func PlannedDownloadRows(rows []xbps.Row) []xbps.Row {
 	return out
 }
 
+// PartitionDownloadRows splits FR-036's downloading rows into the http(s)
+// rows that become targets and the excluded repository kinds. One predicate
+// decides both the download set and the FR-037 warning counts, so the warning
+// and the targets can never disagree.
+func PartitionDownloadRows(rows []xbps.Row) (remote []xbps.Row, excludedFTP, excludedLocal int) {
+	for _, row := range rows {
+		if !isDownloadingAction(row.Action) {
+			continue
+		}
+		switch {
+		case IsFTPRepository(row.Repo):
+			excludedFTP++
+		case !IsRemoteRepository(row.Repo):
+			excludedLocal++
+		default:
+			if row.DownloadSize == 0 && !(row.Action == ActionDownload && !row.HasDownload) {
+				continue
+			}
+			remote = append(remote, row)
+		}
+	}
+	return remote, excludedFTP, excludedLocal
+}
+
 // TargetsFromRows builds FR-036 predownload targets from plan rows and the
 // bulk filename-sha256 map. It returns how many ftp:// and local/other rows
 // were excluded so #72 can print the FR-037 warnings. ftp:// rows never reach
 // the engine, so its `xbp download`-specific error text cannot leak into the
 // predownload path.
 func TargetsFromRows(rows []xbps.Row, hashes map[HashKey]string) (targets []Target, excludedFTP, excludedLocal int, err error) {
-	for _, row := range rows {
-		if !isDownloadingAction(row.Action) {
-			continue
-		}
-		if IsFTPRepository(row.Repo) {
-			excludedFTP++
-			continue
-		}
-		if !IsRemoteRepository(row.Repo) {
-			excludedLocal++
-			continue
-		}
-		if row.DownloadSize == 0 && !(row.Action == ActionDownload && !row.HasDownload) {
-			continue
-		}
+	remote, excludedFTP, excludedLocal := PartitionDownloadRows(rows)
+	for _, row := range remote {
 		target, err := TargetFromRow(row, hashes[HashKeyFor(row.Repo, row.Pkgver())])
 		if err != nil {
-			return nil, 0, 0, err
+			return nil, excludedFTP, excludedLocal, err
 		}
 		targets = append(targets, target)
 	}
