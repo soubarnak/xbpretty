@@ -273,6 +273,14 @@ func (st *state) renderSummary(rows []xbps.Row) int {
 	sum := st.planToSummary(rows)
 	if st.opts != nil {
 		sum.Command = st.opts.command
+		if purgeRequested(st.opts.command, st.opts) {
+			switch st.opts.command {
+			case "remove":
+				sum.Command = "purge"
+			case "autoremove":
+				sum.Command = "autopurge"
+			}
+		}
 	}
 	stdoutTTY := isTTY(st.stdout)
 	// FR-062: the rule width is the stdout terminal width, else a positive

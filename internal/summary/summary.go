@@ -17,8 +17,8 @@ const (
 	actionReinstall = "reinstall"
 )
 
-// ManualHold is the only held reason xbps can supply.
-const ManualHold = "Manual hold"
+// manualHold is the only held reason xbps can supply.
+const manualHold = "Manual hold"
 
 // Row is one package line of an xbps dry-run transaction plan, as parsed by
 // internal/xbps.
@@ -78,10 +78,10 @@ func Build(rows []Row, held map[string]bool, old map[string]Old) *Summary {
 		isHeld := held[row.Name] || row.Action == actionHold
 		if isHeld {
 			// A held package is left out of the transaction: xbps fetches
-			// and unpacks nothing for it, so it is reported under Hold and
+			// and unpacks nothing for it, so it is reported under Held and
 			// nowhere else (FR-011).
 			if row.Reason == "" {
-				row.Reason = ManualHold
+				row.Reason = manualHold
 			}
 			s.Hold = append(s.Hold, row)
 			continue
@@ -121,28 +121,6 @@ func (s *Summary) addFetched(row Row) {
 	if row.HasInstalled {
 		s.AddBytes += row.InstalledSize
 	}
-}
-
-// Counts holds the number of packages in each group.
-type Counts struct {
-	Install, ReInstall, Upgrade, Remove, Configure, Hold int
-}
-
-// Counts returns how many packages landed in each group.
-func (s *Summary) Counts() Counts {
-	return Counts{
-		Install:   len(s.Install),
-		ReInstall: len(s.ReInstall),
-		Upgrade:   len(s.Upgrade),
-		Remove:    len(s.Remove),
-		Configure: len(s.Configure),
-		Hold:      len(s.Hold),
-	}
-}
-
-// Total returns whether the transaction would change anything.
-func (s *Summary) Total() int {
-	return len(s.Install) + len(s.ReInstall) + len(s.Upgrade) + len(s.Remove) + len(s.Configure)
 }
 
 // NetDiskBytes is FR-012's net delta: new installed size minus old installed
@@ -437,17 +415,25 @@ func (r Renderer) paint(role Role, text string) string {
 	return prefix + text + resetSeq
 }
 
-// Human renders a byte count the way the summary shows sizes: [Ui] Binary,
-// precision 0, strict '>' (FR-062).
-func Human(n uint64) string { return HumanUnit(n, SizeBinary) }
+// Human renders a widget size: Binary, precision 1 (FR-064). It is kept as
+// the precision-1 compatibility helper alongside WidgetSize.
+func Human(n uint64) string { return WidgetSize(n) }
 
-// HumanUnit renders a byte count with the requested [Ui] unit, precision 0,
-// and nala's strict '>' unit switch.
-func HumanUnit(n uint64, unit SizeUnit) string {
+// WidgetSize renders a byte count the way the progress widget does: always
+// Binary, precision 1, independent of [Ui] unit (FR-064, ADR-0012 §5).
+func WidgetSize(n uint64) string { return formatUnit(n, SizeBinary, 1) }
+
+// HumanUnit renders a summary size: the requested [Ui] unit, precision 0, and
+// nala's strict '>' unit switch (FR-062).
+func HumanUnit(n uint64, unit SizeUnit) string { return formatUnit(n, unit, 0) }
+
+// formatUnit reproduces nala's UnitStr::str: precision digits, a strict '>'
+// unit switch, and no unit below the base.
+func formatUnit(n uint64, unit SizeUnit, precision int) string {
 	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
 	divisor := 1024.0
 	if unit == SizeDecimal {
-		units = []string{"B", "kB", "MB", "GB", "TB", "PB"}
+		units = []string{"B", "KB", "MB", "GB", "TB", "PB"}
 		divisor = 1000.0
 	}
 	value := float64(n)
@@ -456,5 +442,5 @@ func HumanUnit(n uint64, unit SizeUnit) string {
 		value /= divisor
 		u++
 	}
-	return fmt.Sprintf("%.0f %s", value, units[u])
+	return fmt.Sprintf("%.*f %s", precision, value, units[u])
 }

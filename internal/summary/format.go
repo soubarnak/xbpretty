@@ -16,7 +16,11 @@ func stripANSI(s string) string {
 	return ansiRegex.ReplaceAllString(s, "")
 }
 
-// VisibleWidth returns the terminal display width in runes, ignoring ANSI codes.
+// VisibleWidth returns the display width in runes, ignoring ANSI codes.
+//
+// This is deliberately rune-based, not East-Asian-width aware: xbps package
+// names, versions, reasons and the summary's own glyphs are ASCII, so one
+// rune is one terminal column for every inline surface.
 func VisibleWidth(s string) int {
 	return utf8.RuneCountInString(stripANSI(s))
 }
@@ -236,20 +240,6 @@ func BoxCharacterSet(style string) BoxChars {
 
 func itoa(n uint64) string {
 	return strconv.FormatUint(n, 10)
-}
-
-// width is the display width of s in columns, ignoring ANSI escape sequences.
-func width(s string) int { return visibleWidth(s) }
-
-// widest returns the display width of the longest of n values produced by f.
-func widest(f func(int) string, n int) int {
-	max := 0
-	for i := 0; i < n; i++ {
-		if w := width(f(i)); w > max {
-			max = w
-		}
-	}
-	return max
 }
 
 // PadRight fills s out to w columns.

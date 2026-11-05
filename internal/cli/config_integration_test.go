@@ -140,7 +140,7 @@ func TestConfigRelativeXDGFallsBackToHome(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d\n%s", code, errs)
 	}
-	if !strings.Contains(out, "kB") || strings.Contains(out, "KiB") {
+	if !strings.Contains(out, "KB") || strings.Contains(out, "KiB") {
 		t.Errorf("relative XDG_CONFIG_HOME did not fall back to ~/.config:\n%s", out)
 	}
 }
@@ -162,7 +162,7 @@ func TestConfigSudoUserSuppressesXDG(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, XDG was not ignored under sudo:\n%s", code, errs)
 	}
-	if !strings.Contains(out, "kB") {
+	if !strings.Contains(out, "KB") {
 		t.Errorf("invoking user's layer did not apply:\n%s", out)
 	}
 	if strings.Contains(errs, "xbpretty: config ") {
@@ -185,7 +185,7 @@ func TestConfigLayersComposeAndLaterLayerWins(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d\n%s", code, errs)
 	}
-	if !strings.Contains(out, "KiB") || strings.Contains(out, "kB") {
+	if !strings.Contains(out, "KiB") || strings.Contains(out, "KB") {
 		t.Errorf("user layer did not win the colliding [Ui] unit key:\n%s", out)
 	}
 
@@ -225,7 +225,7 @@ func TestConfigFlagReplacesBothLayers(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, --config did not replace both layers:\n%s", code, errs)
 	}
-	if !strings.Contains(out, "kB") {
+	if !strings.Contains(out, "KB") {
 		t.Errorf("selected layer did not apply:\n%s", out)
 	}
 	_, dbg, code := runBinary(t, bin, env, "--debug", "--config", cfgPath, "install", "--dry-run", "--no-sync", "figlet")
@@ -383,7 +383,7 @@ func TestConfigTrustGateUnderRoot(t *testing.T) {
 		if strings.Contains(errs, "ignoring [Xbps]") {
 			t.Errorf("trusted file was ignored:\n%s", errs)
 		}
-		if !strings.Contains(out, "kB") {
+		if !strings.Contains(out, "KB") {
 			t.Errorf("non-privileged key did not apply:\n%s", out)
 		}
 	})
@@ -408,7 +408,7 @@ func TestConfigTrustGateUnderRoot(t *testing.T) {
 			!strings.Contains(errs, "mode 0644)") {
 			t.Errorf("missing the exact trust warning:\n%s", errs)
 		}
-		if !strings.Contains(out, "kB") {
+		if !strings.Contains(out, "KB") {
 			t.Errorf("non-privileged keys must still apply:\n%s", out)
 		}
 		log, err := os.ReadFile(filepath.Join(dir, "commands.log"))
@@ -497,7 +497,7 @@ func TestConfigSystemLayerIsNotAutomaticallyTrusted(t *testing.T) {
 	if !strings.Contains(errs, "ignoring [Xbps] install_path:") {
 		t.Errorf("the user-owned system layer was trusted:\n%s", errs)
 	}
-	if !strings.Contains(out, "kB") {
+	if !strings.Contains(out, "KB") {
 		t.Errorf("non-privileged system keys did not apply:\n%s", out)
 	}
 }
@@ -562,7 +562,7 @@ func TestConfigSudoUserBinaryPathIsIgnored(t *testing.T) {
 	if !strings.Contains(string(log), "-n figlet") {
 		t.Errorf("the PATH stub never ran:\n%s", log)
 	}
-	if !strings.Contains(out, "kB") {
+	if !strings.Contains(out, "KB") {
 		t.Errorf("the invoking user's non-privileged keys did not apply:\n%s", out)
 	}
 }

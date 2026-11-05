@@ -43,6 +43,10 @@ exit 2
 }
 
 func summaryGoldenConfig(t *testing.T, dir, query string) (cfgDir, logPath string) {
+	return summaryGoldenConfigExtra(t, dir, query)
+}
+
+func summaryGoldenConfigExtra(t *testing.T, dir, query string, extra ...string) (cfgDir, logPath string) {
 	t.Helper()
 	stubDir, err := filepath.Abs("../../testdata/stub")
 	if err != nil {
@@ -62,6 +66,10 @@ func summaryGoldenConfig(t *testing.T, dir, query string) (cfgDir, logPath strin
 		`mode = "Always"`,
 		"",
 	}, "\n")
+	body += strings.Join(extra, "\n")
+	if len(extra) > 0 && !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
 	if err := os.WriteFile(filepath.Join(cfgDir, "xbpretty", "config.toml"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -120,5 +128,49 @@ func TestSummaryGoldensThroughTheBuiltBinary(t *testing.T) {
 				t.Errorf("frame differs from %s\n--- got ---\n%s\n--- want ---\n%s", tt.golden, got, want)
 			}
 		})
+	}
+}
+
+// TestCustomThemeOverrideBytes drives [Color.theme] through the built binary
+// and pins the exact SGR bytes: a secondary role keeps bold but changes fg,
+// while an indexed Notice with no modifier emits 0;38;5;202.
+func TestCustomThemeOverrideBytes(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	query := writeSummaryGoldenQuery(t, dir)
+	cfgDir, logPath := summaryGoldenConfigExtra(t, dir, query,
+		"[Color.theme]",
+		`Secondary = { fg = "Red" }`,
+		`Notice = { fg = 202, modifier = "" }`,
+	)
+	cmd := exec.Command(bin, "install", "--dry-run", "fixture")
+	cmd.Env = append(os.Environ(),
+		"XDG_CONFIG_HOME="+cfgDir,
+		"XDG_STATE_HOME="+filepath.Join(dir, "state"),
+		"XB_STUB_LOG="+logPath,
+		"XB_STUB_STDOUT="+summaryGoldenPlan,
+		"XB_STUB_STDERR=",
+		"XB_STUB_HOLD=",
+		"XB_STUB_OLD=",
+		"COLUMNS=80",
+		"NO_COLOR=",
+	)
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run: %v\n%s", err, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"\x1b[1;31mfiglet\x1b[0m",
+		"\x1b[0;38;5;202macl\x1b[0m",
+		"1.\x1b[0;38;5;202m3\x1b[0m.\x1b[0;38;5;202m0_1\x1b[0m",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("custom theme output is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "\x1b[1;94m") {
+		t.Errorf("the default Secondary prefix leaked through a custom theme:\n%s", out)
 	}
 }

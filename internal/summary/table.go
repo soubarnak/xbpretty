@@ -222,11 +222,15 @@ func wrapPlainCell(s string, w int) []string {
 		}
 		runes := []rune(word)
 		for len(runes) > w {
-			flush()
+			if cur.Len() > 0 {
+				flush()
+			}
 			lines = append(lines, string(runes[:w]))
 			runes = runes[w:]
 		}
-		cur.WriteString(string(runes))
+		if len(runes) > 0 {
+			cur.WriteString(string(runes))
+		}
 	}
 	if cur.Len() > 0 || len(lines) == 0 {
 		flush()

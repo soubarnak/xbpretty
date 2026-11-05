@@ -112,6 +112,13 @@ func TestRendererGoldens(t *testing.T) {
 				Color: false, Width: 80, Unit: SizeBinary, Theme: DefaultTheme(),
 			},
 		},
+		{
+			name:   "no colour at 100 columns",
+			golden: "summary-100.nocolor.txt",
+			renderer: Renderer{
+				Color: false, Width: 100, Unit: SizeBinary, Theme: DefaultTheme(),
+			},
+		},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -126,11 +133,19 @@ func TestRendererGoldens(t *testing.T) {
 	}
 }
 
-// TestFramesAreStrippedTheSameWay guards the .txt copies: the no-colour frame
-// must be exactly the coloured frame with ANSI removed.
+// TestFramesAreStrippedTheSameWay guards the .txt copies: each no-colour text
+// frame must be exactly its coloured frame with ANSI removed.
 func TestFramesAreStrippedTheSameWay(t *testing.T) {
-	if got, want := stripANSI(readGolden(t, "summary-80.sgr")), readGolden(t, "summary-80.txt"); got != want {
-		t.Errorf("stripped 80-column frame differs\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	for _, stem := range []string{
+		"summary-80",
+		"summary-100",
+		"summary-80.piped",
+		"summary-100.piped",
+		"summary-simple",
+	} {
+		if got, want := stripANSI(readGolden(t, stem+".sgr")), readGolden(t, stem+".txt"); got != want {
+			t.Errorf("stripped %s frame differs\n--- got ---\n%s\n--- want ---\n%s", stem, got, want)
+		}
 	}
 }
 
@@ -271,7 +286,8 @@ func TestSizeUnitsUseStrictGreater(t *testing.T) {
 		{12 * testMiB, SizeBinary, "12 MiB"},
 		{1 * testGiB, SizeBinary, "1024 MiB"},
 		{1000, SizeDecimal, "1000 B"},
-		{1000 * 1000, SizeDecimal, "1000 kB"},
+		{500000, SizeDecimal, "500 KB"},
+		{1000 * 1000, SizeDecimal, "1000 KB"},
 		{1000 * 1000 * 1000, SizeDecimal, "1000 MB"},
 	}
 	for _, tt := range tests {
@@ -279,8 +295,11 @@ func TestSizeUnitsUseStrictGreater(t *testing.T) {
 			t.Errorf("HumanUnit(%d, %q) = %q, want %q", tt.in, tt.unit, got, tt.want)
 		}
 	}
-	if got := Human(1 * testMiB); got != "1024 KiB" {
-		t.Errorf("Human(1 MiB) = %q, want 1024 KiB", got)
+	if got := WidgetSize(1 * testMiB); got != "1024.0 KiB" {
+		t.Errorf("WidgetSize(1 MiB) = %q, want 1024.0 KiB", got)
+	}
+	if got := Human(1536); got != "1.5 KiB" {
+		t.Errorf("Human(1536) = %q, want 1.5 KiB", got)
 	}
 }
 
@@ -315,6 +334,9 @@ func TestSectionsUseTheFixedOrderAndIncludeConfigure(t *testing.T) {
 	out := b.String()
 	if !strings.Contains(out, "Configure") || !strings.Contains(out, "cfg") {
 		t.Errorf("configure rows are not listed under Configure:\n%s", out)
+	}
+	if !strings.Contains(out, "\x1b[1;93mcfg\x1b[0m") {
+		t.Errorf("configure package names are not Notice:\n%s", out)
 	}
 	if !strings.Contains(out, "Configure 1") {
 		t.Errorf("footer does not count Configure:\n%s", out)
@@ -485,5 +507,155 @@ func TestTruncateVisible(t *testing.T) {
 		if w := utf8.RuneCountInString(stripANSI(got)); w != tt.wantW {
 			t.Errorf("TruncateVisible(%q, %d) width = %d, want %d", tt.input, tt.maxWidth, w, tt.wantW)
 		}
+	}
+}
+
+// TestWidgetSizePrecision pins FR-064's widget size rule: Binary, precision 1.
+func TestWidgetSizePrecision(t *testing.T) {
+	tests := []struct {
+		in   uint64
+		want string
+	}{
+		{1536, "1.5 KiB"},
+		{436410, "426.2 KiB"},
+		{19 * testMiB, "19.0 MiB"},
+		{1024, "1024.0 B"},
+	}
+	for _, tt := range tests {
+		if got := WidgetSize(tt.in); got != tt.want {
+			t.Errorf("WidgetSize(%d) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestSectionSize pins the operation-specific Size: source: the install
+// family (including upgrade and held) shows the download size when present;
+// remove and configure show the installed size they free.
+func TestSectionSize(t *testing.T) {
+	row := Row{
+		InstalledSize: 4096, HasInstalled: true,
+		DownloadSize: 1024, HasDownload: true,
+	}
+	tests := []struct {
+		op   string
+		want uint64
+		ok   bool
+	}{
+		{"upgrade", 1024, true},
+		{"held", 1024, true},
+		{"reinstall", 1024, true},
+		{"install", 1024, true},
+		{"remove", 4096, true},
+		{"configure", 4096, true},
+	}
+	for _, tt := range tests {
+		got, ok := sectionSize(tt.op, row)
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("sectionSize(%q) = (%d, %v), want (%d, %v)", tt.op, got, ok, tt.want, tt.ok)
+		}
+	}
+	noDownload := Row{InstalledSize: 1234, HasInstalled: true}
+	if got, ok := sectionSize("upgrade", noDownload); got != 1234 || !ok {
+		t.Errorf("sectionSize falls back to installed size, got (%d, %v)", got, ok)
+	}
+	if _, ok := sectionSize("install", Row{}); ok {
+		t.Error("sectionSize reports a size when the row has none")
+	}
+}
+
+// TestHeldDiffFiveColumnSectionBytes pins the whole 5-column Held frame
+// (versions differ + reason): old raw, new diffed, reason, right-aligned size.
+func TestHeldDiffFiveColumnSectionBytes(t *testing.T) {
+	s := Build(
+		[]Row{{
+			Name: "acl", Version: "2.5.0_1", Action: actionHold,
+			InstalledSize: 20 * testKiB, HasInstalled: true,
+		}},
+		nil,
+		map[string]Old{"acl": {Version: "2.4.0_1", InstalledSize: 20 * testKiB, HasSize: true}},
+	)
+	var b strings.Builder
+	if err := (Renderer{Width: 80, Theme: DefaultTheme()}).Render(&b, s); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	want := strings.Join([]string{
+		"================================================================================",
+		" Held",
+		"================================================================================",
+		" Package:       Old Version:      New Version:      Reason:               Size: ",
+		" acl            2.4.0_1           2.5.0_1           Manual hold          20 KiB ",
+		"================================================================================",
+		" Summary",
+		"================================================================================",
+		" Held 1",
+		"",
+		" Disk space required: 0 B",
+		"",
+	}, "\n") + "\n"
+	if got := b.String(); got != want {
+		t.Errorf("held diff frame differs\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestReInstallSection covers the separate ReInstall operation: Notice name,
+// version-diff columns, download-based size and its own footer count.
+func TestReInstallSection(t *testing.T) {
+	s := Build(
+		[]Row{{
+			Name: "curl", Version: "8.22.0_1", Action: actionReinstall,
+			DownloadSize: 274590, HasDownload: true,
+			InstalledSize: 682921, HasInstalled: true,
+		}},
+		nil,
+		map[string]Old{"curl": {Version: "8.21.0_1", InstalledSize: 680000, HasSize: true}},
+	)
+	var b strings.Builder
+	if err := (Renderer{Color: true, Width: 80, Theme: DefaultTheme()}).Render(&b, s); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := b.String()
+	if !strings.Contains(stripANSI(out), "\n ReInstall\n") {
+		t.Errorf("missing ReInstall section:\n%s", out)
+	}
+	if !strings.Contains(out, "\x1b[1;93mcurl\x1b[0m") {
+		t.Errorf("reinstall package name is not Notice:\n%s", out)
+	}
+	if !strings.Contains(out, "Old Version:") || !strings.Contains(out, "New Version:") {
+		t.Errorf("reinstall row is missing version columns:\n%s", out)
+	}
+	if !strings.Contains(out, "268 KiB") {
+		t.Errorf("reinstall size does not use the download size:\n%s", out)
+	}
+	if !strings.Contains(out, "ReInstall 1") {
+		t.Errorf("footer is missing the ReInstall count:\n%s", out)
+	}
+}
+
+// TestWrapPlainCellSqueezedTokenHasNoBlankLines guards the hard-split path: a
+// single long token must not flush an empty line before its first chunk.
+func TestWrapPlainCellSqueezedTokenHasNoBlankLines(t *testing.T) {
+	token := strings.Repeat("x", 43)
+	lines := wrapCell(token, 30)
+	want := []string{strings.Repeat("x", 30), strings.Repeat("x", 13)}
+	if len(lines) != len(want) {
+		t.Fatalf("wrapCell(%q, 30) = %q, want %q", token, lines, want)
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Errorf("line %d = %q, want %q", i, lines[i], want[i])
+		}
+	}
+}
+
+// TestVisibleWidthIsRuneBased documents and pins the ASCII-only assumption:
+// the inline surfaces count runes, not East-Asian display cells.
+func TestVisibleWidthIsRuneBased(t *testing.T) {
+	for _, s := range []string{"figlet", "é", "界"} {
+		if got := VisibleWidth(s); got != 1 && got != len([]rune(s)) {
+			t.Errorf("VisibleWidth(%q) = %d, want one column per rune", s, got)
+		}
+	}
+	if got := VisibleWidth("a\x1b[1;39mb\x1b[0m"); got != 2 {
+		t.Errorf("VisibleWidth ignores ANSI: got %d, want 2", got)
 	}
 }

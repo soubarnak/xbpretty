@@ -273,3 +273,17 @@ func TestProgressWidgetDynamicResize(t *testing.T) {
 		}
 	}
 }
+
+// TestProgressWidgetUsesWidgetPrecision pins FR-064/ADR-0012's widget size
+// rule through the widget's own formatter: Binary, precision 1.
+func TestProgressWidgetUsesWidgetPrecision(t *testing.T) {
+	w := NewProgressWidget(&bytes.Buffer{}, "rounded", false, 80, 1, 436410)
+	w.downloadedBytes = 1536
+	line := w.buildDownloadLine3()
+	if !strings.Contains(line, "1.5 KiB") {
+		t.Errorf("downloaded size is not precision 1: %q", line)
+	}
+	if !strings.Contains(line, "426.2 KiB") {
+		t.Errorf("total size is not precision 1: %q", line)
+	}
+}
