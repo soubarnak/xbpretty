@@ -1,0 +1,4 @@
+CMD: xbps-query -S bash
+EXIT: 0
+NOTE: captured on the host to pin the nested `alternatives` dictionary shape:
+two-space group keys (`sh:`) followed by tab-indented values.

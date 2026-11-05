@@ -174,11 +174,6 @@ type MachineVirtual struct {
 // Machine converts a package row to its schema-1 object. Properties is only
 // set by show -m.
 func (r Row) Machine() MachinePackage {
-	repository := ""
-	if r.Repository != "" {
-		repository = strings.TrimPrefix(r.Repository, "https://")
-		repository = strings.TrimPrefix(repository, "http://")
-	}
 	return MachinePackage{
 		Schema:           SchemaVersion,
 		Kind:             "package",
@@ -187,7 +182,7 @@ func (r Row) Machine() MachinePackage {
 		Version:          r.Version,
 		Revision:         r.Revision,
 		Architecture:     r.Architecture,
-		Repository:       repository,
+		Repository:       r.Repository,
 		Installed:        r.Installed,
 		InstalledVersion: r.InstalledVersion,
 		Automatic:        r.Automatic,

@@ -268,6 +268,8 @@ func (r *runner) echo(name string, args []string) {
 	if len(args) > 0 {
 		line += " " + strings.Join(args, " ")
 	}
+	r.verboseMu.Lock()
+	defer r.verboseMu.Unlock()
 	fmt.Fprintln(r.out, "verbose: "+line)
 }
 

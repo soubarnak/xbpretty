@@ -13,6 +13,7 @@ byte, with the command and exit code in the `.meta` beside it.
 | `<pkg>.txt` | `xbps-query -p pkgver,installed_size <pkg>` | the old version and installed size, on two lines: the pkgver first, the size second |
 | `hold.txt` | `xbps-query -H` | one pkgver per held package, and nothing at all when none are |
 | `missing.txt` | `xbps-query -p pkgver,installed_size this-package-does-not-exist-xyz` | an empty answer with exit 2 for a package that is not installed |
+| `bash.txt` | `xbps-query -S bash` | the nested `alternatives` dictionary: a two-space group key followed by tab-indented values |
 
 The first line of a `<pkg>.txt` is a **pkgver**, not a bare version:
 `xbps-0.60.7_1`, not `0.60.7_1`. The summary shows an upgrade as

@@ -20,7 +20,6 @@ type discoveryNeeds struct {
 	holds       bool
 	orphans     bool
 	repolocked  bool
-	machine     bool
 	plan        bool
 	description bool
 	virtual     bool
@@ -129,43 +128,34 @@ func (st *state) loadSnapshot(needs discoveryNeeds) (*snapshot, int, bool) {
 		s.parseNames(res.stdout, s.repolocked)
 	}
 
-	// The repository pass is required: it is the half of the universe that is
-	// not in the pkgdb.
+	// The repository pass carries the human descriptions; the architecture
+	// pass carries every (repository, pkgver) variant. Measured on xbps
+	// 0.60.7: `-p repository` returns no rows in repository mode, while
+	// `-p architecture` returns `pkgver: arch (repository)` for every row.
 	res, ok := st.runQuery("-R", "-s", "")
 	if !ok {
 		return nil, res.exitCode, false
 	}
-	prop, ok := st.runQuery("-R", "-s", "", "-p", "repository")
+	repoDesc := parseRepositoryDescriptions(res.stdout)
+	archRes, ok := st.runQuery("-R", "-s", "", "-p", "architecture")
 	if !ok {
-		return nil, prop.exitCode, false
+		return nil, archRes.exitCode, false
 	}
-	repoByPkgver := parseRepositoryProperty(prop.stdout)
-	archByPkgver, archRepo := map[string]string{}, map[string]string{}
-	// xbps 0.60.7 returns no rows for `-R -s '' -p repository`; the property
-	// search only carries the repository on the parenthesised suffix of other
-	// properties. Fall back to the architecture pass only when the repository
-	// pass yielded nothing, so the normal fixture shape keeps its exact pass
-	// set and a host without repository rows still attributes packages.
-	if needs.machine || len(repoByPkgver) == 0 {
-		arch, ok := st.runQuery("-R", "-s", "", "-p", "architecture")
-		if !ok {
-			return nil, arch.exitCode, false
-		}
-		archByPkgver, archRepo = parseArchitectureProperty(arch.stdout)
-	}
-	for pkgver, repo := range archRepo {
-		if repoByPkgver[pkgver] == "" {
-			repoByPkgver[pkgver] = repo
-		}
-	}
-	s.parseRepository(res.stdout, repoByPkgver, archByPkgver)
+	s.parseRepository(parseArchitectureRows(archRes.stdout), repoDesc)
 
 	if needs.description {
-		res, ok := st.runQuery("-R", "-s", "", "-p", "long_desc")
+		installedDesc, ok := st.runQuery("-s", "", "-p", "long_desc")
 		if !ok {
-			return nil, res.exitCode, false
+			return nil, installedDesc.exitCode, false
 		}
-		s.longDesc = parseDescriptionProperty(res.stdout)
+		repoLong, ok := st.runQuery("-R", "-s", "", "-p", "long_desc")
+		if !ok {
+			return nil, repoLong.exitCode, false
+		}
+		s.longDesc = parseDescriptionProperty(repoLong.stdout)
+		for pkgver, desc := range parseDescriptionProperty(installedDesc.stdout) {
+			s.longDesc[pkgver] = desc
+		}
 	}
 	if needs.virtual {
 		res, ok := st.runQuery("-R", "-s", "", "-p", "provides")
@@ -236,7 +226,22 @@ func (s *snapshot) parseNames(stdout string, dst map[string]bool) {
 	}
 }
 
-func (s *snapshot) parseRepository(stdout string, repoByPkgver, archByPkgver map[string]string) {
+type architectureRow struct {
+	Pkgver string
+	Arch   string
+	Repo   string
+}
+
+func parseArchitectureRows(stdout string) []architectureRow {
+	var out []architectureRow
+	for _, row := range parsePropertyRows(stdout, true) {
+		out = append(out, architectureRow{Pkgver: row[0], Arch: row[1], Repo: row[2]})
+	}
+	return out
+}
+
+func parseRepositoryDescriptions(stdout string) map[string]string {
+	out := map[string]string{}
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
@@ -249,27 +254,34 @@ func (s *snapshot) parseRepository(stdout string, repoByPkgver, archByPkgver map
 		if len(fields) < 1 {
 			continue
 		}
-		pkgver := fields[0]
-		name, version := discovery.SplitPkgverVersion(pkgver)
+		if len(fields) > 1 {
+			out[fields[0]] = strings.Join(fields[1:], " ")
+		}
+	}
+	return out
+}
+
+// parseRepository builds the variant universe from the ordered architecture
+// rows. Two repositories offering the same pkgver stay two variants because
+// the key is (repository, pkgver), and the first repository seen sets the
+// precedence the rest of the model sorts by.
+func (s *snapshot) parseRepository(rows []architectureRow, desc map[string]string) {
+	for _, ar := range rows {
+		name, version := discovery.SplitPkgverVersion(ar.Pkgver)
 		if name == "" {
 			continue
 		}
-		repo := repoByPkgver[pkgver]
-		if repo == "" {
-			repo = archByPkgver[pkgver]
-		}
-		if _, seen := s.repoRank[repo]; !seen {
-			s.repoRank[repo] = s.repoRankSeq
+		if _, seen := s.repoRank[ar.Repo]; !seen {
+			s.repoRank[ar.Repo] = s.repoRankSeq
 			s.repoRankSeq++
-		}
-		desc := strings.Join(fields[1:], " ")
-		if desc != "" {
-			s.shortDesc[pkgver] = desc
 		}
 		upstream, revision := discovery.SplitRevision(version)
 		row := discovery.Row{
-			Name: name, Pkgver: pkgver, Version: upstream, Revision: revision,
-			Architecture: archByPkgver[pkgver], Repository: repo, ShortDesc: desc,
+			Name: name, Pkgver: ar.Pkgver, Version: upstream, Revision: revision,
+			Architecture: ar.Arch, Repository: ar.Repo, ShortDesc: desc[ar.Pkgver],
+		}
+		if row.ShortDesc != "" {
+			s.shortDesc[ar.Pkgver] = row.ShortDesc
 		}
 		duplicate := false
 		for _, existing := range s.repo[name] {
@@ -296,7 +308,7 @@ func (s *snapshot) parseRepository(stdout string, repoByPkgver, archByPkgver map
 // parsePropertyRows reads the `pkgver: value (repository)` shape xbps uses
 // for -p searches. A repository property may also be a bare value, so the
 // parser accepts both.
-func parsePropertyRows(stdout string) [][3]string {
+func parsePropertyRows(stdout string, stripRepo bool) [][3]string {
 	var rows [][3]string
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
@@ -317,7 +329,10 @@ func parsePropertyRows(stdout string) [][3]string {
 			}
 			left, right = fields[0], strings.Join(fields[1:], " ")
 		}
-		value, repo := splitRepositorySuffix(right)
+		value, repo := right, ""
+		if stripRepo {
+			value, repo = splitRepositorySuffix(right)
+		}
 		rows = append(rows, [3]string{left, value, repo})
 	}
 	return rows
@@ -335,38 +350,26 @@ func splitRepositorySuffix(value string) (string, string) {
 		return value, ""
 	}
 	repo := strings.TrimSuffix(value[open+2:], ")")
-	if !strings.HasPrefix(repo, "http://") && !strings.HasPrefix(repo, "https://") && !strings.HasPrefix(repo, "/") {
+	if !isRepositoryURI(repo) {
 		return value, ""
 	}
 	return strings.TrimSpace(value[:open]), repo
 }
 
-func parseRepositoryProperty(stdout string) map[string]string {
-	out := map[string]string{}
-	for _, row := range parsePropertyRows(stdout) {
-		repo := row[2]
-		if repo == "" {
-			repo = row[1]
-		}
-		if repo != "" {
-			out[row[0]] = repo
-		}
+func isRepositoryURI(value string) bool {
+	switch {
+	case strings.HasPrefix(value, "http://"), strings.HasPrefix(value, "https://"),
+		strings.HasPrefix(value, "file://"), strings.HasPrefix(value, "ftp://"):
+		return true
+	case strings.HasPrefix(value, "/"), strings.HasPrefix(value, "./"), strings.HasPrefix(value, "../"):
+		return true
 	}
-	return out
-}
-
-func parseArchitectureProperty(stdout string) (map[string]string, map[string]string) {
-	arch, repo := map[string]string{}, map[string]string{}
-	for _, row := range parsePropertyRows(stdout) {
-		arch[row[0]] = row[1]
-		repo[row[0]] = row[2]
-	}
-	return arch, repo
+	return false
 }
 
 func parseDescriptionProperty(stdout string) map[string]string {
 	out := map[string]string{}
-	for _, row := range parsePropertyRows(stdout) {
+	for _, row := range parsePropertyRows(stdout, false) {
 		out[row[0]] = row[1]
 	}
 	return out
@@ -374,7 +377,7 @@ func parseDescriptionProperty(stdout string) map[string]string {
 
 func parseProvidesProperty(stdout string) map[string][]string {
 	out := map[string][]string{}
-	for _, row := range parsePropertyRows(stdout) {
+	for _, row := range parsePropertyRows(stdout, true) {
 		out[row[0]] = append(out[row[0]], row[1])
 	}
 	return out
@@ -383,15 +386,16 @@ func parseProvidesProperty(stdout string) map[string][]string {
 // resolveMultiVariant runs `-R -S` for repository-only names that have more
 // than one variant. The calls go through the same eight-worker pool as the
 // transaction lookups (ADR-0001).
-func (st *state) resolveMultiVariant(names []string) map[string]string {
+func (st *state) resolveMultiVariant(names []string) (map[string]string, error) {
 	out := map[string]string{}
 	if len(names) == 0 {
-		return out
+		return out, nil
 	}
 	type answer struct {
 		name   string
 		pkgver string
 		stderr string
+		err    error
 	}
 	jobs := make(chan string)
 	results := make(chan answer)
@@ -408,7 +412,7 @@ func (st *state) resolveMultiVariant(names []string) map[string]string {
 					rec := parseRecord(res.stdout)
 					pkgver = rec.scalar["pkgver"]
 				}
-				results <- answer{name: name, pkgver: pkgver, stderr: res.stderr}
+				results <- answer{name: name, pkgver: pkgver, stderr: res.stderr, err: err}
 			}
 		}()
 	}
@@ -418,14 +422,21 @@ func (st *state) resolveMultiVariant(names []string) map[string]string {
 		}
 		close(jobs)
 	}()
+	var firstErr error
 	for i := 0; i < len(names); i++ {
 		a := <-results
 		if a.stderr != "" {
 			fmt.Fprint(st.stderr, a.stderr)
 		}
+		if a.err != nil && firstErr == nil {
+			firstErr = a.err
+		}
 		out[a.name] = a.pkgver
 	}
-	return out
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return out, nil
 }
 
 // runList implements FR-023/FR-024 for list.
@@ -441,7 +452,7 @@ func (st *state) runSearch(opts *options) int {
 func (st *state) runDiscoveryRows(opts *options, search bool) int {
 	needs := discoveryNeeds{
 		installed: true, manual: true, holds: true, orphans: true, repolocked: true,
-		machine: opts.machine, plan: !opts.virtual, description: opts.description, virtual: opts.virtual,
+		plan: !opts.virtual, description: opts.description, virtual: opts.virtual,
 	}
 	s, code, ok := st.loadSnapshot(needs)
 	if !ok {
@@ -450,21 +461,26 @@ func (st *state) runDiscoveryRows(opts *options, search bool) int {
 
 	namesNeedingResolution := s.namesNeedingResolution(opts)
 	if len(namesNeedingResolution) > 0 {
-		s.resolved = st.resolveMultiVariant(namesNeedingResolution)
+		resolved, err := st.resolveMultiVariant(namesNeedingResolution)
+		if err != nil {
+			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			return exitRuntime
+		}
+		s.resolved = resolved
 	}
 
 	rows := s.rows(opts)
 	if search {
 		filtered, badPattern, err := filterSearchRows(rows, opts.args, opts.namesOnly)
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: invalid search pattern %q: %v\n", badPattern, err)
+			fmt.Fprintf(st.stderr, "xbpretty: invalid pattern '%s': %v\n", badPattern, err)
 			return exitRuntime
 		}
 		rows = filtered
 	} else {
 		filtered, notices, badPattern, err := filterGlobRows(rows, opts.args)
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: invalid glob %q: %v\n", badPattern, err)
+			fmt.Fprintf(st.stderr, "xbpretty: invalid pattern '%s': %v\n", badPattern, err)
 			return exitRuntime
 		}
 		for _, notice := range notices {
@@ -498,7 +514,10 @@ func (s *snapshot) namesNeedingResolution(opts *options) []string {
 
 func (s *snapshot) rows(opts *options) []discovery.Row {
 	if opts.virtual {
-		return s.virtualRows()
+		if opts.upgradable {
+			return nil
+		}
+		return s.virtualRows(opts.installed)
 	}
 	names := map[string]bool{}
 	for name := range s.installed {
@@ -535,14 +554,14 @@ func (s *snapshot) rows(opts *options) []discovery.Row {
 
 	var rows []discovery.Row
 	for _, name := range sorted {
-		if opts.allVersions {
-			rows = append(rows, s.variantRows(name, opts)...)
-			continue
-		}
 		if opts.upgradable {
 			if plan, ok := s.plan[name]; ok {
-				rows = append(rows, s.planRow(plan, opts.upgradable))
+				rows = append(rows, s.planRow(plan, true))
 			}
+			continue
+		}
+		if opts.allVersions {
+			rows = append(rows, s.variantRows(name, opts)...)
 			continue
 		}
 		rows = append(rows, s.defaultRow(name))
@@ -554,23 +573,28 @@ func (s *snapshot) defaultRow(name string) discovery.Row {
 	if plan, ok := s.plan[name]; ok && s.planOK {
 		return s.planRow(plan, false)
 	}
-	if info, ok := s.installed[name]; ok {
-		return s.installedRow(name, info)
-	}
 	variants := s.repo[name]
 	if len(variants) == 0 {
+		if info, ok := s.installed[name]; ok {
+			return s.installedRow(name, info)
+		}
 		return discovery.Row{Name: name}
 	}
+	chosen := variants[0]
 	if len(variants) > 1 {
 		if pkgver := s.resolved[name]; pkgver != "" {
 			for _, variant := range variants {
 				if variant.Pkgver == pkgver {
-					return variant
+					chosen = variant
+					break
 				}
 			}
 		}
 	}
-	return variants[0]
+	if info, ok := s.installed[name]; ok && chosen.Pkgver == info.Pkgver {
+		return s.attachInstalled(chosen, info)
+	}
+	return chosen
 }
 
 func (s *snapshot) installedRow(name string, info installedInfo) discovery.Row {
@@ -625,9 +649,11 @@ func (s *snapshot) variantRows(name string, opts *options) []discovery.Row {
 			continue
 		}
 		if plan, ok := s.plan[name]; ok && s.planOK && variant.Pkgver == plan.Pkgver() {
-			variant.InstalledVersion = info.Version
-			if info.Version != "" {
-				variant.UpgradableFrom = info.Version
+			if info, installed := s.installed[name]; installed {
+				variant = s.attachInstalled(variant, info)
+				if info.Version != "" {
+					variant.UpgradableFrom = info.Version
+				}
 			}
 			if opts.upgradable {
 				setPlanSizes(&variant, plan)
@@ -659,7 +685,7 @@ func (s *snapshot) planRow(plan xbps.Row, withSizes bool) discovery.Row {
 		ShortDesc: s.shortDesc[plan.Pkgver()],
 	}
 	if info, ok := s.installed[name]; ok {
-		row.InstalledVersion = info.Version
+		row = s.attachInstalled(row, info)
 		if info.Version != "" {
 			row.UpgradableFrom = info.Version
 		}
@@ -681,7 +707,7 @@ func setPlanSizes(row *discovery.Row, plan xbps.Row) {
 	}
 }
 
-func (s *snapshot) virtualRows() []discovery.Row {
+func (s *snapshot) virtualRows(installedOnly bool) []discovery.Row {
 	providers := map[string]map[string]bool{}
 	for pkgver, values := range s.provides {
 		name, _ := discovery.SplitPkgverVersion(pkgver)
@@ -707,8 +733,15 @@ func (s *snapshot) virtualRows() []discovery.Row {
 	rows := make([]discovery.Row, 0, len(names))
 	for _, name := range names {
 		var list []string
+		hasInstalledProvider := false
 		for provider := range providers[name] {
 			list = append(list, provider)
+			if _, ok := s.installed[provider]; ok {
+				hasInstalledProvider = true
+			}
+		}
+		if installedOnly && !hasInstalledProvider {
+			continue
 		}
 		sort.Strings(list)
 		rows = append(rows, discovery.Row{Name: name, Virtual: true, Providers: list})
@@ -860,8 +893,9 @@ func (st *state) renderDiscoveryRows(rows []discovery.Row, opts *options, s *sna
 	for _, row := range rows {
 		if opts.machine {
 			if err := st.writeMachineRow(row, nil); err != nil {
-				fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
-				return exitRuntime
+				// FR-074: stop writing on EPIPE and keep the successful
+				// discovery exit code.
+				return exitOK
 			}
 			continue
 		}
@@ -917,6 +951,10 @@ func (st *state) runShow(opts *options) int {
 			return code
 		}
 		variants := s.repo[name]
+		if !found && len(variants) == 0 {
+			missing = append(missing, name)
+			continue
+		}
 
 		var perName []block
 		installedPrinted := false
@@ -925,14 +963,16 @@ func (st *state) runShow(opts *options) int {
 			perName = append(perName, block{row: row, props: installedRec})
 			installedPrinted = true
 		}
-		if !found && len(variants) == 0 {
-			missing = append(missing, name)
-			continue
-		}
 
 		if opts.allVersions {
 			for _, variant := range variants {
-				rec, variantFound, code := st.record("-R", "-S", variant.Pkgver)
+				var rec *xbpsRecord
+				var variantFound bool
+				if variant.Repository != "" {
+					rec, variantFound, code = st.record("-R", "-i", "--repository", variant.Repository, "-S", variant.Name)
+				} else {
+					rec, variantFound, code = st.record("-R", "-S", variant.Pkgver)
+				}
 				if code >= 0 {
 					return code
 				}
@@ -956,29 +996,15 @@ func (st *state) runShow(opts *options) int {
 			}
 			row := s.recordRow(rec, false)
 			perName = append(perName, block{row: row, props: rec})
-			seen := map[string]bool{}
-			for _, variant := range variants {
-				if variant.Pkgver == row.Pkgver || seen[variant.Pkgver] {
-					continue
-				}
-				seen[variant.Pkgver] = true
-				additional++
-			}
-		} else {
-			printedPkgver := ""
-			if len(perName) > 0 {
-				printedPkgver = perName[0].row.Pkgver
-			}
-			seen := map[string]bool{}
-			for _, variant := range variants {
-				if variant.Pkgver == printedPkgver || seen[variant.Pkgver] {
-					continue
-				}
-				seen[variant.Pkgver] = true
-				additional++
-			}
 		}
 
+		if len(perName) > 0 && !opts.allVersions {
+			if installedPrinted {
+				additional += len(variants)
+			} else if len(variants) > 1 {
+				additional += len(variants) - 1
+			}
+		}
 		blocks = append(blocks, perName...)
 	}
 
@@ -989,8 +1015,9 @@ func (st *state) runShow(opts *options) int {
 				props[k] = v
 			}
 			if err := st.writeMachineRow(b.row, props); err != nil {
-				fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
-				return exitRuntime
+				// FR-074: a failed stdout write stops machine output but does
+				// not turn a successful discovery into an error.
+				return exitOK
 			}
 			continue
 		}
@@ -1061,36 +1088,61 @@ func (s *snapshot) recordRow(rec *xbpsRecord, installed bool) discovery.Row {
 	return row
 }
 
-// xbpsRecord is one `xbps-query -S` answer: scalar properties plus the
-// tab-indented array properties.
+// xbpsRecord is one `xbps-query -S` answer: scalar properties, tab-indented
+// list properties, and the two-space-group/tab-value alternatives dictionary.
 type xbpsRecord struct {
-	scalar     map[string]string
-	list       map[string][]string
-	properties map[string]any
+	scalar           map[string]string
+	list             map[string][]string
+	alternatives     map[string][]string
+	alternativeOrder []string
+	properties       map[string]any
 }
 
 func parseRecord(stdout string) *xbpsRecord {
-	rec := &xbpsRecord{scalar: map[string]string{}, list: map[string][]string{}, properties: map[string]any{}}
-	var current string
+	rec := &xbpsRecord{
+		scalar: map[string]string{}, list: map[string][]string{},
+		alternatives: map[string][]string{}, properties: map[string]any{},
+	}
+	var current, group string
 	for _, line := range strings.Split(stdout, "\n") {
-		if strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "    ") {
-			if current != "" {
-				value := strings.TrimSpace(line)
-				if value != "" {
-					rec.list[current] = append(rec.list[current], value)
-					rec.properties[current] = rec.list[current]
+		trimmed := strings.TrimSpace(line)
+		if current == "alternatives" && strings.HasPrefix(line, "  ") {
+			rest := strings.TrimPrefix(line, "  ")
+			if !strings.HasPrefix(rest, "\t") && !strings.HasPrefix(rest, " ") && strings.HasSuffix(trimmed, ":") {
+				group = strings.TrimSuffix(trimmed, ":")
+				if _, ok := rec.alternatives[group]; !ok {
+					rec.alternativeOrder = append(rec.alternativeOrder, group)
 				}
+				continue
+			}
+		}
+		if strings.HasPrefix(line, "\t") || strings.HasPrefix(line, " ") {
+			if trimmed == "" {
+				continue
+			}
+			if current == "alternatives" {
+				if group != "" {
+					rec.alternatives[group] = append(rec.alternatives[group], trimmed)
+				}
+				continue
+			}
+			if current != "" {
+				rec.list[current] = append(rec.list[current], trimmed)
 			}
 			continue
 		}
 		key, value, ok := strings.Cut(line, ":")
-		if !ok || key == "" {
-			current = ""
+		if !ok || strings.TrimSpace(key) == "" {
+			current, group = "", ""
 			continue
 		}
-		current = key
+		key = strings.TrimSpace(key)
+		current, group = key, ""
 		value = strings.TrimSpace(value)
 		if value == "" {
+			if key == "alternatives" {
+				continue
+			}
 			if _, exists := rec.list[key]; !exists {
 				rec.list[key] = nil
 			}
@@ -1106,6 +1158,9 @@ func parseRecord(stdout string) *xbpsRecord {
 		} else {
 			delete(rec.properties, key)
 		}
+	}
+	if len(rec.alternatives) > 0 {
+		rec.properties["alternatives"] = rec.alternatives
 	}
 	return rec
 }
@@ -1161,7 +1216,7 @@ func printRecord(out interface{ Write([]byte) (int, error) }, row discovery.Row,
 		field{"Provided-Shlibs", rec.list["shlib-provides"]},
 		field{"Conflicts", rec.list["conflicts"]},
 		field{"Replaces", rec.list["replaces"]},
-		field{"Alternatives", rec.list["alternatives"]},
+		field{"Alternatives", nil},
 	)
 	description := rec.scalar["long_desc"]
 	if description == "" {
@@ -1173,6 +1228,19 @@ func printRecord(out interface{ Write([]byte) (int, error) }, row discovery.Row,
 	fields = append(fields, field{"Attributes", []string{row.AttributeText()}})
 
 	for _, f := range fields {
+		if f.label == "Alternatives" {
+			if len(rec.alternativeOrder) == 0 {
+				continue
+			}
+			fmt.Fprintln(out, "Alternatives:")
+			for _, group := range rec.alternativeOrder {
+				fmt.Fprintf(out, "    %s:\n", group)
+				for _, value := range rec.alternatives[group] {
+					fmt.Fprintf(out, "        %s\n", value)
+				}
+			}
+			continue
+		}
 		if len(f.values) == 0 {
 			continue
 		}
@@ -1180,8 +1248,8 @@ func printRecord(out interface{ Write([]byte) (int, error) }, row discovery.Row,
 			fmt.Fprintf(out, "%s: %s\n", f.label, strings.Join(f.values, ", "))
 			continue
 		}
-		fmt.Fprintf(out, "%s: %s\n", f.label, f.values[0])
-		for _, value := range f.values[1:] {
+		fmt.Fprintf(out, "%s:\n", f.label)
+		for _, value := range f.values {
 			fmt.Fprintf(out, "    %s\n", value)
 		}
 	}

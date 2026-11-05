@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/soubarnak/xbpretty/internal/completion"
 	"github.com/soubarnak/xbpretty/internal/config"
@@ -48,6 +49,10 @@ type runner struct {
 	stdin  io.Reader
 	parser *StreamParser
 	widget *ProgressWidget
+
+	// verboseMu serialises the verbose line written by the discovery worker
+	// pool, where several xbps-query children run at once.
+	verboseMu sync.Mutex
 }
 
 // state is everything one invocation of xbpretty needs.
@@ -230,9 +235,14 @@ func validateInvocation(opts *options, err io.Writer) (int, bool) {
 			fmt.Fprintf(err, "xbpretty: %s needs at least one package\n", opts.command)
 			return exitRuntime, true
 		}
-	case "show", "search":
+	case "show":
 		if len(args) == 0 {
 			fmt.Fprintf(err, "xbpretty: %s needs at least one package\n", opts.command)
+			return exitRuntime, true
+		}
+	case "search":
+		if len(args) == 0 {
+			fmt.Fprintln(err, "xbpretty: search needs at least one pattern")
 			return exitRuntime, true
 		}
 	case "upgrade", "full-upgrade", "safe-upgrade", "autoremove", "autopurge", "update", "clean", "fetch":

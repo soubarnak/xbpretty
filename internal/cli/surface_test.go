@@ -13,10 +13,7 @@ import (
 func surfaceRun(t *testing.T, bin string, env map[string]string, args ...string) (int, string, string) {
 	t.Helper()
 	cmd := exec.Command(bin, args...)
-	cmd.Env = os.Environ()
-	for k, v := range env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
+	cmd.Env = envWith(env)
 	cmd.Stdin = nil
 	var out, errb strings.Builder
 	cmd.Stdout, cmd.Stderr = &out, &errb
@@ -107,10 +104,25 @@ func TestSurfaceHelpAndVersionBypassConfig(t *testing.T) {
 	if code != 0 || !strings.HasPrefix(out, "xbpretty dev\n") {
 		t.Errorf("-V list = %d, %q, %q; want the root version output", code, out, errs)
 	}
-	// After list/search, -V is --virtual, not --version. It must not print
-	// the version; whether the discovery query succeeds depends on whether a
-	// real xbps-query is installed in the test environment.
-	_, out, _ = surfaceRun(t, bin, emptyConfigDir(t), "list", "-V")
+	// After list/search, -V is --virtual, not --version. Drive it through the
+	// stub so the test never depends on a real xbps-query being installed.
+	discCfg, _ := integrationConfig(t, "Never")
+	discEnv := map[string]string{
+		"XDG_CONFIG_HOME":  discCfg,
+		"XDG_STATE_HOME":   filepath.Join(filepath.Dir(discCfg), "state"),
+		"XB_STUB_LIST":     discInstalled,
+		"XB_STUB_MANUAL":   discManual,
+		"XB_STUB_REPO":     discRepo,
+		"XB_STUB_ARCH":     discArch,
+		"XB_STUB_HOLD":     "heldpkg-1.0_1\n",
+		"XB_STUB_ORPHANS":  "",
+		"XB_STUB_REPOLOCK": "",
+		"XB_STUB_PROVIDES": discProvides,
+	}
+	code, out, errs = surfaceRun(t, bin, discEnv, "list", "-V")
+	if code != 0 || !strings.Contains(out, "cmd:thing (Virtual)") {
+		t.Errorf("list -V = %d, %q, %q; want virtual rows", code, out, errs)
+	}
 	if strings.Contains(out, "xbpretty dev") {
 		t.Errorf("list -V printed the version:\n%s", out)
 	}
@@ -118,7 +130,10 @@ func TestSurfaceHelpAndVersionBypassConfig(t *testing.T) {
 	if code != 0 || !strings.HasPrefix(out, "xbpretty dev\n") {
 		t.Errorf("list --version = %d, %q; want version output", code, out)
 	}
-	_, out, _ = surfaceRun(t, bin, emptyConfigDir(t), "search", "-V")
+	code, out, errs = surfaceRun(t, bin, discEnv, "search", "-V", "thing")
+	if code != 0 || !strings.Contains(out, "cmd:thing (Virtual)") {
+		t.Errorf("search -V = %d, %q, %q; want virtual rows", code, out, errs)
+	}
 	if strings.Contains(out, "xbpretty dev") {
 		t.Errorf("search -V printed the version: %q", out)
 	}

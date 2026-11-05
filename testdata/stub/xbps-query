@@ -3,6 +3,9 @@
 # variables. Queries succeed on their own terms - the transaction's exit
 # code never applies to them, matching real xbps.
 printf '%s\n' "$*" >> "${XB_STUB_LOG:-/dev/null}"
+if [ -n "${XB_STUB_ENV_LOG:-}" ]; then
+  printf 'LC_ALL=%s\n' "${LC_ALL:-}" >> "$XB_STUB_ENV_LOG"
+fi
 case "$*" in
   *"--list-repolock-pkgs"*)
     printf '%s' "${XB_STUB_REPOLOCK:-}"
@@ -19,9 +22,6 @@ case "$*" in
   *"-X"*)
     printf '%s' "${XB_STUB_REVDEPS:-}"
     exit 0 ;;
-  *"-R -s  -p repository"*)
-    printf '%s' "${XB_STUB_REPO_PROP:-}"
-    exit 0 ;;
   *"-R -s  -p architecture"*)
     printf '%s' "${XB_STUB_ARCH:-}"
     exit 0 ;;
@@ -34,6 +34,9 @@ case "$*" in
   "-R -s "*)
     printf '%s' "${XB_STUB_REPO:-}"
     exit 0 ;;
+  "-s  -p long_desc")
+    printf '%s' "${XB_STUB_LONG_DESC_INSTALLED:-}"
+    exit 0 ;;
   "-l")
     printf '%s' "${XB_STUB_LIST:-}"
     exit 0 ;;
@@ -43,6 +46,9 @@ case "$*" in
   "-O")
     printf '%s' "${XB_STUB_ORPHANS:-}"
     exit 0 ;;
+  *"--repository"*"-S "*)
+    printf '%s' "${XB_STUB_SHOW_REPO:-}"
+    exit "${XB_STUB_SHOW_REPO_EXIT:-0}" ;;
   *"-R -S "*)
     printf '%s' "${XB_STUB_SHOW_REPO:-}"
     exit "${XB_STUB_SHOW_REPO_EXIT:-0}" ;;
