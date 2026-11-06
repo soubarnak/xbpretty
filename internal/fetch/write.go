@@ -263,27 +263,6 @@ func managedURLs(managed map[string]string, mirror string) []string {
 	return out
 }
 
-// WrittenRepositoryURLs returns the repository URLs a managed set contributes
-// for the chosen mirror: the mirror base plus each line's relative suffix.
-// Preserved custom/local lines are excluded.
-func WrittenRepositoryURLs(set RepositorySet, mirror string) []string {
-	base := strings.TrimRight(mirror, "/")
-	var out []string
-	seen := map[string]bool{}
-	for _, line := range set.Lines {
-		if !line.Managed {
-			continue
-		}
-		value := base + strings.TrimRight(line.Suffix, "/")
-		if seen[value] {
-			continue
-		}
-		seen[value] = true
-		out = append(out, value)
-	}
-	return out
-}
-
 // WrittenURLs returns the repository URLs the files this run writes actually
 // contribute, including --non-free's derived files and excluding preserved
 // custom/local lines. FR-049 scopes sync errors to exactly these URLs.

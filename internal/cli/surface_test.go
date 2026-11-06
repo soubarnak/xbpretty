@@ -163,6 +163,7 @@ func TestSurfaceClosedAliasDispatch(t *testing.T) {
 		{[]string{"history", "redo"}, 1, "xbpretty: history is empty"},
 		{[]string{"history", "clear"}, 2, "xbpretty: history clear needs an entry id, 'last' or --all"},
 		{[]string{"clear"}, 2, "unknown command"},
+		{[]string{"--", "figlet"}, 2, "no command given"},
 		{[]string{"xbp-history"}, 2, "unknown command"},
 		{[]string{"xbp-fetch"}, 2, "unknown command"},
 		{[]string{"xbp-undo"}, 2, "unknown command"},
@@ -230,7 +231,7 @@ func TestSurfaceGlobalFlagsBeforeAndAfterCommandAndConflicts(t *testing.T) {
 	// On fetch, -c is accepted and the command reaches its handler instead of
 	// 2. The tagged binary and an empty xbps.d keep the built-binary test off
 	// the network: discovery fails before the mirror list is requested.
-	code, _, errs := surfaceRun(t, taggedBinary(t), mergeEnv(env, map[string]string{
+	code, _, errs := surfaceRun(t, testrootBinary(t), mergeEnv(env, map[string]string{
 		"XBPRETTY_TEST_FETCH_XBPSD": t.TempDir(),
 	}), "fetch", "-c", "IN")
 	if code == 2 || strings.Contains(errs, "unknown flag") {
@@ -436,8 +437,8 @@ func TestSurfaceMooAndNoSubcommand(t *testing.T) {
 	}
 
 	code, out, errs = surfaceRun(t, bin, env)
-	if code != 1 {
-		t.Errorf("no subcommand exit = %d, want 1", code)
+	if code != 2 {
+		t.Errorf("no subcommand exit = %d, want usage error 2", code)
 	}
 	if !strings.Contains(out, "Usage:") || !strings.Contains(out, "Commands:") {
 		t.Errorf("no subcommand did not print help on stdout:\n%s", out)
@@ -515,7 +516,7 @@ func TestSurfaceFlagScopingFixes(t *testing.T) {
 }
 
 func TestSurfaceFetchCountryAndConfigInEveryOrder(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	cfgDir, cfgPath := integrationConfig(t, "Never")
 	env := map[string]string{
 		"XDG_CONFIG_HOME":           cfgDir,

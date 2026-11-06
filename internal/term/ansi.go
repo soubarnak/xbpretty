@@ -32,11 +32,3 @@ func MoveUp(n int) string {
 	}
 	return "\x1b[" + itoa(n) + "A"
 }
-
-// MoveDown emits a relative cursor-down.
-func MoveDown(n int) string {
-	if n <= 0 {
-		return ""
-	}
-	return "\x1b[" + itoa(n) + "B"
-}

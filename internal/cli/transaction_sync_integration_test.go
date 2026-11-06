@@ -31,7 +31,7 @@ const updateOldFixture = "alpha-1.0_1\n657KB\n"
 // overrides produce output: the sync step must not echo the plan fixture.
 func syncRootEnv(t *testing.T, euid int) (string, testEnv) {
 	t.Helper()
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	env := cleanEnv(t, t.TempDir()).
 		with("XBPRETTY_TEST_EUID", strconv.Itoa(euid)).
 		with("XBPRETTY_TEST_TRUST_UID", strconv.Itoa(os.Getuid())).
@@ -600,7 +600,7 @@ func TestRootTestHookIsAbsentFromOrdinaryBuilds(t *testing.T) {
 	if bytes.Contains(ordinary, []byte("XBPRETTY_TEST_EUID")) {
 		t.Error("the ordinary build contains XBPRETTY_TEST_EUID; the root hook leaked out of xbpretty_testroot")
 	}
-	tagged, err := os.ReadFile(taggedBinary(t))
+	tagged, err := os.ReadFile(testrootBinary(t))
 	if err != nil {
 		t.Fatal(err)
 	}

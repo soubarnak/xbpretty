@@ -157,7 +157,7 @@ func RenderFetch(m *FetchModel, w, h int, t Theme) *Buffer {
 	buf.Fill(0, 0, w, h, t.Regular)
 	drawFetchFrame(buf, w, h, t)
 	drawFetchTitle(buf, w, t)
-	if w < 60 || h < 18 {
+	if !Fits(w, h) {
 		centerText(buf, h/2, TooSmall(w, h), t.style(RoleNotice))
 		return buf
 	}

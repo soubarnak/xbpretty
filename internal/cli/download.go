@@ -16,18 +16,18 @@ import (
 // root, summary, prompt, sync, log or history.
 func (st *state) runDownload(opts *options) int {
 	if err := st.r.cfg.ResolveFor("query"); err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 	names := dedupeNames(opts.args)
 	if len(names) == 0 {
-		fmt.Fprintln(st.stderr, "xbpretty: download needs at least one package")
+		st.errorf("%s\n", "download needs at least one package")
 		return exitRuntime
 	}
 	// FR-039: no repositories at all is its own refusal.
 	repos, err := st.r.run(st.r.cfg.Xbps.QueryPath, "-L")
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 	if repos.exitCode != 0 {
@@ -35,7 +35,7 @@ func (st *state) runDownload(opts *options) int {
 		return repos.exitCode
 	}
 	if strings.TrimSpace(repos.stdout) == "" {
-		fmt.Fprintln(st.stderr, "xbpretty: no repositories are configured; add one in /etc/xbps.d")
+		st.errorf("%s\n", "no repositories are configured; add one in /etc/xbps.d")
 		return exitRuntime
 	}
 
@@ -46,7 +46,7 @@ func (st *state) runDownload(opts *options) int {
 		res, err := st.r.run(st.r.cfg.Xbps.QueryPath, "-R", "-S", name,
 			"-p", "pkgver,repository,architecture,filename-sha256")
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			st.errorf("%v\n", err)
 			return exitRuntime
 		}
 		if res.exitCode != 0 {
@@ -54,7 +54,7 @@ func (st *state) runDownload(opts *options) int {
 			// failure is the child's, and its stderr and code pass through.
 			if res.exitCode == 2 && strings.TrimSpace(res.stderr) == "" {
 				missing = append(missing, name)
-				fmt.Fprintf(st.stderr, "xbpretty: %s: not found in any configured repository\n", name)
+				st.errorf("%s: not found in any configured repository\n", name)
 				continue
 			}
 			fmt.Fprint(st.stderr, res.stderr)
@@ -62,23 +62,23 @@ func (st *state) runDownload(opts *options) int {
 		}
 		resolved, err := download.ParseResolved(res.stdout)
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %s: cannot resolve the package: %v\n", name, err)
+			st.errorf("%s: cannot resolve the package: %v\n", name, err)
 			return exitRuntime
 		}
 		// FR-037: no metadata hash means the cwd copy would be unverifiable.
 		if !resolved.HasHash {
-			fmt.Fprintf(st.stderr, "xbpretty: %s: repository metadata has no SHA-256; refusing to write an unverifiable package\n", resolved.Pkgver)
+			st.errorf("%s: repository metadata has no SHA-256; refusing to write an unverifiable package\n", resolved.Pkgver)
 			failedNames = true
 			continue
 		}
 		if download.IsFTPRepository(resolved.Repository) {
-			fmt.Fprintf(st.stderr, "xbpretty: %s: ftp:// repositories are not supported by xbp download\n", resolved.Pkgver)
+			st.errorf("%s: ftp:// repositories are not supported by xbp download\n", resolved.Pkgver)
 			failedNames = true
 			continue
 		}
 		target, err := download.NewTarget(name, resolved.Pkgver, resolved.Repository, resolved.Arch, resolved.SHA256, 0)
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			st.errorf("%v\n", err)
 			return exitRuntime
 		}
 		targets = append(targets, target)
@@ -89,7 +89,7 @@ func (st *state) runDownload(opts *options) int {
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 	engineOpts := download.Options{
@@ -112,18 +112,18 @@ func (st *state) runDownload(opts *options) int {
 	written := make([]download.Result, 0, len(targets))
 	for _, target := range targets {
 		if ctx.Err() != nil {
-			fmt.Fprintln(st.stderr, "xbpretty: interrupted")
+			st.errorf("%s\n", "interrupted")
 			return exitInterrupted
 		}
 		result := engine.FetchOne(ctx, target)
 		if result.Err != nil {
 			if ctx.Err() != nil {
-				fmt.Fprintln(st.stderr, "xbpretty: interrupted")
+				st.errorf("%s\n", "interrupted")
 				return exitInterrupted
 			}
 			// FR-038: an explicit download aborts on the first exhausted or
 			// mismatching file and keeps everything already verified.
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", result.Err)
+			st.errorf("%v\n", result.Err)
 			return exitRuntime
 		}
 		written = append(written, result)
@@ -136,7 +136,7 @@ func (st *state) runDownload(opts *options) int {
 // summary line.
 func (st *state) finishDownload(missing []string, failedNames bool, written []download.Result) int {
 	if len(missing) > 0 {
-		fmt.Fprintln(st.stderr, "xbpretty: Some packages were not found.")
+		st.errorf("%s\n", "Some packages were not found.")
 	}
 	if failedNames || len(missing) > 0 {
 		return exitRuntime

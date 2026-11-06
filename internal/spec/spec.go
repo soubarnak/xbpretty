@@ -159,7 +159,6 @@ func commandFlags(name string) []string {
 		"dry-run", "yes", "assume-no", "download-only", "simple", "update", "no-update", "no-sync",
 		"purge", "auto-remove", "no-auto-remove",
 		"full", "no-full", "safe", "no-log",
-		"box-style", "progress-bar", "no-progress", "no-progress-bar",
 		"allow-unauthenticated", "option", "fix-broken", "target-release",
 		"install-recommends", "install-suggests", "remove-essential", "remove-config",
 		"exclude", "no-fix-broken", "no-install-recommends", "no-install-suggests",
@@ -209,12 +208,6 @@ var Flags = []Flag{
 	{Long: "safe", Kind: BoolFlag, Summary: "accepted no-op for nala compatibility", Commands: transactionNames()},
 	{Long: "print-uris", Kind: BoolFlag, Summary: "print the plan's download URLs and stop", Commands: upgradeNames()},
 	{Long: "no-log", Kind: BoolFlag, Summary: "do not append to the transaction log", Commands: append(transactionNames(), "update", "undo", "redo")},
-	// Superset flags kept from earlier revisions.
-	{Long: "box-style", Kind: ValueFlag, ValueName: "STYLE", Values: []string{"rounded", "classic", "ascii"}, Summary: "summary border style", Hidden: true, Commands: transactionNames()},
-	{Long: "progress-bar", Kind: OptionalValueFlag, ValueName: "BOOL", Summary: "force the progress widget on or off", Hidden: true, Commands: transactionNames()},
-	{Long: "no-progress", Kind: BoolFlag, Summary: "disable the progress widget", Hidden: true, Commands: transactionNames()},
-	{Long: "no-progress-bar", Kind: BoolFlag, Summary: "disable the progress widget", Hidden: true, Commands: transactionNames()},
-
 	// FR-019: accepted by the parser, refused before any child runs.
 	{Long: "allow-unauthenticated", Kind: BoolFlag, Commands: transactionNames(),
 		Refusal: "--allow-unauthenticated is not available on xbps: xbps verifies repository signatures and has no unauthenticated mode."},
@@ -287,9 +280,6 @@ func LookupCommand(name string) (string, bool) {
 	return "", false
 }
 
-// ResolveCommand is LookupCommand under the name parser call sites use.
-func ResolveCommand(name string) (string, bool) { return LookupCommand(name) }
-
 // CommandByName returns the Command record for a canonical name or alias.
 func CommandByName(name string) (Command, bool) {
 	canonical, ok := LookupCommand(name)
@@ -335,6 +325,15 @@ func LookupFlag(name string) (Flag, bool) {
 		}
 	}
 	return Flag{}, false
+}
+
+// AcceptsValue reports whether value is one of the enum flag's Values.
+func AcceptsValue(long, value string) bool {
+	f, ok := LookupFlag(long)
+	if !ok {
+		return false
+	}
+	return contains(f.Values, value)
 }
 
 // FlagsFor returns every flag accepted by a canonical command: the global

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -163,7 +162,7 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	}
 	// FR-053: check only the binaries this command actually uses, at runtime.
 	if err := st.r.cfg.ResolveFor(binaries...); err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 
@@ -213,12 +212,12 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 		} else {
 			code, output, err := st.syncStep()
 			if err != nil {
-				fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+				st.errorf("%v\n", err)
 				return exitRuntime
 			}
 			if code >= 0 {
 				if h := hints.Lookup(code, output); h != nil {
-					fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
+					st.hintf("%s\n", h.Text)
 				}
 				return code
 			}
@@ -291,7 +290,7 @@ func (st *state) runTransaction(cmd string, opts *options) int {
 	}
 	if !autoAccept && !isTTY(st.stdin) {
 		// FR-015: never block on a pipe.
-		fmt.Fprintln(st.stderr, "xbpretty: stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed")
+		st.errorf("%s\n", "stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed")
 		return exitRuntime
 	}
 	if !autoAccept {
@@ -368,7 +367,7 @@ func (st *state) renderSummary(cmd string, rows []xbps.Row) int {
 		Unit:   st.unit,
 		Theme:  st.theme,
 	}).Render(st.stdout, sum); err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 	return -1
@@ -407,14 +406,14 @@ func (st *state) planTransaction(cmd string, opts *options, args []string) ([]xb
 func (st *state) planWith(bin string, argv ...string) ([]xbps.Row, int) {
 	res, err := st.r.run(bin, argv...)
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return nil, exitRuntime
 	}
 	if res.exitCode != 0 {
 		fmt.Fprint(st.stderr, res.stderr)
 		fmt.Fprint(st.stdout, res.stdout)
 		if h := hints.Lookup(res.exitCode, res.output()); h != nil {
-			fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
+			st.hintf("%s\n", h.Text)
 		}
 		return nil, res.exitCode
 	}
@@ -424,12 +423,12 @@ func (st *state) planWith(bin string, argv ...string) ([]xbps.Row, int) {
 	// silent. Hints print after the forwarded stderr.
 	fmt.Fprint(st.stderr, res.stderr)
 	if h := hints.Lookup(res.exitCode, res.output()); h != nil {
-		fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
+		st.hintf("%s\n", h.Text)
 	}
 
 	rows, err := xbps.ParsePlan(strings.NewReader(res.stdout))
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: cannot read the xbps plan: %v\n", err)
+		st.errorf("cannot read the xbps plan: %v\n", err)
 		return nil, exitRuntime
 	}
 	return rows, -1
@@ -453,7 +452,7 @@ func (st *state) reinstallGuard(opts *options) int {
 		if st.isInstalled(name) {
 			continue
 		}
-		fmt.Fprintf(st.stderr, "xbpretty: %s is not installed, so it cannot be reinstalled\n", name)
+		st.errorf("%s is not installed, so it cannot be reinstalled\n", name)
 		return exitRuntime
 	}
 	return -1
@@ -472,7 +471,7 @@ func (st *state) filterRemoveTargets(args []string) ([]string, int) {
 			kept = append(kept, name)
 			continue
 		}
-		fmt.Fprintf(st.stderr, "xbpretty: %s is not installed\n", name)
+		st.errorf("%s is not installed\n", name)
 	}
 	if len(kept) == 0 {
 		fmt.Fprintln(st.stdout, "Nothing to do.")
@@ -486,7 +485,7 @@ func (st *state) filterRemoveTargets(args []string) ([]string, int) {
 // line per package) is the durable output.
 func (st *state) runUpdate(opts *options) int {
 	if err := st.r.cfg.ResolveFor(commandBinariesForUpdate(st.showPkgs)...); err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 	if euidFn() != 0 {
@@ -508,7 +507,7 @@ func (st *state) runUpdate(opts *options) int {
 			fmt.Fprint(st.stderr, st.r.lastStdout)
 			fmt.Fprint(st.stderr, st.r.lastStderr)
 		}
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", syncErr)
+		st.errorf("%v\n", syncErr)
 		return exitRuntime
 	}
 	if code >= 0 {
@@ -517,7 +516,7 @@ func (st *state) runUpdate(opts *options) int {
 			fmt.Fprint(st.stderr, st.r.lastStderr)
 		}
 		if h := hints.Lookup(code, output); h != nil {
-			fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
+			st.hintf("%s\n", h.Text)
 		}
 		return code
 	}
@@ -666,7 +665,7 @@ func (st *state) planImplicitAutoremove(cmd string, opts *options) ([]xbps.Row, 
 		return nil, -1
 	}
 	if err := st.r.cfg.ResolveFor("remove"); err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return nil, exitRuntime
 	}
 	return st.planWith(st.r.cfg.Xbps.RemovePath, orphanDryArgv(cmd, opts)...)
@@ -706,7 +705,7 @@ func (st *state) runOrphanOnly(cmd string, opts *options, rows []xbps.Row) int {
 		return exitRuntime
 	}
 	if !autoAccept && !isTTY(st.stdin) {
-		fmt.Fprintln(st.stderr, "xbpretty: stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed")
+		st.errorf("%s\n", "stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed")
 		return exitRuntime
 	}
 	if !autoAccept {
@@ -978,14 +977,14 @@ func (st *state) prompt() promptResult {
 	case "n", "no":
 		return promptResult{code: st.refuse()}
 	default:
-		fmt.Fprintf(st.stderr, "xbpretty: '%s' is not a valid response\n", answer)
+		st.errorf("'%s' is not a valid response\n", answer)
 		return promptResult{code: exitRuntime, invalid: true}
 	}
 }
 
 // refuse is FR-015's refusal path. A refusal is exit 1, never 0.
 func (st *state) refuse() int {
-	fmt.Fprintln(st.stderr, "xbpretty: user refused confirmation")
+	st.errorf("%s\n", "user refused confirmation")
 	return exitRuntime
 }
 
@@ -1005,7 +1004,7 @@ func (st *state) privHint(cmd string, opts *options) {
 	if opts.downloadOnly {
 		line += " --download-only"
 	}
-	fmt.Fprintf(st.stderr, "hint: rerun as root: %s %s\n", elevate, line)
+	st.hintf("rerun as root: %s %s\n", elevate, line)
 }
 
 // rebootHint reports packages whose update needs a reboot (FR-075).
@@ -1038,19 +1037,25 @@ func (st *state) planToSummary(cmd string, rows []xbps.Row) *summary.Summary {
 		})
 		// The version diff applies to upgrades, reinstalls and held rows
 		// whose installed version differs (FR-063).
-		switch row.Action {
-		case "update", "reinstall", "hold":
+		if needsOldVersion(row, held) {
 			oldNames = append(oldNames, row.Name)
-		default:
-			if held[row.Name] {
-				oldNames = append(oldNames, row.Name)
-			}
 		}
 	}
 	old := st.lookupOld(oldNames)
 	sum := summary.Build(srows, held, old)
 	sum.Command = cmd
 	return sum
+}
+
+// needsOldVersion reports whether a plan row needs the installed-version
+// lookup for FR-063's version diff: an update, reinstall or hold, or any row
+// whose package is held.
+func needsOldVersion(row xbps.Row, held map[string]bool) bool {
+	switch row.Action {
+	case "update", "reinstall", "hold":
+		return true
+	}
+	return held[row.Name]
 }
 
 // isTTY reports whether v is attached to a terminal. A resilient writer wraps
@@ -1075,11 +1080,6 @@ func asFile(v any) (*os.File, bool) {
 	return nil, false
 }
 
-// relativeDir is the directory used when resolving a link target.
-func relativeDir(path string) string {
-	return filepath.Dir(path)
-}
-
 // beginUpdateLive starts the adapted Updating Package Lists view when the
 // suppression matrix allows a live surface.
 //
@@ -1096,7 +1096,7 @@ func (st *state) beginUpdateLive() *liveProgress {
 	}
 	model := newProgressModel("update", nil, nil)
 	model.setRepositoryTotal(repositoryCount())
-	live := newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode, model, st.theme)
+	live := newLiveProgress(st.stderr, st.colorErr, terminalWidth(st.stderr), mode, model, st.theme)
 	parser := NewStreamParser(0, 0)
 	parser.OnRepoUpdate = func(url string) {
 		live.Apply(true, func(m *progressModel) { m.repository(url) })

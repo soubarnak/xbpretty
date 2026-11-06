@@ -103,7 +103,7 @@ func thumbRows(frame string) []int {
 // Home/End, PgUp/PgDn and the mouse wheel move the selection, clamp at the
 // ends, and move the scrollbar thumb.
 func TestS1NavigationClampsAndScrolls(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	dump := t.TempDir()
@@ -251,7 +251,7 @@ func activeTab(t *testing.T, frame string) string {
 // operations in the fixed order, h/l and the arrow keys move the active tab
 // and its underline, the selection resets to row 0, and clamping draws nothing.
 func TestS1TabsSwitchInFixedOrder(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	dump := t.TempDir()
@@ -342,7 +342,7 @@ func TestS1TabsSwitchInFixedOrder(t *testing.T) {
 // restores the summary with the selection intact, and the transaction can
 // still be confirmed afterwards.
 func TestS1PackageInfoRoundTrip(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	dump := t.TempDir()
@@ -432,7 +432,7 @@ func TestS1PackageInfoRoundTrip(t *testing.T) {
 // too-small body keeps the border and title, drops tab/table/footer, and the
 // cancel keys still refuse the transaction.
 func TestS1ResizeBelowFloorCancelKeepsWorking(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	dump := t.TempDir()
@@ -469,7 +469,7 @@ func TestS1ResizeBelowFloorCancelKeepsWorking(t *testing.T) {
 	if code := r.exitCode(t); code != 1 {
 		t.Errorf("cancel while too small exit = %d, want 1", code)
 	}
-	if !strings.Contains(r.stderr.String(), "xbpretty: user refused confirmation") {
+	if !strings.Contains(plainTestOutput(r.stderr.String()), "xbpretty: user refused confirmation") {
 		t.Errorf("refusal line missing:\n%s", r.stderr.String())
 	}
 	after, err := term.GetState(r.slave)
@@ -598,7 +598,7 @@ func startPtyDetached(t *testing.T, bin string, env map[string]string, args []st
 // screen open warns exactly once, prints no screen sequence, and the text
 // summary finishes the transaction with the text path's exit code.
 func TestS1FailedInitWarnsOnceAndFallsBack(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	env := tuiScreenEnv(t, dir, query)
@@ -635,7 +635,7 @@ func TestS1FailedInitWarnsOnceAndFallsBack(t *testing.T) {
 // path. stdout and stderr share one pty, so the assertion can require the
 // restore sequences to be written before the warning bytes.
 func TestS1FailedRenderWarnsOnceRestoresAndFallsBack(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	env := tuiScreenEnv(t, dir, query)
@@ -684,7 +684,7 @@ func TestS1FailedRenderWarnsOnceRestoresAndFallsBack(t *testing.T) {
 // the transaction, q/Q/n/N/Esc/Ctrl-C/EOF refuse with exit 1, and Enter is
 // inert (it neither exits nor draws).
 func TestS1KeyBindings(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	cases := []struct {
 		name string
 		send string
@@ -721,7 +721,7 @@ func TestS1KeyBindings(t *testing.T) {
 				if code := r.exitCode(t); code != tc.want {
 					t.Fatalf("exit = %d, want %d\nstderr:\n%s", code, tc.want, r.stderr.String())
 				}
-				if !strings.Contains(r.stderr.String(), "xbpretty: user refused confirmation") {
+				if !strings.Contains(plainTestOutput(r.stderr.String()), "xbpretty: user refused confirmation") {
 					t.Errorf("refusal line missing:\n%s", r.stderr.String())
 				}
 				return
@@ -744,7 +744,7 @@ func TestS1KeyBindings(t *testing.T) {
 				}
 				return
 			}
-			if !strings.Contains(r.stderr.String(), "xbpretty: user refused confirmation") {
+			if !strings.Contains(plainTestOutput(r.stderr.String()), "xbpretty: user refused confirmation") {
 				t.Errorf("refusal line missing:\n%s", r.stderr.String())
 			}
 			waitCapture(t, r, "the restore", func(s string) bool {
@@ -775,7 +775,7 @@ func TestS1KeyBindings(t *testing.T) {
 // TestS1PackageInfoRefusalKeys is FR-074 through the info view: Ctrl-C and
 // n/N refuse the transaction even while package info is open.
 func TestS1PackageInfoRefusalKeys(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	for _, tc := range []struct {
 		name string
 		send string
@@ -800,7 +800,7 @@ func TestS1PackageInfoRefusalKeys(t *testing.T) {
 			if code := r.exitCode(t); code != 1 {
 				t.Fatalf("exit = %d, want 1\nstderr:\n%s", code, r.stderr.String())
 			}
-			if !strings.Contains(r.stderr.String(), "xbpretty: user refused confirmation") {
+			if !strings.Contains(plainTestOutput(r.stderr.String()), "xbpretty: user refused confirmation") {
 				t.Errorf("refusal line missing:\n%s", r.stderr.String())
 			}
 			waitCapture(t, r, "the restore", func(s string) bool {
@@ -814,7 +814,7 @@ func TestS1PackageInfoRefusalKeys(t *testing.T) {
 // below 60x18 mouse reporting is off, navigation/s/wheel do nothing, and the
 // cancel keys refuse even after `s` was pressed.
 func TestS1BelowFloorIgnoresInteractionAndCancels(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	for _, tc := range []struct {
 		name string
 		send string
@@ -862,7 +862,7 @@ func TestS1BelowFloorIgnoresInteractionAndCancels(t *testing.T) {
 			if code := r.exitCode(t); code != 1 {
 				t.Fatalf("exit = %d, want 1\nstderr:\n%s", code, r.stderr.String())
 			}
-			if !strings.Contains(r.stderr.String(), "xbpretty: user refused confirmation") {
+			if !strings.Contains(plainTestOutput(r.stderr.String()), "xbpretty: user refused confirmation") {
 				t.Errorf("refusal line missing:\n%s", r.stderr.String())
 			}
 		})

@@ -163,7 +163,7 @@ func TestLegacyCanonicalKeyWinsWithinFile(t *testing.T) {
 }
 
 func TestLegacyLaterLayerWinsAcrossSpellings(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	env := cleanEnv(t, dir)
 

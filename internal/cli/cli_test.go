@@ -1234,13 +1234,14 @@ func TestPassthruKeepsTheArgv0Command(t *testing.T) {
 		t.Errorf("passthru = %v, want [-F figlet]", o.passthru)
 	}
 
-	// Without an argv[0] command the same form still means install.
+	// Without an argv[0] command the same form carries no command: the
+	// caller must not invent one, so Run returns a usage error.
 	o, err = parseArgs([]string{"--", "figlet"}, "")
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
 	}
-	if o.command != "install" || len(o.args) != 1 || o.args[0] != "figlet" {
-		t.Errorf("command = %q args = %v, want install [figlet]", o.command, o.args)
+	if o.command != "" || len(o.passthru) != 1 || o.passthru[0] != "figlet" {
+		t.Errorf("command = %q passthru = %v, want no command and [figlet]", o.command, o.passthru)
 	}
 
 	// Through the link name the pass-through reaches xbps-remove unchanged.
@@ -1364,8 +1365,67 @@ func TestColorAutoChecksTheTerminalAndNoColor(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseArgs: %v", err)
 			}
-			if got := wantColor(tt.config, opts); got != tt.want {
+			if got := wantColor(tt.config, opts, tt.tty); got != tt.want {
 				t.Errorf("wantColor(%q, %v) = %v, want %v", tt.config, tt.argv, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestColorAlwaysThemesPipedStderr pins FR-057/FR-061's per-stream rule: an
+// explicit always paints the stderr prefix even when stderr is a pipe, and the
+// hint/error prefixes use their Notice/Error roles.
+func TestColorAlwaysThemesPipedStderr(t *testing.T) {
+	e := newEnv(t)
+	e.root = false
+	e.tty = false
+	_, _, errs := e.run("xbpretty", "install", "figlet", "--color=always")
+	if !strings.Contains(errs, "\x1b[1;93mhint: \x1b[0m") {
+		t.Errorf("piped stderr hint is not Notice-themed:\n%q", errs)
+	}
+
+	_, _, errs = e.run("xbpretty", "download", "--color=always")
+	if !strings.Contains(errs, "\x1b[1;91mxbpretty: \x1b[0m") {
+		t.Errorf("piped stderr error is not Error-themed:\n%q", errs)
+	}
+}
+
+// TestAutoColorIsPerStream pins FR-057's Auto rule: each stream decides for
+// itself whether it is a TTY, so a TTY stdout with a piped stderr colours only
+// the summary, and the reverse colours only the diagnostic prefix.
+func TestAutoColorIsPerStream(t *testing.T) {
+	for _, only := range []string{"stdout", "stderr"} {
+		t.Run(only+" is the TTY", func(t *testing.T) {
+			e := newEnv(t)
+			e.root = false
+			e.tty = false
+			cfg := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
+			data, err := os.ReadFile(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			updated := strings.Replace(string(data), `mode = "Never"`, `mode = "Auto"`, 1)
+			if err := os.WriteFile(cfg, []byte(updated), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			isTerminalFn = func(f *os.File) bool {
+				if only == "stdout" {
+					return f == os.Stdout
+				}
+				return f == os.Stderr
+			}
+
+			code, out, errs := e.run("xbpretty", "install", "figlet")
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1\n%s", code, errs)
+			}
+			stdoutColoured := strings.Contains(out, "\x1b[")
+			stderrColoured := strings.Contains(errs, "\x1b[")
+			if want := only == "stdout"; stdoutColoured != want {
+				t.Errorf("stdout coloured = %t, want %t:\n%q", stdoutColoured, want, out)
+			}
+			if want := only == "stderr"; stderrColoured != want {
+				t.Errorf("stderr coloured = %t, want %t:\n%q", stderrColoured, want, errs)
 			}
 		})
 	}
@@ -1866,10 +1926,10 @@ exit 0
 	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	e.pointInstallAt(stubScript)
+	e.writeConfig(stubScript, "[Ui]", `mode = "Plain"`)
 
 	e.tty = true
-	code, out, errs := e.run("xbpretty", "install", "-y", "--no-progress", "figlet")
+	code, out, errs := e.run("xbpretty", "install", "-y", "figlet")
 	if code != 0 {
 		t.Fatalf("interactive run failed code %d: %s", code, errs)
 	}
@@ -1900,6 +1960,7 @@ exit 0
 
 	// With the widget active the child stdout is consumed by the parser and
 	// never reaches stdout. There is no completion line any more.
+	e.writeConfig(stubScript)
 	e.tty = true
 	code, out, errs = e.run("xbpretty", "install", "-y", "figlet")
 	if code != 0 {
@@ -1937,9 +1998,9 @@ exit 0
 	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	e.pointInstallAt(stubScript)
+	e.writeConfig(stubScript, "[Ui]", `mode = "Plain"`)
 
-	code, out, errs := e.run("xbpretty", "install", "-y", "--no-progress", "figlet")
+	code, out, errs := e.run("xbpretty", "install", "-y", "figlet")
 	if code != 0 {
 		t.Fatalf("run failed code %d: %s", code, errs)
 	}
@@ -1981,9 +2042,9 @@ exit 0
 	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	e.pointInstallAt(stubScript)
+	e.writeConfig(stubScript, "[Ui]", `mode = "Plain"`)
 
-	code, out, errs := e.run("xbpretty", "install", "-y", "--no-progress", "figlet")
+	code, out, errs := e.run("xbpretty", "install", "-y", "figlet")
 	if code != 0 {
 		t.Fatalf("run failed code %d: %s", code, errs)
 	}
@@ -2037,23 +2098,16 @@ exit 2
 	}
 }
 
-func TestSummaryIgnoresRetiredBoxStyle(t *testing.T) {
+func TestRetiredBoxStyleFlagIsUnknown(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.tty = true
-	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
-	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
-
-	code, out, errs := e.run("xbpretty", "upgrade", "--dry-run", "--color=auto", "--box-style=classic")
-	if code != 0 {
-		t.Fatalf("exit = %d, want 0\n%s", code, errs)
+	code, _, errs := e.run("xbpretty", "upgrade", "--dry-run", "--box-style=classic")
+	if code != 2 {
+		t.Fatalf("exit = %d, want usage error 2\n%s", code, errs)
 	}
-	plain := ansiEscape.ReplaceAllString(out, "")
-	if !strings.Contains(plain, "\n Upgrade\n") {
-		t.Errorf("summary is missing the nala Upgrade section:\n%s", out)
-	}
-	if strings.Contains(plain, "┌") || strings.Contains(plain, "╭") {
-		t.Errorf("the retired box_style still changes the summary:\n%s", out)
+	if !strings.Contains(errs, "unknown flag --box-style") {
+		t.Errorf("stderr does not name the retired flag:\n%s", errs)
 	}
 }
 
@@ -2116,41 +2170,14 @@ func TestPrecedenceColorFlagAndNoColor(t *testing.T) {
 	}
 }
 
-func TestProgressBarOptionsAndFlags(t *testing.T) {
-	// 1. parseArgs --no-progress
-	o, err := parseArgs([]string{"upgrade", "--no-progress"}, "")
-	if err != nil {
-		t.Fatalf("parseArgs: %v", err)
-	}
-	if o.progressBar == nil || *o.progressBar != false {
-		t.Errorf("--no-progress did not set progressBar to false: %+v", o)
-	}
-
-	// 2. parseArgs --no-progress-bar
-	o, err = parseArgs([]string{"upgrade", "--no-progress-bar"}, "")
-	if err != nil {
-		t.Fatalf("parseArgs: %v", err)
-	}
-	if o.progressBar == nil || *o.progressBar != false {
-		t.Errorf("--no-progress-bar did not set progressBar to false: %+v", o)
-	}
-
-	// 3. parseArgs --progress-bar=false
-	o, err = parseArgs([]string{"upgrade", "--progress-bar=false"}, "")
-	if err != nil {
-		t.Fatalf("parseArgs: %v", err)
-	}
-	if o.progressBar == nil || *o.progressBar != false {
-		t.Errorf("--progress-bar=false did not set progressBar to false: %+v", o)
-	}
-
-	// 4. parseArgs --progress-bar=true
-	o, err = parseArgs([]string{"upgrade", "--progress-bar=true"}, "")
-	if err != nil {
-		t.Fatalf("parseArgs: %v", err)
-	}
-	if o.progressBar == nil || *o.progressBar != true {
-		t.Errorf("--progress-bar=true did not set progressBar to true: %+v", o)
+func TestRetiredProgressFlagsAreUnknown(t *testing.T) {
+	for _, flag := range []string{"--no-progress", "--no-progress-bar", "--progress-bar", "--progress-bar=false"} {
+		t.Run(flag, func(t *testing.T) {
+			_, err := parseArgs([]string{"upgrade", flag}, "")
+			if err == nil || !strings.Contains(err.Error(), "unknown flag") {
+				t.Errorf("parseArgs(%q) error = %v, want unknown flag", flag, err)
+			}
+		})
 	}
 }
 
@@ -2261,8 +2288,8 @@ exit 1
 }
 
 // TestProgressSuppressionMatrix pins FR-065's suppression matrix: Plain mode,
-// --no-progress, TERM=dumb, -v and a non-TTY stderr all disable the live
-// surface, and the child output is forwarded verbatim on stderr instead.
+// TERM=dumb, -v and a non-TTY stderr all disable the live surface, and the
+// child output is forwarded verbatim on stderr instead.
 func TestProgressSuppressionMatrix(t *testing.T) {
 	stubScript := func(t *testing.T) string {
 		t.Helper()
@@ -2291,7 +2318,6 @@ exit 0
 		argv   []string
 		config []string
 	}{
-		{name: "--no-progress", tty: true, term: "xterm", argv: []string{"--no-progress"}},
 		{name: "TERM=dumb", tty: true, term: "dumb", argv: nil},
 		{name: "verbose", tty: true, term: "xterm", argv: []string{"-v"}},
 		{name: "non-TTY stderr", tty: false, term: "xterm", argv: nil},

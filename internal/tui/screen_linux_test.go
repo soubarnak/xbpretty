@@ -202,37 +202,10 @@ func TestScreenConcurrentClose(t *testing.T) {
 	s.Close()
 }
 
-// TestLocateAnchorKeepsStray proves the DSR handshake replays bytes typed
-// during the query window instead of dropping them.
-func TestLocateAnchorKeepsStray(t *testing.T) {
-	master, slave := openTestPty(t)
-	// Raw mode keeps the reply and the stray key out of the canonical line
-	// buffer.
-	g := term.NewGuard(slave, slave)
-	if err := g.EnterFullscreen(false); err != nil {
-		t.Fatalf("raw mode: %v", err)
-	}
-	defer g.Restore()
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		_, _ = master.WriteString("j\x1b[12;5R")
-	}()
-	a := LocateAnchor(slave, slave, time.Second)
-	if !a.OK || a.Row != 12 || a.Col != 5 {
-		t.Fatalf("anchor = %+v, want 12;5", a)
-	}
-	if string(a.Stray) != "j" {
-		t.Errorf("Stray = %q, want the typed byte", a.Stray)
-	}
-}
-
 // TestNoAnchorFallback is AC-055's DSR half: a silent terminal times out and
 // the inline surface starts on a fresh line instead of an absolute anchor.
 func TestNoAnchorFallback(t *testing.T) {
-	a := LocateAnchor(nil, nil, 10*time.Millisecond)
-	if a.OK {
-		t.Fatalf("DSR on nil files reported an anchor: %+v", a)
-	}
+	a := Anchor{}
 	if got := a.BeginSequence(); got != term.NoAnchor {
 		t.Errorf("no-anchor BeginSequence = %q, want %q", got, term.NoAnchor)
 	}

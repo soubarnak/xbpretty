@@ -120,7 +120,7 @@ func (st *state) maybeRunHistoryScreen(opts *options, entry history.Entry) (int,
 		return 0, false
 	}
 	// FR-067: below 60x18 at entry the text path is used with no warning.
-	if w, h, err := term.Size(out); err != nil || w < 60 || h < 18 {
+	if w, h, err := term.Size(out); err != nil || !tui.Fits(w, h) {
 		return 0, false
 	}
 	outcome, code := st.runSummaryScreenPolicy(out, model, summaryScreenPolicy{Confirm: false})

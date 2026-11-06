@@ -29,7 +29,7 @@ func (st *state) runClean(opts *options) int {
 	if euidFn() != 0 {
 		if opts.cleanFetch {
 			// FR-048 names the revert, not the generic clean hint.
-			fmt.Fprintln(st.stderr, "hint: run with sudo to restore the repository configuration")
+			st.hintf("%s\n", "run with sudo to restore the repository configuration")
 		} else {
 			st.privHint("clean", opts)
 		}
@@ -39,19 +39,19 @@ func (st *state) runClean(opts *options) int {
 		return st.cleanFetchRestore(opts)
 	}
 	if err := st.r.cfg.ResolveFor("remove"); err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 	// FR-066: xbps-remove -O's output is forwarded child output, so both
 	// streams go to stderr; streamStderr also keeps them for the hint table.
 	code, output, err := st.r.streamStderr(st.r.cfg.Xbps.RemovePath, "-O")
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 	if code != 0 {
 		if h := hints.Lookup(code, output); h != nil {
-			fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
+			st.hintf("%s\n", h.Text)
 		}
 	}
 	return code
@@ -68,20 +68,20 @@ func (st *state) cleanLists(opts *options) int {
 	}
 	matches, err := filepath.Glob(filepath.Join(xbpsDBDir, "*", "*-repodata"))
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: cannot list cached repodata: %v\n", err)
+		st.errorf("cannot list cached repodata: %v\n", err)
 		return exitRuntime
 	}
 	for _, path := range matches {
 		info, err := os.Lstat(path)
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: cannot remove %s: %v\n", path, err)
+			st.errorf("cannot remove %s: %v\n", path, err)
 			return exitRuntime
 		}
 		if info.IsDir() {
 			continue
 		}
 		if err := os.Remove(path); err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: cannot remove %s: %v\n", path, err)
+			st.errorf("cannot remove %s: %v\n", path, err)
 			return exitRuntime
 		}
 	}
@@ -97,10 +97,10 @@ func (st *state) cleanFetchRestore(_ *options) int {
 	manifest, err := fetch.ReadManifestFor(fetchManifestPath, fetchWriteDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Fprintln(st.stderr, "xbpretty: no repository configuration written by xbp fetch")
+			st.errorf("%s\n", "no repository configuration written by xbp fetch")
 			return exitRuntime
 		}
-		fmt.Fprintf(st.stderr, "xbpretty: reading %s: %v\n", fetchManifestPath, err)
+		st.errorf("reading %s: %v\n", fetchManifestPath, err)
 		return exitRuntime
 	}
 
@@ -110,39 +110,39 @@ func (st *state) cleanFetchRestore(_ *options) int {
 			continue
 		}
 		if statErr != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: restoring %s: %v\n", entry.Path, statErr)
+			st.errorf("restoring %s: %v\n", entry.Path, statErr)
 			return exitRuntime
 		}
 		if !info.Mode().IsRegular() {
-			fmt.Fprintf(st.stderr, "xbpretty: restoring %s: is not a regular file\n", entry.Path)
+			st.errorf("restoring %s: is not a regular file\n", entry.Path)
 			return exitRuntime
 		}
 		current, readErr := fetch.ReadRegularFileNoFollow(entry.Path)
 		if readErr != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: restoring %s: %v\n", entry.Path, readErr)
+			st.errorf("restoring %s: %v\n", entry.Path, readErr)
 			return exitRuntime
 		}
 		if entry.SHA256 != "" && contentSHA256(current) != entry.SHA256 {
 			if entry.Backup != "" {
-				fmt.Fprintf(st.stderr, "xbpretty: %s was modified after fetch; restoring %s\n", entry.Path, entry.Backup)
+				st.errorf("%s was modified after fetch; restoring %s\n", entry.Path, entry.Backup)
 			} else {
-				fmt.Fprintf(st.stderr, "xbpretty: %s was modified after fetch; removing it\n", entry.Path)
+				st.errorf("%s was modified after fetch; removing it\n", entry.Path)
 			}
 		}
 		if entry.Backup != "" {
 			content, backupErr := fetch.ReadRegularFileNoFollow(entry.Backup)
 			if backupErr != nil {
-				fmt.Fprintf(st.stderr, "xbpretty: restoring %s: %v\n", entry.Path, backupErr)
+				st.errorf("restoring %s: %v\n", entry.Path, backupErr)
 				return exitRuntime
 			}
 			if err := fetch.WriteAtomic(entry.Path, content); err != nil {
-				fmt.Fprintf(st.stderr, "xbpretty: restoring %s: %v\n", entry.Path, err)
+				st.errorf("restoring %s: %v\n", entry.Path, err)
 				return exitRuntime
 			}
 			// The backup has been consumed. A later fetch must snapshot
 			// afresh rather than reuse this pre-fetch file.
 			if err := os.Remove(entry.Backup); err != nil && !os.IsNotExist(err) {
-				fmt.Fprintf(st.stderr, "xbpretty: restoring %s: removing backup %s: %v\n", entry.Path, entry.Backup, err)
+				st.errorf("restoring %s: removing backup %s: %v\n", entry.Path, entry.Backup, err)
 				return exitRuntime
 			}
 			if st.r != nil && st.r.verbose {
@@ -151,7 +151,7 @@ func (st *state) cleanFetchRestore(_ *options) int {
 			continue
 		}
 		if err := os.Remove(entry.Path); err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: removing %s: %v\n", entry.Path, err)
+			st.errorf("removing %s: %v\n", entry.Path, err)
 			return exitRuntime
 		}
 		if st.r != nil && st.r.verbose {
@@ -160,7 +160,7 @@ func (st *state) cleanFetchRestore(_ *options) int {
 	}
 
 	if err := os.Remove(fetchManifestPath); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(st.stderr, "xbpretty: removing %s: %v\n", fetchManifestPath, err)
+		st.errorf("removing %s: %v\n", fetchManifestPath, err)
 		return exitRuntime
 	}
 	return exitOK

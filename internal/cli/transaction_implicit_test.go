@@ -19,7 +19,7 @@ const implicitPlan = "cups-2.4.19_1 remove x86_64 https://repo-default.voidlinux
 // stubs, a fake root, and separate fixtures for the install and remove plans.
 func implicitEnv(t *testing.T, extra ...string) (bin string, env map[string]string) {
 	t.Helper()
-	bin = taggedBinary(t)
+	bin = testrootBinary(t)
 	cfgDir, _ := integrationConfig(t, "Never", extra...)
 	logPath := filepath.Join(filepath.Dir(cfgDir), "commands.log")
 	return bin, map[string]string{

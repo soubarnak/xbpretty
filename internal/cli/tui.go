@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"fmt"
 	"os"
 	"strings"
 	"syscall"
@@ -119,7 +118,7 @@ func (st *state) maybeRunSummaryScreenTitled(opts *options, labelCmd, titleCmd s
 	}
 	// FR-067: below 60x18 at entry the text path is used with no screen and
 	// no warning.
-	if w, h, err := term.Size(out); err != nil || w < 60 || h < 18 {
+	if w, h, err := term.Size(out); err != nil || !tui.Fits(w, h) {
 		return screenUnavailable, -1
 	}
 	return st.runSummaryScreen(out, st.planToTuiTitled(labelCmd, titleCmd, rows))
@@ -143,7 +142,7 @@ func (st *state) runSummaryScreenPolicy(out *os.File, model *tui.SummaryModel, p
 	}
 	scr, err := openScreenFn(in, out, st.color, true)
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: full-screen interface unavailable (%v); showing the text summary\n", err)
+		st.errorf("full-screen interface unavailable (%v); showing the text summary\n", err)
 		return screenUnavailable, -1
 	}
 	defer scr.Close()
@@ -152,7 +151,7 @@ func (st *state) runSummaryScreenPolicy(out *os.File, model *tui.SummaryModel, p
 	defer func() {
 		if r := recover(); r != nil {
 			scr.Close()
-			fmt.Fprintf(st.stderr, "xbpretty: full-screen interface failed (%v)\n", r)
+			st.errorf("full-screen interface failed (%v)\n", r)
 			panic(r)
 		}
 	}()
@@ -175,11 +174,11 @@ func (st *state) runSummaryScreenPolicy(out *os.File, model *tui.SummaryModel, p
 		// wiped when the guard leaves it. A failed render warns once and
 		// lets the text path finish the transaction.
 		scr.Close()
-		fmt.Fprintf(st.stderr, "xbpretty: full-screen interface failed (%v); showing the text summary\n", err)
+		st.errorf("full-screen interface failed (%v); showing the text summary\n", err)
 		return screenUnavailable, -1
 	}
 	w, h := scr.Size()
-	small := w < 60 || h < 18
+	small := !tui.Fits(w, h)
 	// FR-071: below the floor there is no cursor or mouse reporting. The
 	// summary can only enter at or above the floor, but a direct caller and
 	// the resize path still need the latch.
@@ -209,7 +208,7 @@ func (st *state) runSummaryScreenPolicy(out *os.File, model *tui.SummaryModel, p
 		switch ev.Kind {
 		case tui.EventResize:
 			w, h = ev.Width, ev.Height
-			small = w < 60 || h < 18
+			small = !tui.Fits(w, h)
 			scr.SetMouse(!small)
 			if err := draw(w, h); err != nil {
 				return fail(err)
@@ -416,38 +415,32 @@ func infoVersionIsAvailable(label string) bool {
 	return false
 }
 
-// planToTui converts the grouping and lookups the text summary already needs
-// into the S1 model. #77 reuses the renderer with History = true.
-func (st *state) planToTui(cmd string, rows []xbps.Row) *tui.SummaryModel {
-	return st.planToTuiTitled(cmd, cmd, rows)
-}
-
 // planToTuiTitled lets the remove label and the title come from different
 // commands; the ordinary transactions use the same command for both.
 func (st *state) planToTuiTitled(labelCmd, titleCmd string, rows []xbps.Row) *tui.SummaryModel {
-	return tuiModelFromSummaryTitled(st.planToSummary(labelCmd, rows), labelCmd, titleCmd, st.unit)
+	return tuiModelFromSummaryTitled(st.planToSummary(labelCmd, rows), titleCmd, st.unit)
 }
 
 // tuiModelFromSummary is the testable conversion; planToTui is the state-bound
 // wrapper that also performs the lookups.
 func tuiModelFromSummary(sum *summary.Summary, command string, unit summary.SizeUnit) *tui.SummaryModel {
-	return tuiModelFromSummaryTitled(sum, command, command, unit)
+	return tuiModelFromSummaryTitled(sum, command, unit)
 }
 
-// tuiModelFromSummaryTitled builds the model with independent section-label
-// and title commands.
-func tuiModelFromSummaryTitled(sum *summary.Summary, labelCmd, titleCmd string, unit summary.SizeUnit) *tui.SummaryModel {
+// tuiModelFromSummaryTitled builds the model with a title command independent
+// of the summary's section-label command.
+func tuiModelFromSummaryTitled(sum *summary.Summary, titleCmd string, unit summary.SizeUnit) *tui.SummaryModel {
 	model := &tui.SummaryModel{
 		Title: "xbpretty " + screenTitle(titleCmd),
 		Help:  screenHelp(titleCmd),
 	}
-	for _, sec := range screenSections(sum, labelCmd) {
-		if len(sec.rows) == 0 {
+	for _, sec := range sum.Sections() {
+		if len(sec.Rows) == 0 {
 			continue
 		}
-		tab := tui.Tab{Label: sec.label}
-		for _, row := range sec.rows {
-			tab.Rows = append(tab.Rows, tuiRow(sum, sec.label, row, unit))
+		tab := tui.Tab{Label: sec.Label}
+		for _, row := range sec.Rows {
+			tab.Rows = append(tab.Rows, tuiRow(sum, sec.Label, row, unit))
 		}
 		model.Tabs = append(model.Tabs, tab)
 	}
@@ -463,49 +456,6 @@ func tuiModelFromSummaryTitled(sum *summary.Summary, labelCmd, titleCmd string, 
 		model.Disk = summary.WidgetUnit(uint64(-delta), unit)
 	}
 	return model
-}
-
-// screenSection is one tab's source rows.
-type screenSection struct {
-	label string
-	rows  []summary.Row
-}
-
-// screenSections returns the non-empty sections in nala's fixed order, the
-// same order the inline summary uses.
-func screenSections(s *summary.Summary, command string) []screenSection {
-	var out []screenSection
-	if len(s.Remove) > 0 {
-		out = append(out, screenSection{label: screenRemoveLabel(command), rows: s.Remove})
-	}
-	if len(s.Install) > 0 {
-		out = append(out, screenSection{label: "Install", rows: s.Install})
-	}
-	if len(s.ReInstall) > 0 {
-		out = append(out, screenSection{label: "ReInstall", rows: s.ReInstall})
-	}
-	if len(s.Upgrade) > 0 {
-		out = append(out, screenSection{label: "Upgrade", rows: s.Upgrade})
-	}
-	if len(s.Configure) > 0 {
-		out = append(out, screenSection{label: "Configure", rows: s.Configure})
-	}
-	if len(s.Hold) > 0 {
-		out = append(out, screenSection{label: "Held", rows: s.Hold})
-	}
-	return out
-}
-
-func screenRemoveLabel(command string) string {
-	switch command {
-	case "autoremove":
-		return "AutoRemove"
-	case "purge":
-		return "Purge"
-	case "autopurge":
-		return "AutoPurge"
-	}
-	return "Remove"
 }
 
 // tuiRow converts one plan row, applying the operation's Size: semantics and

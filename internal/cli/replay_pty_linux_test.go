@@ -15,7 +15,7 @@ import (
 // opens S1 for undo, titled Undo with the forced operation's Purge section,
 // and y confirms without a second text prompt.
 func TestUndoUsesTheTuiSummaryScreen(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	writeReplayEntry(t, historyDirOf(dir), history.Entry{
 		Command:  []string{"install", "figlet", "-y"},

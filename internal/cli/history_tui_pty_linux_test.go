@@ -92,7 +92,7 @@ func historyFrameEnv(t *testing.T, dir string, entry history.Entry, dump string)
 // opens non-root with the History title, the entry's groups in fixed order,
 // counts-only footer rows and the quit help, and q leaves with exit 0.
 func TestHistoryDetailScreenFrame(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	dump := t.TempDir()
 	env := historyFrameEnv(t, dir, historyFullEntry(), dump)
@@ -156,7 +156,7 @@ func TestHistoryDetailScreenFrame(t *testing.T) {
 // h/l, Home/End, PgUp/PgDn and the wheel move the read-only selection, s opens
 // package info in the same frame, and q returns without leaving the screen.
 func TestHistoryDetailNavigationAndPackageInfo(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	dump := t.TempDir()
 	env := historyFrameEnv(t, dir, historyManyRowsEntry(), dump)
@@ -283,7 +283,7 @@ func TestHistoryDetailNavigationAndPackageInfo(t *testing.T) {
 // TestHistoryDetailQuitKeysExitZero is FR-069's quit matrix: q/Q/Esc/Ctrl-C and
 // EOF leave the read-only screen and exit 0, with no refusal line.
 func TestHistoryDetailQuitKeysExitZero(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	cases := []struct {
 		name string
 		send string
@@ -336,7 +336,7 @@ func TestHistoryDetailQuitKeysExitZero(t *testing.T) {
 // TestHistoryDetailIgnoresConfirmKeys is FR-069's inert-key half: y/Y/n/N never
 // confirm, refuse or repaint, not even with package info open.
 func TestHistoryDetailIgnoresConfirmKeys(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	dump := t.TempDir()
 	env := historyFrameEnv(t, dir, historyFullEntry(), dump)
@@ -377,7 +377,7 @@ func TestHistoryDetailIgnoresConfirmKeys(t *testing.T) {
 // screen opens only on the full-screen gate at or above 60x18, needs no root,
 // and every excluded cell takes the text detail.
 func TestHistoryDetailGateMatrix(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	cases := []struct {
 		name       string
 		mode       string
@@ -460,7 +460,7 @@ func TestHistoryDetailGateMatrix(t *testing.T) {
 // TestHistoryDetailNoGroupsFallsBackToText is FR-069's empty-entry rule: an
 // entry with no group rows never opens the screen.
 func TestHistoryDetailNoGroupsFallsBackToText(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	empty := history.Entry{
 		SchemaVersion: history.SchemaVersion,
@@ -492,7 +492,7 @@ func TestHistoryDetailNoGroupsFallsBackToText(t *testing.T) {
 // TestHistoryListStaysText is FR-069's list rule: xbp history (no selector) is
 // always the text table, even under Tui on a terminal.
 func TestHistoryListStaysText(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	env := historyTuiEnv(t, dir, historyFullEntry())
 
@@ -518,7 +518,7 @@ func TestHistoryListStaysText(t *testing.T) {
 // TestHistoryDetailBelowFloorIgnoresConfirmKeys reuses #76's resize path: the
 // too-small body keeps the History title, n/N stay inert, and q still exits 0.
 func TestHistoryDetailBelowFloorIgnoresConfirmKeys(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	dump := t.TempDir()
 	env := historyFrameEnv(t, dir, historyFullEntry(), dump)
@@ -558,7 +558,7 @@ func TestHistoryDetailBelowFloorIgnoresConfirmKeys(t *testing.T) {
 // single recorded version is Version, the duplicate Installed row is gone, and
 // the help returns to history.
 func TestHistoryDetailPackageInfoRemoveRow(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	dump := t.TempDir()
 	env := historyFrameEnv(t, dir, historyFullEntry(), dump)

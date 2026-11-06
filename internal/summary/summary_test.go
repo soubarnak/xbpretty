@@ -313,10 +313,10 @@ func TestSectionsUseTheFixedOrderAndIncludeConfigure(t *testing.T) {
 		{Name: "new", Version: "1.0_1", Action: actionInstall, DownloadSize: 2048, HasDownload: true},
 		{Name: "gone", Version: "1.0_1", Action: actionRemove, InstalledSize: 1024, HasInstalled: true},
 	}, nil, nil)
-	sections := s.sections()
+	sections := s.Sections()
 	var labels []string
 	for _, sec := range sections {
-		labels = append(labels, sec.label)
+		labels = append(labels, sec.Label)
 	}
 	want := []string{"Remove", "Install", "Configure"}
 	if strings.Join(labels, ",") != strings.Join(want, ",") {
@@ -478,16 +478,6 @@ func TestNoColorEmitsNoANSI(t *testing.T) {
 		if strings.Contains(b.String(), "\x1b[") {
 			t.Errorf("simple=%v: no-colour frame contains ANSI:\n%q", simple, b.String())
 		}
-	}
-}
-
-func TestBoxCharacterSet(t *testing.T) {
-	rounded := BoxCharacterSet("rounded")
-	if rounded.TopLeft != "╭" || rounded.BottomRight != "╯" || rounded.Horizontal != "─" {
-		t.Errorf("unexpected rounded chars: %+v", rounded)
-	}
-	if ascii := BoxCharacterSet("ascii"); ascii.TopLeft != "+" || ascii.Vertical != "|" {
-		t.Errorf("unexpected ascii chars: %+v", ascii)
 	}
 }
 

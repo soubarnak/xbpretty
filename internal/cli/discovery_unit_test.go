@@ -56,7 +56,7 @@ func TestParseRecordAlternativesAndLists(t *testing.T) {
 
 func TestMachineWriteFailureKeepsSuccess(t *testing.T) {
 	st := &state{stdout: failWriter{}, stderr: bytes.NewBuffer(nil)}
-	code := st.renderDiscoveryRows([]discovery.Row{{Name: "alpha", Pkgver: "alpha-1.0_1", Version: "1.0", Revision: "1"}}, &options{machine: true}, newSnapshot())
+	code := st.renderDiscoveryRows([]discovery.Row{{Name: "alpha", Pkgver: "alpha-1.0_1", Version: "1.0", Revision: "1"}}, &options{machine: true}, newDiscoverySnapshot())
 	if code != exitOK {
 		t.Errorf("machine write failure exit = %d, want 0", code)
 	}

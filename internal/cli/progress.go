@@ -345,8 +345,8 @@ func (m *progressModel) view() progressView {
 			msgRole:   rolePrimary,
 			left:      []progressInfo{{"Packages", pairCount(m.totalArchives, m.totalArchives)}, {"Remaining", "0s"}},
 			right: []progressInfo{
-				{"Data", widgetSize(m.totalBytes) + "/" + widgetSize(m.totalBytes)},
-				{"Speed", widgetSize(m.downloadSpeed()) + "/s"},
+				{"Data", summary.WidgetSize(m.totalBytes) + "/" + summary.WidgetSize(m.totalBytes)},
+				{"Speed", summary.WidgetSize(m.downloadSpeed()) + "/s"},
 			},
 			ratio: 1,
 		}
@@ -369,8 +369,8 @@ func (m *progressModel) view() progressView {
 				{"Remaining", remaining},
 			},
 			right: []progressInfo{
-				{"Data", widgetSize(position) + "/" + widgetSize(m.totalBytes)},
-				{"Speed", widgetSize(rate) + "/s"},
+				{"Data", summary.WidgetSize(position) + "/" + summary.WidgetSize(m.totalBytes)},
+				{"Speed", summary.WidgetSize(rate) + "/s"},
 			},
 			ratio: m.ratio(),
 		}
@@ -511,8 +511,8 @@ func renderPlainLine(state plainState) string {
 	b.WriteString("% ")
 	b.WriteString(state.message)
 	if state.hasTransfer {
-		b.WriteString(" " + widgetSize(state.position) + "/" + widgetSize(state.total))
-		b.WriteString(" " + widgetSize(state.rate) + "/s")
+		b.WriteString(" " + summary.WidgetSize(state.position) + "/" + summary.WidgetSize(state.total))
+		b.WriteString(" " + summary.WidgetSize(state.rate) + "/s")
 	}
 	if state.hasItem {
 		b.WriteString(" | Package: " + state.item)

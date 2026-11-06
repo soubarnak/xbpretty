@@ -2,7 +2,6 @@ package tui
 
 import (
 	"bytes"
-	"fmt"
 	"strconv"
 
 	"github.com/soubarnak/xbpretty/internal/term"
@@ -310,9 +309,4 @@ func join(ss []string, sep string) string {
 		b.WriteString(s)
 	}
 	return b.String()
-}
-
-// DebugFrame renders the grid with its SGR dump for human inspection.
-func DebugFrame(b *Buffer, color bool) string {
-	return fmt.Sprintf("%s\n%q", b.Text(), b.Flush(nil, color))
 }

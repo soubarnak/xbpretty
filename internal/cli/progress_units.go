@@ -5,23 +5,6 @@ import (
 	"math"
 )
 
-var (
-	binarySizeUnits = []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
-)
-
-// widgetSize renders a byte count with the widget's fixed unit rule: Binary,
-// precision 1, independent of [Ui] unit, with nala's strict '>' switch so
-// exactly 1 MiB prints as 1024.0 KiB (ADR-0012 decision 4).
-func widgetSize(bytes uint64) string {
-	value := float64(bytes)
-	unit := 0
-	for unit < len(binarySizeUnits)-1 && value > 1024 {
-		value /= 1024
-		unit++
-	}
-	return fmt.Sprintf("%.1f %s", value, binarySizeUnits[unit])
-}
-
 // widgetTime is rust-apt's time_str with nala's strict '>' boundaries.
 func widgetTime(seconds uint64) string {
 	switch {

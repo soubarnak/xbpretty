@@ -78,12 +78,18 @@ func wordsFor(cmd string) []string {
 		out = append(out, s)
 	}
 	for _, f := range spec.FlagsFor(cmd) {
-		if f.Hidden || f.Refusal != "" {
+		if f.Hidden || f.Refusal != "" || f.NoOp {
 			continue
 		}
 		spellings := spec.FlagSpellings(f)
 		if cmd == "fetch" && f.Long == "dry-run" {
 			spellings = []string{"--dry-run"}
+		}
+		// FR-005: after list/search -V is --virtual, so the global
+		// --version keeps its long spelling only. The parser still accepts
+		// the typed -V as --virtual in that position.
+		if (cmd == "list" || cmd == "search") && f.Long == "version" {
+			spellings = []string{"--version"}
 		}
 		if cmd == "search" && f.Long == "names" {
 			spellings = []string{"-n", "--names", "--names-only"}
@@ -447,14 +453,14 @@ for __xbpretty_cmd in ` + quotedWords(completionNames()) + `
 `)
 	// Global flags are completed after a subcommand too.
 	for _, f := range spec.Flags {
-		if !f.Global || f.Hidden || f.Refusal != "" || f.Long == "version" {
+		if !f.Global || f.Hidden || f.Refusal != "" || f.NoOp || f.Long == "version" {
 			continue
 		}
 		writeFishFlag(&b, "$__xbpretty_cmd", f, "")
 	}
 	// Per-command flags, grouped by the commands that accept each one.
 	for _, f := range spec.Flags {
-		if f.Global || f.Hidden || f.Refusal != "" {
+		if f.Global || f.Hidden || f.Refusal != "" || f.NoOp {
 			continue
 		}
 		writeFishFlag(&b, "$__xbpretty_cmd", f, fishCondition(f.Commands))

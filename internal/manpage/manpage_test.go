@@ -83,6 +83,11 @@ func TestMan8CoversTheCommandSurface(t *testing.T) {
 			}
 		}
 	}
+	for _, retired := range []string{"--box-style", "--progress-bar", "--no-progress", "--no-progress-bar"} {
+		if strings.Contains(text, retired) {
+			t.Errorf("xbpretty.8 still documents the retired flag %q", retired)
+		}
+	}
 	for _, want := range []string{
 		"auto", "always", "never", "bash", "zsh", "fish",
 		"standard output", "standard error", "standard input",
@@ -91,7 +96,6 @@ func TestMan8CoversTheCommandSurface(t *testing.T) {
 		"EXIT STATUS", "FILES", "SECURITY", "SEE ALSO",
 		"UID 0", "trust", "history", "--print-uris", "--machine",
 		".It Cm --auto Op Ar N",
-		".It Cm --progress-bar Op Ar BOOL",
 		"/var/lib/xbpretty/fetch.json",
 		".xbpretty-backup",
 		"/usr/share/xbps.d",

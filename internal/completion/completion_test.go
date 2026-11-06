@@ -21,12 +21,12 @@ func TestScriptShells(t *testing.T) {
 			if s == "" {
 				t.Fatal("empty script")
 			}
-			for _, cmd := range Subcommands {
-				if !strings.Contains(s, cmd) {
-					t.Errorf("script is missing subcommand %q", cmd)
+			for _, cmd := range spec.VisibleCommands() {
+				if !strings.Contains(s, cmd.Name) {
+					t.Errorf("script is missing subcommand %q", cmd.Name)
 				}
 			}
-			for _, flag := range Flags {
+			for _, flag := range allAdvertisedSpellings() {
 				if fishFlag(s, shell, flag) {
 					continue
 				}
@@ -54,6 +54,19 @@ func fishFlag(script, shell, flag string) bool {
 	default:
 		return strings.Contains(script, "-s "+name)
 	}
+}
+
+// allAdvertisedSpellings mirrors the completion generator's filter: every
+// visible flag spelling, excluding hidden, refused and N/A (NoOp) flags.
+func allAdvertisedSpellings() []string {
+	var out []string
+	for _, f := range spec.Flags {
+		if f.Hidden || f.Refusal != "" || f.NoOp {
+			continue
+		}
+		out = append(out, spec.FlagSpellings(f)...)
+	}
+	return out
 }
 
 // TestAC025BashCompletionOffersInstalledNames runs the generated bash script
@@ -390,7 +403,7 @@ func TestRev6CompletionSurface(t *testing.T) {
 		"--allow-unauthenticated", "--fix-broken", "--target-release",
 		"--install-recommends", "--install-suggests", "--remove-essential",
 		"--remove-config", "--exclude", "--sources", "--debian", "--ubuntu",
-		"--devuan",
+		"--devuan", "--no-fix-broken", "--no-install-recommends", "--no-install-suggests",
 	}
 	for _, shell := range []string{"bash", "zsh", "fish"} {
 		t.Run(shell, func(t *testing.T) {
@@ -403,9 +416,9 @@ func TestRev6CompletionSurface(t *testing.T) {
 					t.Errorf("%s script does not complete the alias %q", shell, alias)
 				}
 			}
-			for _, cmd := range Subcommands {
-				if !strings.Contains(script, cmd) {
-					t.Errorf("%s script is missing command %q", shell, cmd)
+			for _, cmd := range spec.VisibleCommands() {
+				if !strings.Contains(script, cmd.Name) {
+					t.Errorf("%s script is missing command %q", shell, cmd.Name)
 				}
 			}
 			for _, want := range []string{"color", "auto always never", "last", ".json"} {
@@ -430,9 +443,6 @@ func TestRev6CompletionSurface(t *testing.T) {
 				if !strings.Contains(script, "for __xbpretty_cmd in xbpretty xbp ") {
 					t.Errorf("fish does not register the primary xbpretty name")
 				}
-				if !strings.Contains(script, "-l no-fix-broken") {
-					t.Errorf("fish does not offer the accepted no-op --no-fix-broken")
-				}
 			} else {
 				want := "complete -F _xbpretty xbpretty"
 				if shell == "zsh" {
@@ -440,9 +450,6 @@ func TestRev6CompletionSurface(t *testing.T) {
 				}
 				if !strings.Contains(script, want) {
 					t.Errorf("%s does not bind the primary xbpretty name", shell)
-				}
-				if !strings.Contains(script, "--no-fix-broken") {
-					t.Errorf("%s does not offer the accepted no-op --no-fix-broken", shell)
 				}
 			}
 		})
@@ -513,6 +520,15 @@ func TestCompletionPerCommandFlagsAndHistory(t *testing.T) {
 				p := probeCompletion(t, shell, "xbp", "list", "-")
 				if !offers(p, "--virtual") {
 					t.Errorf("--virtual not offered after list: %q", p.offered)
+				}
+				if !offers(p, "-V") {
+					t.Errorf("-V not offered after list: %q", p.offered)
+				}
+			})
+			t.Run("search offers --virtual", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "search", "-")
+				if !offers(p, "--virtual") {
+					t.Errorf("--virtual not offered after search: %q", p.offered)
 				}
 			})
 			t.Run("root offers --version", func(t *testing.T) {

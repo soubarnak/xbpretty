@@ -7,21 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
-	"unsafe"
 )
-
-// setPtySize sets a pseudo-terminal's window size for the full-width golden
-// runs.
-func setPtySize(f *os.File, cols, rows int) error {
-	ws := winsize{ws_col: uint16(cols), ws_row: uint16(rows)}
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), syscall.TIOCSWINSZ, uintptr(unsafe.Pointer(&ws)))
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
 
 // TestSummaryFullWidthGoldensThroughTheBuiltBinary drives the built binary on
 // a real 80- and 100-column terminal, where FR-062 asks for full-width tables

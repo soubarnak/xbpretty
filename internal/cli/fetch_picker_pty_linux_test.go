@@ -241,7 +241,7 @@ func waitFetchFrame(t *testing.T, r *ptyRun, dump string, n int) string {
 // 80x24 four-mirror golden: rounded border, title, columns, ✓/☐ markers, the
 // Secondary+REVERSED URL and Score highlight, and both bands.
 func TestAC052FetchPickerFrame(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	fixture := fetchPickerFixture(t)
 	h := newFetchPickerHarness(t, fixture, "Auto")
 	port := fixturePort(t, fixture.srv.URL)
@@ -288,7 +288,7 @@ func TestAC052FetchPickerFrame(t *testing.T) {
 // TestAC052FetchPickerKeysAndWrap drives the PTY key loop: j/k wrap, g/G,
 // Home/End, arrows, and the ignored Space and mouse events.
 func TestAC052FetchPickerKeysAndWrap(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	fixture := fetchPickerFixture(t)
 	h := newFetchPickerHarness(t, fixture, "Auto")
 
@@ -358,7 +358,7 @@ func TestAC052FetchPickerConfirmCancel(t *testing.T) {
 		{"Ctrl-C", "\x03", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			bin := buildTuiBinary(t)
+			bin := testrootBinary(t)
 			h := newFetchPickerHarness(t, fixture, "Auto")
 			original, err := os.ReadFile(h.repo)
 			if err != nil {
@@ -384,7 +384,7 @@ func TestAC052FetchPickerConfirmCancel(t *testing.T) {
 			if code != 1 {
 				t.Errorf("%s exit = %d, want 1", tc.name, code)
 			}
-			if !strings.Contains(r.stderr.String(), "xbpretty: no mirror was selected") {
+			if !strings.Contains(plainTestOutput(r.stderr.String()), "xbpretty: no mirror was selected") {
 				t.Errorf("%s stderr = %q, want the exact cancel line", tc.name, r.stderr.String())
 			}
 			if _, err := os.Stat(h.repo); err != nil {
@@ -401,7 +401,7 @@ func TestAC052FetchPickerConfirmCancel(t *testing.T) {
 // exactly once and a failed validation is not retried with a second mirror.
 func TestFetchPickerValidatesOneChoice(t *testing.T) {
 	fixture := fetchPickerFixture(t)
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	h := newFetchPickerHarness(t, fixture, "Auto")
 	r := startPty(t, bin, h.with(nil), []string{"fetch"}, 80, 24)
 	waitFetchFrame(t, r, h.dump, 1)
@@ -434,7 +434,7 @@ func TestFetchPickerValidatesOneChoice(t *testing.T) {
 	if code := r2.exitCode(t); code != 1 {
 		t.Errorf("failed-validation exit = %d, want 1\nstderr:\n%s", code, r2.stderr.String())
 	}
-	if !strings.Contains(r2.stderr.String(), "xbpretty: no candidate mirror serves all configured repositories") {
+	if !strings.Contains(plainTestOutput(r2.stderr.String()), "xbpretty: no candidate mirror serves all configured repositories") {
 		t.Errorf("failed validation stderr = %q", r2.stderr.String())
 	}
 	if _, _, heads, _, _ := fixture.counts(); heads != 2 {
@@ -445,7 +445,7 @@ func TestFetchPickerValidatesOneChoice(t *testing.T) {
 // TestFetchPickerC1At60x18 is AC-052's fit half: at the 60x18 floor Location
 // and Region are gone, the URL keeps its 24-cell floor, and Latency/Score stay.
 func TestFetchPickerC1At60x18(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	fixture := fetchPickerFixture(t)
 	h := newFetchPickerHarness(t, fixture, "Auto")
 	r := startPty(t, bin, h.with(nil), []string{"fetch"}, 60, 18)
@@ -504,7 +504,7 @@ func assertPickerRestored(t *testing.T, r *ptyRun) {
 // TestFetchPickerRestoresTerminal covers AC-054's lifecycle on the picker:
 // confirm and SIGTERM both leave the alternate screen, cursor and paste clean.
 func TestFetchPickerRestoresTerminal(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	t.Run("confirm", func(t *testing.T) {
 		fixture := fetchPickerFixture(t)
 		h := newFetchPickerHarness(t, fixture, "Auto")
@@ -535,7 +535,7 @@ func TestFetchPickerRestoresTerminal(t *testing.T) {
 // resize paints the notice, q is ignored there, and growing back restores the
 // full frame. Esc cancels from the small frame in the second subtest.
 func TestFetchPickerResizeNoticeAndReturn(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	fixture := fetchPickerFixture(t)
 	start := func(t *testing.T) (*fetchPickerHarness, *ptyRun) {
 		t.Helper()
@@ -587,7 +587,7 @@ func TestFetchPickerResizeNoticeAndReturn(t *testing.T) {
 		if code := r.exitCode(t); code != 1 {
 			t.Errorf("small-frame Esc exit = %d, want 1\nstderr:\n%s", code, r.stderr.String())
 		}
-		if !strings.Contains(r.stderr.String(), "xbpretty: no mirror was selected") {
+		if !strings.Contains(plainTestOutput(r.stderr.String()), "xbpretty: no mirror was selected") {
 			t.Errorf("small-frame cancel line = %q", r.stderr.String())
 		}
 		assertPickerRestored(t, r)
@@ -597,7 +597,7 @@ func TestFetchPickerResizeNoticeAndReturn(t *testing.T) {
 // TestFetchPickerEntryBelowFloor uses the text path with no screen and no
 // warning (FR-067), writing the shortlist's choice.
 func TestFetchPickerEntryBelowFloor(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	fixture := fetchPickerFixture(t)
 	h := newFetchPickerHarness(t, fixture, "Auto")
 	r := startPty(t, bin, h.with(nil), []string{"fetch"}, 50, 15)
@@ -622,14 +622,14 @@ func TestFetchPickerEntryBelowFloor(t *testing.T) {
 // TestFetchPickerFailedScreenWarnsOnceAndFallsBack covers init and render
 // failures: one exact FR-067 warning, no picker, and the shortlist write path.
 func TestFetchPickerFailedScreenWarnsOnceAndFallsBack(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	for _, tc := range []struct {
 		name string
 		fail string
 		want string
 	}{
-		{"init", "init", "xbpretty: full-screen interface unavailable (injected init failure); showing the text summary"},
-		{"render", "render", "xbpretty: full-screen interface failed (injected render failure); showing the text summary"},
+		{"init", "init", "xbpretty: full-screen interface unavailable (injected init failure); showing the ranking table"},
+		{"render", "render", "xbpretty: full-screen interface failed (injected render failure); showing the ranking table"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := fetchPickerFixture(t)
@@ -641,7 +641,7 @@ func TestFetchPickerFailedScreenWarnsOnceAndFallsBack(t *testing.T) {
 			if got := strings.Count(r.stderr.String(), "full-screen interface"); got != 1 {
 				t.Errorf("%s warning count = %d, want 1\nstderr:\n%s", tc.name, got, r.stderr.String())
 			}
-			if !strings.Contains(r.stderr.String(), tc.want) {
+			if !strings.Contains(plainTestOutput(r.stderr.String()), tc.want) {
 				t.Errorf("%s warning = %q, want %q", tc.name, r.stderr.String(), tc.want)
 			}
 			if tc.name == "init" && strings.Contains(r.cap.String(), term.AltEnter) {
@@ -662,7 +662,7 @@ func TestFetchPickerFailedScreenWarnsOnceAndFallsBack(t *testing.T) {
 // binary: the guard restores, the exact warning lands after the restore, and
 // the panic is re-raised.
 func TestFetchPickerPanicRestores(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	fixture := fetchPickerFixture(t)
 	h := newFetchPickerHarness(t, fixture, "Auto")
 	original, err := os.ReadFile(h.repo)
@@ -673,7 +673,7 @@ func TestFetchPickerPanicRestores(t *testing.T) {
 	if code := r.exitCode(t); code != 2 {
 		t.Errorf("panic exit = %d, want 2\nstderr:\n%s", code, r.stderr.String())
 	}
-	if !strings.Contains(r.stderr.String(), "xbpretty: full-screen interface failed (injected full-screen panic)") {
+	if !strings.Contains(plainTestOutput(r.stderr.String()), "xbpretty: full-screen interface failed (injected full-screen panic)") {
 		t.Errorf("panic warning missing:\n%s", r.stderr.String())
 	}
 	assertPickerRestored(t, r)
@@ -686,7 +686,7 @@ func TestFetchPickerPanicRestores(t *testing.T) {
 // Auto/Tui and --no-tui (which demotes Tui to Auto), and never under Plain,
 // --auto, --dry-run, TERM=dumb or a rootless run.
 func TestFetchPickerGateMatrix(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	cases := []struct {
 		name     string
 		mode     string

@@ -568,7 +568,7 @@ func inlineScreenEnv(t *testing.T, dir, query, stub string) map[string]string {
 // the alternate screen, disables mouse, shows the cursor and restores termios
 // before the viewport is built and before the commit child emits.
 func TestInlineViewportAfterS1Confirm(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	env := inlineScreenEnv(t, dir, query, writeInlineScreenStub(t))
@@ -775,7 +775,7 @@ func TestInlineViewportResizeDuringPredownload(t *testing.T) {
 // the pty reaches the foreground process group, the child reports 130 and the
 // deferred teardown restores the terminal.
 func TestInlineViewportCtrlCThroughTheTTY(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	env := inlineScreenEnv(t, dir, query, writeInlineScreenStub(t))

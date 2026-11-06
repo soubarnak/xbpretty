@@ -164,7 +164,7 @@ func lastEntry(t *testing.T, dir string) history.Entry {
 // install entry is undone by a forced removal, one new undo entry is written
 // and one audit line is appended.
 func TestAC026UndoInstallRemovesForcedAndWritesOneReplayEntry(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	writeReplayEntry(t, store, history.Entry{
@@ -222,7 +222,7 @@ func TestAC026UndoInstallRemovesForcedAndWritesOneReplayEntry(t *testing.T) {
 // upgrade restores the recorded old version from a cache-only archive through
 // the temporary replay repository, with one -f and no sync.
 func TestUndoUpgradeRestoresExactOldVersionFromCache(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	writeReplayEntry(t, store, history.Entry{
@@ -284,7 +284,7 @@ func TestUndoUpgradeRestoresExactOldVersionFromCache(t *testing.T) {
 // route: a configured repository serving the exact version restores without a
 // temporary replay repository.
 func TestUndoUpgradeUsesRepositoryWhenCacheIsEmpty(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	writeReplayEntry(t, historyDirOf(dir), history.Entry{
 		Command:  []string{"install", "figlet", "-y"},
@@ -315,7 +315,7 @@ func TestUndoUpgradeUsesRepositoryWhenCacheIsEmpty(t *testing.T) {
 // TestAC027PreflightFailsClosedBeforeAnyMutation pins AC-027's fail-closed
 // half: one line per unrestorable package, exit 1, and no mutating child.
 func TestAC027PreflightFailsClosedBeforeAnyMutation(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	writeReplayEntry(t, store, history.Entry{
@@ -350,7 +350,7 @@ func TestAC027PreflightFailsClosedBeforeAnyMutation(t *testing.T) {
 // reinstall has no inverse, and an entry with no replayable rows has nothing
 // to replay.
 func TestAC027UnsupportedEntriesAreRefused(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	writeReplayEntry(t, store, history.Entry{
@@ -379,7 +379,7 @@ func TestAC027UnsupportedEntriesAreRefused(t *testing.T) {
 // TestUndoRestoresBeforeRemoving pins FR-033's phase order: every restore runs
 // in the first xbps transaction and every removal in the second.
 func TestUndoRestoresBeforeRemoving(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	writeReplayEntry(t, store, history.Entry{
@@ -418,7 +418,7 @@ func TestUndoRestoresBeforeRemoving(t *testing.T) {
 // TestUndoEmptyPlanIsANoOp pins FR-033's empty-plan rule: a plan whose targets
 // already match prints Nothing to do. and exits 0 without a child or entry.
 func TestUndoEmptyPlanIsANoOp(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	writeReplayEntry(t, store, history.Entry{
@@ -449,7 +449,7 @@ func TestUndoEmptyPlanIsANoOp(t *testing.T) {
 // TestUndoPartialRemovalFailureReportsAndWritesNothing pins FR-033's partial
 // message and FR-031's nothing-on-failure rule.
 func TestUndoPartialRemovalFailureReportsAndWritesNothing(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	writeReplayEntry(t, store, history.Entry{
@@ -487,7 +487,7 @@ func TestUndoPartialRemovalFailureReportsAndWritesNothing(t *testing.T) {
 // source entry of the newest undo, restores its after version, and writes a
 // new redo entry.
 func TestAC028RedoReinstallsAtRecordedVersion(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	first := writeReplayEntry(t, store, history.Entry{
@@ -531,7 +531,7 @@ func TestAC028RedoReinstallsAtRecordedVersion(t *testing.T) {
 // TestRedoLastTargetsNewestEntryLiterally pins FR-035: explicit `redo last`
 // is the newest entry, never the source of an undo.
 func TestRedoLastTargetsNewestEntryLiterally(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	writeReplayEntry(t, store, history.Entry{
@@ -561,7 +561,7 @@ func TestRedoLastTargetsNewestEntryLiterally(t *testing.T) {
 // TestDoubleUndoThenRedoToggles pins FR-035's toggle: undoing twice walks back
 // to the installed state, and redo then replays the source undo's absence.
 func TestDoubleUndoThenRedoToggles(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	writeReplayEntry(t, store, history.Entry{
@@ -602,7 +602,7 @@ func TestDoubleUndoThenRedoToggles(t *testing.T) {
 // TestAC029ClearOneAndAll pins AC-029: root-only, exact counts, singular and
 // plural, and stale tmp sweeping.
 func TestAC029ClearOneAndAll(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	for i := 0; i < 3; i++ {
@@ -669,11 +669,17 @@ func TestAC029ClearOneAndAll(t *testing.T) {
 	if code != 0 || out != "Cleared 2 history entries.\n" {
 		t.Errorf("plural clear --all = %d, stdout %q, stderr %q", code, out, errs)
 	}
+
+	// FR-035/AC-029: an already empty store still reports the zero count.
+	out, errs, code = runBinary(t, bin, env, "history", "clear", "--all")
+	if code != 0 || out != "Cleared 0 history entries.\n" {
+		t.Errorf("empty clear --all = %d, stdout %q, stderr %q", code, out, errs)
+	}
 }
 
 // TestClearExitCodes pins the clear selectors' usage and missing-entry codes.
 func TestClearExitCodes(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	writeReplayEntry(t, store, history.Entry{
@@ -704,7 +710,7 @@ func TestClearExitCodes(t *testing.T) {
 
 // TestReplayStoreErrors pins the selector, empty-store and unknown-id rules.
 func TestReplayStoreErrors(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	env := replayEnv(t, dir, "", "").readOnlyEnv()
 
@@ -729,7 +735,7 @@ func TestReplayStoreErrors(t *testing.T) {
 // TestDownloadOnlyStaysRejectedForReplays pins the parser rule: replays never
 // accept --download-only.
 func TestDownloadOnlyStaysRejectedForReplays(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	env := replayEnv(t, dir, "", "")
 	_, errs, code := runBinary(t, bin, env, "undo", "-d")
@@ -741,7 +747,7 @@ func TestDownloadOnlyStaysRejectedForReplays(t *testing.T) {
 // TestReplayRestoresTheAutomaticInstallBit pins FR-034's best-effort bulk
 // pkgdb restoration and its warning on failure.
 func TestReplayRestoresTheAutomaticInstallBit(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	entry := history.Entry{
@@ -783,7 +789,7 @@ func TestReplayRestoresTheAutomaticInstallBit(t *testing.T) {
 // TestReplayRoutesItsDownloadSetThroughPredownload pins the #72 seam: a
 // repository-served restore predownloads before the restore child.
 func TestReplayRoutesItsDownloadSetThroughPredownload(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	entry := history.Entry{
@@ -813,7 +819,7 @@ func TestReplayRoutesItsDownloadSetThroughPredownload(t *testing.T) {
 
 // TestReplaySweepsStaleReplayRepositories pins FR-034's day-old sweep.
 func TestReplaySweepsStaleReplayRepositories(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	writeReplayEntry(t, store, history.Entry{
@@ -844,7 +850,7 @@ func TestReplaySweepsStaleReplayRepositories(t *testing.T) {
 // whose rows do not describe the run: the command, replay fields and exact
 // target version are all recorded.
 func TestReplayEntryRecordsTheActualTransitions(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	writeReplayEntry(t, store, history.Entry{
@@ -876,7 +882,7 @@ func TestReplayEntryRecordsTheActualTransitions(t *testing.T) {
 // TestReplayProgressCountsAsOneEntryPerReplay is a direct guard on FR-031:
 // each replay writes exactly one entry even when both phases ran.
 func TestReplayProgressCountsAsOneEntryPerReplay(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	writeReplayEntry(t, store, history.Entry{
@@ -905,7 +911,7 @@ func TestReplayProgressCountsAsOneEntryPerReplay(t *testing.T) {
 // TestRedoMapsRemoveAndPurge pins FR-035's redo mapping for the remove-family
 // operations: Remove uninstalls plainly, Purge uninstalls with -f.
 func TestRedoMapsRemoveAndPurge(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	for _, tc := range []struct {
 		name    string
 		op      string
@@ -940,7 +946,7 @@ func TestRedoMapsRemoveAndPurge(t *testing.T) {
 // TestRedoReinstallRestoresTheRecordedAfterVersion pins FR-035's Reinstall
 // mapping: the after version is restored exactly.
 func TestRedoReinstallRestoresTheRecordedAfterVersion(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	writeReplayEntry(t, historyDirOf(dir), history.Entry{
 		Command:  []string{"install", "figlet", "--reinstall", "-y"},
@@ -963,7 +969,7 @@ func TestRedoReinstallRestoresTheRecordedAfterVersion(t *testing.T) {
 // TestReplayLeavesHoldsAndRepolocksAlone pins FR-034: holds and repolocks are
 // recorded but never changed by a replay.
 func TestReplayLeavesHoldsAndRepolocksAlone(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	entry := history.Entry{
 		Command:  []string{"install", "figlet", "-y"},
@@ -990,7 +996,7 @@ func TestReplayLeavesHoldsAndRepolocksAlone(t *testing.T) {
 // TestAlreadyEqualReplayLeavesTheAutomaticBitAlone pins FR-033: an
 // already-equal target is untouched, including its automatic-install bit.
 func TestAlreadyEqualReplayLeavesTheAutomaticBitAlone(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	writeReplayEntry(t, historyDirOf(dir), history.Entry{
 		Command:  []string{"install", "figlet", "-y"},
@@ -1008,7 +1014,7 @@ func TestAlreadyEqualReplayLeavesTheAutomaticBitAlone(t *testing.T) {
 // TestAC027OneLinePerUnrestorablePackage pins the per-package half of the
 // fail-closed message.
 func TestAC027OneLinePerUnrestorablePackage(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	writeReplayEntry(t, store, history.Entry{
@@ -1042,7 +1048,7 @@ func TestAC027OneLinePerUnrestorablePackage(t *testing.T) {
 // crafted name cannot escape the cache or be read as an xbps flag, and the
 // refusal happens before any child runs.
 func TestReplayRejectsMaliciousEntryMetadata(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	for _, name := range []string{"../evil", "-f", ".hidden"} {
 		t.Run(strings.ReplaceAll(name, "/", "_"), func(t *testing.T) {
 			dir := t.TempDir()
@@ -1098,7 +1104,7 @@ func TestReplayRejectsMaliciousEntryMetadata(t *testing.T) {
 // TestReplayRindexRetriesWithForce pins FR-034's -f retry when the index
 // already has the entry.
 func TestReplayRindexRetriesWithForce(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	writeReplayEntry(t, historyDirOf(dir), history.Entry{
 		Command:  []string{"install", "figlet", "-y"},
@@ -1124,7 +1130,7 @@ func TestReplayRindexRetriesWithForce(t *testing.T) {
 // TestReplayCleansTheReplayRepoAfterChildFailure pins FR-034's cleanup on
 // every exit path, including a failed restore child.
 func TestReplayCleansTheReplayRepoAfterChildFailure(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	writeReplayEntry(t, historyDirOf(dir), history.Entry{
 		Command:  []string{"install", "figlet", "-y"},
@@ -1146,7 +1152,7 @@ func TestReplayCleansTheReplayRepoAfterChildFailure(t *testing.T) {
 // TestRedoConfigureHeldOnlyIsRefused pins the no-replayable-row rule for redo
 // as well as undo.
 func TestRedoConfigureHeldOnlyIsRefused(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	writeReplayEntry(t, historyDirOf(dir), history.Entry{
 		Command: []string{"install", "figlet"},
@@ -1165,7 +1171,7 @@ func TestRedoConfigureHeldOnlyIsRefused(t *testing.T) {
 // TestClearAllCorruptStoreIsTheEscapeHatch pins FR-029: clear --all does not
 // need to parse entries, so a corrupt store can still be cleared.
 func TestClearAllCorruptStoreIsTheEscapeHatch(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	store := historyDirOf(dir)
 	if err := os.MkdirAll(store, 0o755); err != nil {
@@ -1186,7 +1192,7 @@ func TestClearAllCorruptStoreIsTheEscapeHatch(t *testing.T) {
 
 // TestClearLastOnEmptyStore pins the empty-store last selector.
 func TestClearLastOnEmptyStore(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	env := historyRunEnv(t, dir)
 	_, errs, code := runBinary(t, bin, env, "history", "clear", "last")
@@ -1197,7 +1203,7 @@ func TestClearLastOnEmptyStore(t *testing.T) {
 
 // TestNonRootClearAllHint pins the root hint for the --all form.
 func TestNonRootClearAllHint(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	writeReplayEntry(t, historyDirOf(dir), history.Entry{
 		Command:  []string{"install", "figlet", "-y"},
@@ -1214,7 +1220,7 @@ func TestNonRootClearAllHint(t *testing.T) {
 // -- passthrough is a usage error, and an explicitly empty selector is not
 // silently treated as 'last'.
 func TestReplayCommandValidation(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	writeReplayEntry(t, historyDirOf(dir), history.Entry{
 		Command:  []string{"install", "figlet", "-y"},
@@ -1238,7 +1244,7 @@ func TestReplayCommandValidation(t *testing.T) {
 
 // TestAllIsOnlyForHistoryClear pins the flag scope.
 func TestAllIsOnlyForHistoryClear(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	env := historyRunEnv(t, dir).readOnlyEnv()
 	_, errs, code := runBinary(t, bin, env, "history", "--all")

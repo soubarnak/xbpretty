@@ -25,17 +25,16 @@ var cacheDirFn = func() string { return defaultCacheDir }
 // skip path without filling a filesystem.
 var preflightFn = download.Preflight
 
-// downloadSink is FR-041's replaceable seam. #66 lands the five-view
-// `Downloading Packages` surface on top of this interface; this build keeps a
-// thin sink that only records completions so the child's own fallback stream
-// continues the same counters.
+// downloadSink is FR-041's replaceable seam. The live Download view consumes
+// the same events through downloadEventView; this sink also records
+// completions so the child's own fallback stream continues the same counters.
 type downloadSink interface {
 	Event(download.Event)
 	Seed(*StreamParser)
 }
 
-// newDownloadSink builds the sink for one run. #66 replaces this factory with
-// the real view and never touches the engine.
+// newDownloadSink builds the completion sink for one run; the live view is
+// attached separately and never touches the engine.
 var newDownloadSink = func(*state) downloadSink {
 	return &cacheSeedSink{completed: map[string]int64{}}
 }
@@ -97,23 +96,23 @@ func (st *state) predownload(rows []xbps.Row, failClosed bool) int {
 		// that row. A real transaction keeps FR-038's skip shape and lets
 		// xbps decide; a fail-closed surface has no child and ends here.
 		if failClosed {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", outcome.invalid)
+			st.errorf("%v\n", outcome.invalid)
 			return exitRuntime
 		}
-		fmt.Fprintf(st.stderr, "xbpretty: predownload skipped: %v; xbps will download the archives\n", outcome.invalid)
+		st.errorf("predownload skipped: %v; xbps will download the archives\n", outcome.invalid)
 		return -1
 	case outcome.skipped != nil:
 		if failClosed {
-			fmt.Fprintf(st.stderr, "xbpretty: predownload: %v\n", outcome.skipped)
+			st.errorf("predownload: %v\n", outcome.skipped)
 			return exitRuntime
 		}
-		fmt.Fprintf(st.stderr, "xbpretty: predownload skipped: %v; xbps will download the archives\n", outcome.skipped)
+		st.errorf("predownload skipped: %v; xbps will download the archives\n", outcome.skipped)
 		return -1
 	case outcome.failed > 0:
 		if failClosed {
 			return exitRuntime
 		}
-		fmt.Fprintf(st.stderr, "xbpretty: predownload: %d of %d archives could not be fetched; xbps will download them\n",
+		st.errorf("predownload: %d of %d archives could not be fetched; xbps will download them\n",
 			outcome.failed, outcome.attempted)
 		return -1
 	}
@@ -197,13 +196,13 @@ func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome 
 	// before cbreak so a signal cannot catch the terminal mid-change.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	// FR-041: the fill feeds #66's seven-row Download view from the engine's
+	// FR-041: the fill feeds the seven-row Download view from the engine's
 	// event stream. The view is created only when the live surface is allowed
 	// (TTY, no -v, not plain); the thin sink still records completions for
 	// the child's parser either way.
 	var view *downloadEventView
 	if mode := st.liveMode(); mode != liveOff {
-		live := newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode,
+		live := newLiveProgress(st.stderr, st.colorErr, terminalWidth(st.stderr), mode,
 			newProgressModel("download", targetsAsRows(targets), nil), st.theme)
 		// xbpretty owns these transfers: the box and cbreak stay up until the
 		// fill finishes or Ctrl-C cancels it (FR-072).
@@ -249,7 +248,7 @@ func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome 
 		if view != nil {
 			view.finish()
 		}
-		fmt.Fprintln(st.stderr, "xbpretty: interrupted")
+		st.errorf("%s\n", "interrupted")
 		outcome.interrupted = true
 		return outcome
 	}
@@ -265,13 +264,13 @@ func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome 
 		}
 		outcome.failed++
 		if failClosed {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", result.Err)
+			st.errorf("%v\n", result.Err)
 		}
 	}
 	return outcome
 }
 
-// downloadEventView adapts the engine's FR-041 events to #66's Download view
+// downloadEventView adapts the engine's FR-041 events to the Download view
 // model. It tracks cumulative bytes per file because the engine reports the
 // size of each write, while the model wants the file's own percentage.
 type downloadEventView struct {

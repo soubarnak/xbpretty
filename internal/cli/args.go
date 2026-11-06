@@ -12,26 +12,24 @@ import (
 // package arguments, and everything after `--` for xbps.
 type options struct {
 	// Transaction state kept from rev 5 and used by the transaction core.
-	dryRun      bool
-	yes         bool
-	assumeNo    bool // --assume-no; -n is its short form
-	verbose     bool
-	noSync      bool
-	noUpdate    bool
-	noLog       bool
-	color       string // "", "auto", "always" or "never"
-	version     bool
-	help        bool
-	completion  bool
-	command     string
-	subcommand  string
-	args        []string
-	passthru    []string
-	dashDash    bool // a `--` was given, even with nothing after it
-	limit       int  // --limit N for `log`; 0 means not given
-	boxStyle    string
-	progressBar *bool
-	configPath  string // --config FILE; empty means the default layers
+	dryRun     bool
+	yes        bool
+	assumeNo   bool // --assume-no; -n is its short form
+	verbose    bool
+	noSync     bool
+	noUpdate   bool
+	noLog      bool
+	color      string // "", "auto", "always" or "never"
+	version    bool
+	help       bool
+	completion bool
+	command    string
+	subcommand string
+	args       []string
+	passthru   []string
+	dashDash   bool   // a `--` was given, even with nothing after it
+	limit      int    // --limit N for `log`; 0 means not given
+	configPath string // --config FILE; empty means the default layers
 
 	// Rev 6 globals and resolved settings inputs.
 	debug         bool
@@ -145,13 +143,6 @@ func parseArgs(argv []string, knownCommand string) (*options, error) {
 			}
 			command, commandKnown = canonical, true
 		}
-	}
-
-	if !commandKnown && len(passthru) > 0 {
-		// `xbpretty -- pkg` carries no command: treat it as an install.
-		command, commandKnown = "install", true
-		positional = append(positional, passthru...)
-		passthru = nil
 	}
 
 	o.passthru = passthru
@@ -333,40 +324,46 @@ func resolveOccurrence(command string, occ occurrence) (spec.Flag, error) {
 	}
 
 	c := occ.short
-	switch c {
-	case 'V':
-		name := "version"
-		if !occ.beforeCommand && (command == "list" || command == "search") {
-			name = "virtual"
-		}
-		f, _ := spec.LookupFlag(name)
-		return f, nil
-	case 'n':
-		switch {
-		case command == "search":
-			f, _ := spec.LookupFlag("names")
-			return f, nil
-		case command == "fetch":
-			// FR-046: fetch has --dry-run but not the short -n.
-			return spec.Flag{}, fmt.Errorf("unknown flag -n")
-		case spec.Accepts(command, "assume-no"):
-			f, _ := spec.LookupFlag("assume-no")
-			return f, nil
-		default:
-			return spec.Flag{}, fmt.Errorf("unknown flag -n")
-		}
-	case 'c':
-		if command != "fetch" {
-			return spec.Flag{}, errCountryHint()
-		}
+	// -c is fetch's --country after the command and nothing else. The hint
+	// is the FR-059 answer both before the command and on every other
+	// command, so it cannot be derived from the accepted-after-command set.
+	if c == 'c' && (occ.beforeCommand || command != "fetch") {
+		return spec.Flag{}, errCountryHint()
 	}
-
-	for _, f := range spec.FlagsFor(command) {
-		if f.Short == c {
-			return f, nil
-		}
+	if f, ok := shortFlagFor(command, c, occ.beforeCommand); ok {
+		return f, nil
 	}
 	return spec.Flag{}, fmt.Errorf("unknown flag -%c", c)
+}
+
+// shortFlagFor resolves a short from the shared table. A command-specific
+// flag wins after the command (list/search turn -V into --virtual and search
+// turns -n into --names); before the command a global short wins (-V is
+// --version). The table, not this function, decides which commands accept
+// which short.
+func shortFlagFor(command string, c rune, beforeCommand bool) (spec.Flag, bool) {
+	var global, specific spec.Flag
+	var hasGlobal, hasSpecific bool
+	for _, f := range spec.FlagsFor(command) {
+		if f.Short != c {
+			continue
+		}
+		if f.Global {
+			global, hasGlobal = f, true
+		} else {
+			specific, hasSpecific = f, true
+		}
+	}
+	if !beforeCommand && hasSpecific {
+		return specific, true
+	}
+	if hasGlobal {
+		return global, true
+	}
+	if hasSpecific {
+		return specific, true
+	}
+	return spec.Flag{}, false
 }
 
 // mooAccepts keeps the hidden moo easter egg's two joke flags out of the
@@ -396,8 +393,9 @@ func applyFlag(o *options, f spec.Flag, occ occurrence) error {
 		o.configPath = occ.value
 		o.explicit["config"] = true
 	case "color":
-		if !validColor(occ.value) {
-			return fmt.Errorf("--color must be auto, always or never, got %q", occ.value)
+		if !spec.AcceptsValue("color", occ.value) {
+			f, _ := spec.LookupFlag("color")
+			return fmt.Errorf("--color must be %s, got %q", strings.Join(f.Values, ", "), occ.value)
 		}
 		o.color = occ.value
 		o.explicit["color"] = true
@@ -476,27 +474,6 @@ func applyFlag(o *options, f spec.Flag, occ occurrence) error {
 	case "no-log":
 		o.noLog = true
 		o.explicit["log"] = true
-	case "box-style":
-		if !validBoxStyle(occ.value) {
-			return fmt.Errorf("--box-style must be rounded, classic or ascii, got %q", occ.value)
-		}
-		o.boxStyle = occ.value
-		o.explicit["box_style"] = true
-	case "progress-bar":
-		val := true
-		if occ.hasValue {
-			b, err := parseBool(occ.value)
-			if err != nil {
-				return fmt.Errorf("--progress-bar value error: %w", err)
-			}
-			val = b
-		}
-		o.progressBar = &val
-		o.explicit["progress_bar"] = true
-	case "no-progress", "no-progress-bar":
-		val := false
-		o.progressBar = &val
-		o.explicit["progress_bar"] = true
 	case "virtual":
 		o.virtual = true
 		o.explicit["virtual"] = true
@@ -608,30 +585,4 @@ func checkConflicts(o *options) error {
 		return fmt.Errorf("--print-uris cannot be combined with --dry-run or --download-only")
 	}
 	return nil
-}
-
-func validColor(value string) bool {
-	switch value {
-	case "auto", "always", "never":
-		return true
-	}
-	return false
-}
-
-func validBoxStyle(value string) bool {
-	switch value {
-	case "rounded", "classic", "ascii":
-		return true
-	}
-	return false
-}
-
-func parseBool(value string) (bool, error) {
-	switch value {
-	case "true", "1", "yes":
-		return true, nil
-	case "false", "0", "no":
-		return false, nil
-	}
-	return false, fmt.Errorf("expected true or false, got %q", value)
 }

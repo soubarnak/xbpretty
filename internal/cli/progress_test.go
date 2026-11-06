@@ -10,26 +10,6 @@ import (
 	"github.com/soubarnak/xbpretty/internal/xbps"
 )
 
-func TestWidgetSizeIsBinaryPrecisionOne(t *testing.T) {
-	cases := []struct {
-		in   uint64
-		want string
-	}{
-		{0, "0.0 B"},
-		{512, "512.0 B"},
-		{1024, "1024.0 B"}, // strict '>' keeps the smaller unit
-		{1025, "1.0 KiB"},
-		{1024 * 1024, "1024.0 KiB"},
-		{1024*1024 + 1, "1.0 MiB"},
-		{33 * 1024 * 1024, "33.0 MiB"},
-	}
-	for _, tc := range cases {
-		if got := widgetSize(tc.in); got != tc.want {
-			t.Errorf("widgetSize(%d) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
 func TestWidgetTimeUsesStrictBoundaries(t *testing.T) {
 	cases := []struct {
 		in   uint64

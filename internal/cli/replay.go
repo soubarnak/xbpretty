@@ -144,7 +144,7 @@ func (p replayPlan) downloadRows() []xbps.Row {
 func (st *state) runReplay(cmd string, opts *options) int {
 	// FR-053: only the binaries the derived plan actually uses are checked.
 	if err := st.r.cfg.ResolveFor("query"); err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 	entry, code := st.resolveReplayEntry(cmd, opts)
@@ -158,12 +158,12 @@ func (st *state) runReplay(cmd string, opts *options) int {
 	}
 	current, err := st.installedVersions()
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 	plan, err := st.buildReplayPlan(entry, cmd, current)
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 	if plan.empty() {
@@ -178,19 +178,19 @@ func (st *state) runReplay(cmd string, opts *options) int {
 	}
 	if len(plan.restores) > 0 {
 		if err := st.r.cfg.ResolveFor("install"); err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			st.errorf("%v\n", err)
 			return exitRuntime
 		}
 	}
 	if len(plan.removes) > 0 {
 		if err := st.r.cfg.ResolveFor("remove"); err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			st.errorf("%v\n", err)
 			return exitRuntime
 		}
 	}
 	if plan.hasCacheRestore() {
 		if err := st.r.cfg.ResolveFor("rindex"); err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			st.errorf("%v\n", err)
 			return exitRuntime
 		}
 	}
@@ -224,7 +224,7 @@ func (st *state) runReplay(cmd string, opts *options) int {
 		return exitRuntime
 	}
 	if !st.assumeYes && !confirmedByScreen && !isTTY(st.stdin) {
-		fmt.Fprintln(st.stderr, "xbpretty: stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed")
+		st.errorf("%s\n", "stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed")
 		return exitRuntime
 	}
 	if !st.assumeYes && !confirmedByScreen {
@@ -312,28 +312,28 @@ func (st *state) resolveReplayEntry(cmd string, opts *options) (history.Entry, i
 	if len(opts.args) > 0 {
 		selector = opts.args[0]
 		if selector == "" {
-			fmt.Fprintf(st.stderr, "xbpretty: invalid history selector %q; use an integer id or 'last'\n", selector)
+			st.errorf("invalid history selector %q; use an integer id or 'last'\n", selector)
 			return history.Entry{}, exitUsage
 		}
 	}
 	if cmd == "redo" && selector == "" {
 		newest, present, err := store.Last()
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			st.errorf("%v\n", err)
 			return history.Entry{}, exitRuntime
 		}
 		if !present {
-			fmt.Fprintln(st.stderr, "xbpretty: history is empty")
+			st.errorf("%s\n", "history is empty")
 			return history.Entry{}, exitRuntime
 		}
 		if newest.ReplayKind != nil && *newest.ReplayKind == "undo" && newest.ReplayOf != nil {
 			source, err := store.Load(*newest.ReplayOf)
 			if errors.Is(err, history.ErrNotFound) {
-				fmt.Fprintf(st.stderr, "xbpretty: history entry %d not found\n", *newest.ReplayOf)
+				st.errorf("history entry %d not found\n", *newest.ReplayOf)
 				return history.Entry{}, exitRuntime
 			}
 			if err != nil {
-				fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+				st.errorf("%v\n", err)
 				return history.Entry{}, exitRuntime
 			}
 			return st.replayableEntry(source)
@@ -345,28 +345,28 @@ func (st *state) resolveReplayEntry(cmd string, opts *options) (history.Entry, i
 	}
 	id, last, ok := parseHistorySelector(selector)
 	if !ok {
-		fmt.Fprintf(st.stderr, "xbpretty: invalid history selector %q; use an integer id or 'last'\n", selector)
+		st.errorf("invalid history selector %q; use an integer id or 'last'\n", selector)
 		return history.Entry{}, exitUsage
 	}
 	if last {
 		entry, present, err := store.Last()
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			st.errorf("%v\n", err)
 			return history.Entry{}, exitRuntime
 		}
 		if !present {
-			fmt.Fprintln(st.stderr, "xbpretty: history is empty")
+			st.errorf("%s\n", "history is empty")
 			return history.Entry{}, exitRuntime
 		}
 		return st.replayableEntry(entry)
 	}
 	entry, err := store.Load(id)
 	if errors.Is(err, history.ErrNotFound) {
-		fmt.Fprintf(st.stderr, "xbpretty: history entry %d not found\n", id)
+		st.errorf("history entry %d not found\n", id)
 		return history.Entry{}, exitRuntime
 	}
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return history.Entry{}, exitRuntime
 	}
 	return st.replayableEntry(entry)
@@ -375,7 +375,7 @@ func (st *state) resolveReplayEntry(cmd string, opts *options) (history.Entry, i
 // replayableEntry refuses a read-only entry before any plan or child.
 func (st *state) replayableEntry(entry history.Entry) (history.Entry, int) {
 	if entry.Status != history.StatusApplied {
-		fmt.Fprintf(st.stderr, "xbpretty: history entry %d is not replayable\n", entry.ID)
+		st.errorf("history entry %d is not replayable\n", entry.ID)
 		return history.Entry{}, exitRuntime
 	}
 	return entry, -1
@@ -389,7 +389,7 @@ func (st *state) installedVersions() (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	snap := newSnapshot()
+	snap := newDiscoverySnapshot()
 	snap.parseInstalled(stdout)
 	versions := make(map[string]string, len(snap.installed))
 	for name, info := range snap.installed {
@@ -440,7 +440,7 @@ func (st *state) buildReplayPlan(entry history.Entry, cmd string, current map[st
 		currentDisplay := presentVersion(present, currentVersion)
 		if currentDisplay != recordedAfter {
 			target := stateVersion(targetState)
-			fmt.Fprintf(st.stderr, "xbpretty: warning: %s is %s but history entry %d recorded %s; %s still restores %s\n",
+			st.warnf("%s is %s but history entry %d recorded %s; %s still restores %s\n",
 				transition.Name, currentDisplay, entry.ID, recordedAfter, cmd, target)
 		}
 
@@ -532,7 +532,7 @@ func (st *state) validateReplayEntry(entry history.Entry) int {
 			(transition.Arch != "" && !history.ValidPackageField(transition.Arch)) ||
 			!validReplayVersion(transition.Before) ||
 			!validReplayVersion(transition.After) {
-			fmt.Fprintf(st.stderr, "xbpretty: history entry %d has invalid package metadata for %q; replay cannot continue\n", entry.ID, transition.Name)
+			st.errorf("history entry %d has invalid package metadata for %q; replay cannot continue\n", entry.ID, transition.Name)
 			invalid++
 		}
 	}
@@ -560,12 +560,12 @@ func (st *state) prepareReplayArchives(plan *replayPlan) int {
 			!history.ValidPackageName(target.name) ||
 			!history.ValidPackageField(target.arch) ||
 			!history.ValidPackageField(target.version) {
-			fmt.Fprintf(st.stderr, "xbpretty: replay target %q has invalid package metadata; replay cannot continue\n", target.name)
+			st.errorf("replay target %q has invalid package metadata; replay cannot continue\n", target.name)
 			return exitRuntime
 		}
 		archive, err := download.Filename(target.name+"-"+target.version, target.arch)
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			st.errorf("%v\n", err)
 			return exitRuntime
 		}
 		target.archive = archive
@@ -588,7 +588,7 @@ func (st *state) preflightReplay(plan *replayPlan, cmd string) int {
 		}
 		served, err := st.repositoryServes(target.name + "-" + target.version)
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			st.errorf("%v\n", err)
 			return exitRuntime
 		}
 		if !served {
@@ -648,12 +648,12 @@ func (r *replayRepo) Cleanup() {
 func (st *state) prepareReplayRepo(plan replayPlan) (*replayRepo, int) {
 	dir, err := os.MkdirTemp(replayTmpBase, replayTmpPrefix)
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: cannot create the replay repository: %v\n", err)
+		st.errorf("cannot create the replay repository: %v\n", err)
 		return nil, exitRuntime
 	}
 	repo := &replayRepo{dir: dir}
 	fail := func(format string, args ...any) (*replayRepo, int) {
-		fmt.Fprintf(st.stderr, format+"\n", args...)
+		st.diagf(roleError, "xbpretty: ", format+"\n", args...)
 		repo.Cleanup()
 		return nil, exitRuntime
 	}
@@ -673,18 +673,18 @@ func (st *state) prepareReplayRepo(plan replayPlan) (*replayRepo, int) {
 		src := filepath.Join(cacheDir, archive)
 		dst := filepath.Join(dir, archive)
 		if err := linkOrCopy(src, dst); err != nil {
-			return fail("xbpretty: cannot stage %s for the replay repository: %v", archive, err)
+			return fail("cannot stage %s for the replay repository: %v", archive, err)
 		}
 		archives = append(archives, dst)
 	}
 	if len(archives) == 0 {
-		return fail("xbpretty: the replay repository has no archives")
+		return fail("the replay repository has no archives")
 	}
 
 	args := append([]string{"-a"}, archives...)
 	res, err := st.r.run(st.r.cfg.Xbps.RindexPath, args...)
 	if err != nil {
-		return fail("xbpretty: cannot index the replay repository: %v", err)
+		return fail("cannot index the replay repository: %v", err)
 	}
 	if res.exitCode != 0 {
 		// An index entry that already exists is reindexed with -f. This is
@@ -693,10 +693,10 @@ func (st *state) prepareReplayRepo(plan replayPlan) (*replayRepo, int) {
 		forceArgs := append([]string{"-f", "-a"}, archives...)
 		forced, err := st.r.run(st.r.cfg.Xbps.RindexPath, forceArgs...)
 		if err != nil {
-			return fail("xbpretty: cannot index the replay repository: %v", err)
+			return fail("cannot index the replay repository: %v", err)
 		}
 		if forced.exitCode != 0 {
-			return fail("xbpretty: cannot index the replay repository: xbps-rindex exited %d: %s",
+			return fail("cannot index the replay repository: xbps-rindex exited %d: %s",
 				forced.exitCode, commandDetail(forced))
 		}
 	}
@@ -774,7 +774,7 @@ func (st *state) restoreAutomaticFlags(plan replayPlan) {
 	if err := st.r.cfg.ResolveFor("pkgdb"); err != nil {
 		for _, target := range plan.restores {
 			if target.state != nil && target.state.AutoInstalled != nil {
-				fmt.Fprintf(st.stderr, "xbpretty: could not restore the automatic-install flag for %s\n", target.name)
+				st.errorf("could not restore the automatic-install flag for %s\n", target.name)
 			}
 		}
 		return
@@ -792,7 +792,7 @@ func (st *state) restoreAutomaticFlags(plan replayPlan) {
 		res, err := st.r.run(st.r.cfg.Xbps.PkgdbPath, args...)
 		if err != nil || res.exitCode != 0 {
 			for _, name := range group {
-				fmt.Fprintf(st.stderr, "xbpretty: could not restore the automatic-install flag for %s\n", name)
+				st.errorf("could not restore the automatic-install flag for %s\n", name)
 			}
 		}
 	}

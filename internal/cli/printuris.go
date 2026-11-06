@@ -33,7 +33,7 @@ func (st *state) runPrintURIs(cmd string, opts *options) int {
 	for _, row := range download.PlannedDownloadRows(rows) {
 		url, err := download.ArchiveURL(row.Repo, row.Pkgver(), row.Arch)
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			st.errorf("%v\n", err)
 			return exitRuntime
 		}
 		obj := printURIObject{
@@ -49,7 +49,7 @@ func (st *state) runPrintURIs(cmd string, opts *options) int {
 			obj.SHA256 = &sha
 		}
 		if err := discovery.WriteNDJSON(st.stdout, obj); err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			st.errorf("%v\n", err)
 			return exitRuntime
 		}
 	}

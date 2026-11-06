@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"fmt"
 	"strconv"
 	"syscall"
 
@@ -44,12 +43,12 @@ func (st *state) runFetchPicker(ranked []fetch.Result) (index int, ok bool, code
 		return 0, false, fetchPickerUnavailable
 	}
 	// FR-067/FR-071: below 60x18 at entry the text path runs with no warning.
-	if w, h, err := term.Size(out); err != nil || w < 60 || h < 18 {
+	if w, h, err := term.Size(out); err != nil || !tui.Fits(w, h) {
 		return 0, false, fetchPickerUnavailable
 	}
 	scr, err := openScreenFn(in, out, st.color, false)
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: full-screen interface unavailable (%v); showing the text summary\n", err)
+		st.errorf("full-screen interface unavailable (%v); showing the ranking table\n", err)
 		return 0, false, fetchPickerUnavailable
 	}
 	defer scr.Close()
@@ -58,7 +57,7 @@ func (st *state) runFetchPicker(ranked []fetch.Result) (index int, ok bool, code
 	defer func() {
 		if r := recover(); r != nil {
 			scr.Close()
-			fmt.Fprintf(st.stderr, "xbpretty: full-screen interface failed (%v)\n", r)
+			st.errorf("full-screen interface failed (%v)\n", r)
 			panic(r)
 		}
 	}()
@@ -74,12 +73,12 @@ func (st *state) runFetchPicker(ranked []fetch.Result) (index int, ok bool, code
 	fail := func(err error) (int, bool, int) {
 		// Restore before warning so the line survives the alternate screen.
 		scr.Close()
-		fmt.Fprintf(st.stderr, "xbpretty: full-screen interface failed (%v); showing the text summary\n", err)
+		st.errorf("full-screen interface failed (%v); showing the ranking table\n", err)
 		return 0, false, fetchPickerUnavailable
 	}
 
 	w, h := scr.Size()
-	small := w < 60 || h < 18
+	small := !tui.Fits(w, h)
 	// Mouse reporting stays off: FR-070 ignores mouse input entirely.
 	if err := draw(w, h); err != nil {
 		return fail(err)
@@ -92,7 +91,7 @@ func (st *state) runFetchPicker(ranked []fetch.Result) (index int, ok bool, code
 		switch ev.Kind {
 		case tui.EventResize:
 			w, h = ev.Width, ev.Height
-			small = w < 60 || h < 18
+			small = !tui.Fits(w, h)
 			if err := draw(w, h); err != nil {
 				return fail(err)
 			}

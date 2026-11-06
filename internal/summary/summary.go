@@ -152,43 +152,45 @@ type Renderer struct {
 	Theme Theme
 }
 
-// section is one rendered operation block.
-type section struct {
-	label string
-	op    string
-	rows  []Row
+// Section is one rendered operation block: the label, the operation key the
+// size and name rules switch on, and its rows.
+type Section struct {
+	Label string
+	Op    string
+	Rows  []Row
 }
 
-// sections returns the non-empty sections in nala's fixed operation order.
-func (s *Summary) sections() []section {
-	var out []section
+// Sections returns the non-empty sections in nala's fixed operation order.
+// The inline renderer and the full-screen model both consume this table.
+func (s *Summary) Sections() []Section {
+	var out []Section
 	if len(s.Remove) > 0 {
-		out = append(out, section{label: s.removeLabel(), op: "remove", rows: s.Remove})
+		out = append(out, Section{Label: RemoveLabel(s.Command), Op: "remove", Rows: s.Remove})
 	}
 	if len(s.Install) > 0 {
-		out = append(out, section{label: "Install", op: "install", rows: s.Install})
+		out = append(out, Section{Label: "Install", Op: "install", Rows: s.Install})
 	}
 	if len(s.ReInstall) > 0 {
-		out = append(out, section{label: "ReInstall", op: "reinstall", rows: s.ReInstall})
+		out = append(out, Section{Label: "ReInstall", Op: "reinstall", Rows: s.ReInstall})
 	}
 	if len(s.Upgrade) > 0 {
-		out = append(out, section{label: "Upgrade", op: "upgrade", rows: s.Upgrade})
+		out = append(out, Section{Label: "Upgrade", Op: "upgrade", Rows: s.Upgrade})
 	}
 	// There is no Downgrade section on xbps: a downgrade is planned as an
 	// install or an update and lands under those sections (FR-062).
 	if len(s.Configure) > 0 {
-		out = append(out, section{label: "Configure", op: "configure", rows: s.Configure})
+		out = append(out, Section{Label: "Configure", Op: "configure", Rows: s.Configure})
 	}
 	if len(s.Hold) > 0 {
-		out = append(out, section{label: "Held", op: "held", rows: s.Hold})
+		out = append(out, Section{Label: "Held", Op: "held", Rows: s.Hold})
 	}
 	return out
 }
 
-// removeLabel maps the command that produced a remove-family plan to nala's
+// RemoveLabel maps the command that produced a remove-family plan to nala's
 // operation label.
-func (s *Summary) removeLabel() string {
-	switch s.Command {
+func RemoveLabel(command string) string {
+	switch command {
 	case "autoremove":
 		return "AutoRemove"
 	case "purge":
@@ -202,7 +204,7 @@ func (s *Summary) removeLabel() string {
 
 // Render writes the grouped summary and its footer to w.
 func (r Renderer) Render(w io.Writer, s *Summary) error {
-	sections := s.sections()
+	sections := s.Sections()
 	if len(sections) == 0 {
 		_, err := io.WriteString(w, "Nothing to do.\n")
 		return err
@@ -218,12 +220,12 @@ func (r Renderer) Render(w io.Writer, s *Summary) error {
 }
 
 // fullLines renders FR-062's full inline summary.
-func (r Renderer) fullLines(s *Summary, sections []section) []string {
+func (r Renderer) fullLines(s *Summary, sections []Section) []string {
 	rule := strings.Repeat("=", r.ruleWidth())
 	var lines []string
 	for _, sec := range sections {
 		lines = append(lines, rule)
-		lines = append(lines, " "+r.paint(RoleHighlight, sec.label))
+		lines = append(lines, " "+r.paint(RoleHighlight, sec.Label))
 		lines = append(lines, rule)
 		lines = append(lines, r.table(s, sec).render(r.ruleWidth(), !r.Piped, r)...)
 	}
@@ -231,7 +233,7 @@ func (r Renderer) fullLines(s *Summary, sections []section) []string {
 	lines = append(lines, " Summary")
 	lines = append(lines, rule)
 	for _, sec := range sections {
-		lines = append(lines, " "+sec.label+" "+itoa(uint64(len(sec.rows))))
+		lines = append(lines, " "+sec.Label+" "+itoa(uint64(len(sec.Rows))))
 	}
 	lines = append(lines, "")
 	lines = append(lines, r.sizeLines(s)...)
@@ -241,12 +243,12 @@ func (r Renderer) fullLines(s *Summary, sections []section) []string {
 
 // simpleLines renders FR-062's --simple layout: no rules, no Summary heading,
 // no version diff.
-func (r Renderer) simpleLines(s *Summary, sections []section) []string {
+func (r Renderer) simpleLines(s *Summary, sections []Section) []string {
 	var lines []string
 	for _, sec := range sections {
-		lines = append(lines, r.paint(RoleHighlight, sec.label)+": "+itoa(uint64(len(sec.rows))))
-		names := make([]string, 0, len(sec.rows))
-		for _, row := range sec.rows {
+		lines = append(lines, r.paint(RoleHighlight, sec.Label)+": "+itoa(uint64(len(sec.Rows))))
+		names := make([]string, 0, len(sec.Rows))
+		for _, row := range sec.Rows {
 			name := row.Name
 			if row.Reason != "" {
 				name += " (" + row.Reason + ")"
@@ -276,9 +278,9 @@ func (r Renderer) sizeLines(s *Summary) []string {
 	return out
 }
 
-func (r Renderer) table(s *Summary, sec section) table {
-	rows := make([][]string, 0, len(sec.rows))
-	for _, row := range sec.rows {
+func (r Renderer) table(s *Summary, sec Section) table {
+	rows := make([][]string, 0, len(sec.Rows))
+	for _, row := range sec.Rows {
 		rows = append(rows, r.rowCells(s, sec, row))
 	}
 	return table{header: sectionHeaders(s, sec), rows: rows}
@@ -287,7 +289,7 @@ func (r Renderer) table(s *Summary, sec section) table {
 // sectionHeaders returns the column set for a section. nala derives it from
 // the section's rows; rev 6 normalises over the whole section so a held row
 // whose versions differ cannot shift a later row's cells.
-func sectionHeaders(s *Summary, sec section) []string {
+func sectionHeaders(s *Summary, sec Section) []string {
 	hasDiff := sectionHasVersionDiff(s, sec)
 	hasReason := sectionHasReason(sec)
 	switch {
@@ -302,8 +304,8 @@ func sectionHeaders(s *Summary, sec section) []string {
 	}
 }
 
-func sectionHasReason(sec section) bool {
-	for _, row := range sec.rows {
+func sectionHasReason(sec Section) bool {
+	for _, row := range sec.Rows {
 		if row.Reason != "" {
 			return true
 		}
@@ -311,8 +313,8 @@ func sectionHasReason(sec section) bool {
 	return false
 }
 
-func sectionHasVersionDiff(s *Summary, sec section) bool {
-	for _, row := range sec.rows {
+func sectionHasVersionDiff(s *Summary, sec Section) bool {
+	for _, row := range sec.Rows {
 		if o, ok := s.oldVersion(row); ok && o != row.Version {
 			return true
 		}
@@ -330,9 +332,9 @@ func (s *Summary) oldVersion(row Row) (string, bool) {
 }
 
 // rowCells produces one row's cells in the section's column shape.
-func (r Renderer) rowCells(s *Summary, sec section, row Row) []string {
+func (r Renderer) rowCells(s *Summary, sec Section, row Row) []string {
 	nameRole := RoleSecondary
-	switch sec.op {
+	switch sec.Op {
 	case "remove":
 		nameRole = RoleError
 	case "held", "reinstall", "configure":
@@ -343,7 +345,7 @@ func (r Renderer) rowCells(s *Summary, sec section, row Row) []string {
 	if version == "" {
 		version = "Unknown"
 	}
-	sizeText, hasSize := sectionSize(sec.op, row)
+	sizeText, hasSize := sectionSize(sec.Op, row)
 	size := "—"
 	if hasSize {
 		size = HumanUnit(sizeText, r.Unit)
@@ -352,7 +354,7 @@ func (r Renderer) rowCells(s *Summary, sec section, row Row) []string {
 	oldVer, hasOld := s.oldVersion(row)
 	differs := hasOld && oldVer != row.Version
 	switch {
-	case hasDiff && sec.rows[0].Reason != "":
+	case hasDiff && sec.Rows[0].Reason != "":
 		return []string{name, oldVersionCell(oldVer, hasOld), r.diffCell(oldVer, version, differs), row.Reason, size}
 	case hasDiff:
 		return []string{name, oldVersionCell(oldVer, hasOld), r.diffCell(oldVer, version, differs), size}
@@ -376,9 +378,15 @@ func (r Renderer) diffCell(oldVer, newVer string, differs bool) string {
 	if !differs {
 		return newVer
 	}
-	return versionDiffWith(oldVer, newVer, func(part string) string {
-		return r.paint(RoleNotice, part)
-	})
+	var b strings.Builder
+	for _, part := range VersionParts(oldVer, newVer) {
+		if part.Changed {
+			b.WriteString(r.paint(RoleNotice, part.Text))
+		} else {
+			b.WriteString(part.Text)
+		}
+	}
+	return b.String()
 }
 
 // sectionSize applies the operation's Size: semantics. Removals and

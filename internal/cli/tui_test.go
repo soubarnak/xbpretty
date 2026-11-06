@@ -199,7 +199,7 @@ func TestTUITestHooksAreAbsentFromOrdinaryBuilds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tagged, err := os.ReadFile(taggedBinary(t))
+	tagged, err := os.ReadFile(testrootBinary(t))
 	if err != nil {
 		t.Fatal(err)
 	}

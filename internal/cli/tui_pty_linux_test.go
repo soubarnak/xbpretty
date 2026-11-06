@@ -27,38 +27,6 @@ libbar-0.9_3 update x86_64 https://repo-default.voidlinux.org/current 15728640 4
 libbaz-2.0_2 update x86_64 https://repo-default.voidlinux.org/current 15728640 4334114
 `
 
-// buildTuiBinary builds the binary with the xbpretty_testroot hook so a
-// non-root test process can exercise the root-gated S1 screen.
-var (
-	tuiBinOnce sync.Once
-	tuiBinPath string
-	tuiBinErr  error
-)
-
-func buildTuiBinary(t *testing.T) string {
-	t.Helper()
-	tuiBinOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "xbp-tui-")
-		if err != nil {
-			tuiBinErr = err
-			return
-		}
-		bin := filepath.Join(dir, "xbpretty")
-		cmd := exec.Command("go", "build", "-tags", "xbpretty_testroot", "-o", bin, "../../cmd/xbpretty")
-		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			tuiBinErr = err
-			t.Logf("tui build output:\n%s", out)
-			return
-		}
-		tuiBinPath = bin
-	})
-	if tuiBinErr != nil {
-		t.Fatalf("building tui test binary: %v", tuiBinErr)
-	}
-	return tuiBinPath
-}
-
 // tuiOldQuery answers the old-version lookups the S1 model needs and reports
 // no held packages.
 func tuiOldQuery(t *testing.T, dir string) string {
@@ -423,7 +391,7 @@ func assertFrameGrid(t *testing.T, frame string, golden []byte) {
 // exit: the real binary on an 80x24 pty paints the golden SGR payload and a q
 // refusal restores the alternate screen, cursor, mouse, paste and termios.
 func TestS1FrameBytesAndCancel(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	env := tuiScreenEnv(t, dir, query)
@@ -457,7 +425,7 @@ func TestS1FrameBytesAndCancel(t *testing.T) {
 	if code := r.exitCode(t); code != 1 {
 		t.Errorf("cancelled S1 exit = %d, want 1", code)
 	}
-	if !strings.Contains(r.stderr.String(), "xbpretty: user refused confirmation") {
+	if !strings.Contains(plainTestOutput(r.stderr.String()), "xbpretty: user refused confirmation") {
 		t.Errorf("refusal line missing:\n%s", r.stderr.String())
 	}
 	out := waitCapture(t, r, "the screen leave", func(s string) bool {
@@ -480,7 +448,7 @@ func TestS1FrameBytesAndCancel(t *testing.T) {
 // TestS1ConfirmStartsTransaction is AC-050's confirm half: y leaves the screen
 // and the real transaction starts with -y.
 func TestS1ConfirmStartsTransaction(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	env := tuiScreenEnv(t, dir, query)
@@ -518,7 +486,7 @@ func TestS1ConfirmStartsTransaction(t *testing.T) {
 // confirms the primary transaction, then q declines the implicit autoremove
 // screen and the primary success (exit 0) stands, with no refusal line.
 func TestS1ImplicitDeclineKeepsPrimaryResult(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	env := tuiScreenEnv(t, dir, query)
@@ -550,7 +518,7 @@ func TestS1ImplicitDeclineKeepsPrimaryResult(t *testing.T) {
 // TestS1SigtermRestores is AC-054's signal path: SIGTERM exits 143 after
 // leaving the alternate screen and restoring the termios.
 func TestS1SigtermRestores(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	env := tuiScreenEnv(t, dir, query)
@@ -585,7 +553,7 @@ func TestS1SigtermRestores(t *testing.T) {
 // TestS1ResizeNoticeAndReturn is AC-054's resize path: 80x24 -> 50x15 shows
 // the notice with no table/footer, and 80x24 restores the full frame.
 func TestS1ResizeNoticeAndReturn(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	env := tuiScreenEnv(t, dir, query)
@@ -646,7 +614,7 @@ func TestS1ResizeNoticeAndReturn(t *testing.T) {
 // TestS1ColorNeverHasNoSGR is AC-055 at the binary seam: --color never keeps
 // every glyph and cursor control but emits no SGR byte.
 func TestS1ColorNeverHasNoSGR(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	env := tuiScreenEnvMode(t, dir, query, "Tui", "Never")
@@ -682,7 +650,7 @@ func TestS1ColorNeverHasNoSGR(t *testing.T) {
 // TestS1GateMatrixPTY is AC-049 through the real binary: exactly the full gate
 // opens S1; every excluded cell takes the text path with no alternate screen.
 func TestS1GateMatrixPTY(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	cases := []struct {
 		name       string
 		alter      func(map[string]string)
@@ -811,7 +779,7 @@ func TestS1GateMatrixPTY(t *testing.T) {
 // TestS1NonTTYFallsBack is the non-TTY cell of AC-049: no screen and the
 // normal text summary, then the existing stdin refusal.
 func TestS1NonTTYFallsBack(t *testing.T) {
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	env := tuiScreenEnv(t, dir, query)
@@ -843,7 +811,7 @@ func TestUpdateNeverOpensAReleaseScreen(t *testing.T) {
 		{"changed repodata", tuiScreenPlan, "package(s) can be upgraded"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			bin := buildTuiBinary(t)
+			bin := testrootBinary(t)
 			dir := t.TempDir()
 			query := tuiOldQuery(t, dir)
 			env := tuiScreenEnv(t, dir, query)

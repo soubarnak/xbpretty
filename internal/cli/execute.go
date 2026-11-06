@@ -64,7 +64,7 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 	var sigs chan os.Signal
 	if mode := st.liveMode(); mode != liveOff {
 		model := newProgressModel(cmd, rows, nil)
-		live = newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode, model, st.theme)
+		live = newLiveProgress(st.stderr, st.colorErr, terminalWidth(st.stderr), mode, model, st.theme)
 		st.r.live = true
 		st.r.liveProgress = live
 		if mode == liveWidgetMode {
@@ -107,7 +107,7 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 		st.r.liveProgress = nil
 	}
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 	stderr := st.r.lastStderr
@@ -126,7 +126,7 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 		}
 	}
 	if h := hints.Lookup(code, hints.Output{Stdout: st.r.lastStdout, Stderr: stderr}); h != nil {
-		fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
+		st.hintf("%s\n", h.Text)
 	}
 	isRemovePlan := len(rows) > 0 && rows[0].Action == "remove"
 	if isRemovePlan {
@@ -161,7 +161,7 @@ func (st *state) executePhasesAfter(cmd string, logArgs []string, allRows []xbps
 	for i, phase := range phases {
 		if code := st.execute(cmd, phase.bin, phase.args, phase.rows...); code != 0 {
 			if i > 0 && partial != "" {
-				fmt.Fprintf(st.stderr, "xbpretty: %s\n", partial)
+				st.errorf("%s\n", partial)
 			}
 			return code
 		}
@@ -182,7 +182,7 @@ func (st *state) completeTransaction(cmd string, logArgs []string, rows []xbps.R
 		st.writeLog(cmd, logArgs, rows)
 	}
 	if hint := rebootHint(rows); hint != "" {
-		fmt.Fprintf(st.stderr, "hint: %s\n", hint)
+		st.hintf("%s\n", hint)
 	}
 }
 
@@ -209,7 +209,7 @@ func (st *state) revdepsHint(packages []string) {
 			continue
 		}
 		if text := hints.ForceRemoveHint(pkg, dependents); text != "" {
-			fmt.Fprintf(st.stderr, "hint: %s\n", text)
+			st.hintf("%s\n", text)
 		}
 	}
 }
@@ -220,12 +220,12 @@ func (st *state) revdepsHint(packages []string) {
 func (st *state) writeLog(cmd string, args []string, rows []xbps.Row) {
 	path, err := config.TransactionLog()
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: transaction log unavailable: %v\n", err)
+		st.errorf("transaction log unavailable: %v\n", err)
 		return
 	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: transaction log unavailable: %v\n", err)
+		st.errorf("transaction log unavailable: %v\n", err)
 		return
 	}
 	defer f.Close()
@@ -236,7 +236,7 @@ func (st *state) writeLog(cmd string, args []string, rows []xbps.Row) {
 	if uid, gid, ok := config.Invoker(); ok {
 		for _, p := range []string{filepath.Dir(path), path} {
 			if err := os.Chown(p, uid, gid); err != nil {
-				fmt.Fprintf(st.stderr, "xbpretty: transaction log ownership not changed: %v\n", err)
+				st.errorf("transaction log ownership not changed: %v\n", err)
 			}
 		}
 	}
@@ -256,6 +256,6 @@ func (st *state) writeLog(cmd string, args []string, rows []xbps.Row) {
 		fields = append(fields, strings.Join(names, " "))
 	}
 	if _, err := f.WriteString(strings.Join(fields, " ") + "\n"); err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: transaction log unavailable: %v\n", err)
+		st.errorf("transaction log unavailable: %v\n", err)
 	}
 }

@@ -508,7 +508,7 @@ func parityS1GateCase(t *testing.T, id string) {
 	if !ok {
 		t.Fatalf("no S1 gate case for %s", id)
 	}
-	bin := buildTuiBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	query := tuiOldQuery(t, dir)
 	env := tuiScreenEnvMode(t, dir, query, tc.mode, "Always")

@@ -36,7 +36,7 @@ type installedInfo struct {
 }
 
 // snapshot is the in-memory result of the offline pass set.
-type snapshot struct {
+type discoverySnapshot struct {
 	installed   map[string]installedInfo
 	manual      map[string]bool
 	holds       map[string]bool
@@ -53,8 +53,8 @@ type snapshot struct {
 	resolved    map[string]string
 }
 
-func newSnapshot() *snapshot {
-	return &snapshot{
+func newDiscoverySnapshot() *discoverySnapshot {
+	return &discoverySnapshot{
 		installed:  map[string]installedInfo{},
 		manual:     map[string]bool{},
 		holds:      map[string]bool{},
@@ -75,7 +75,7 @@ func newSnapshot() *snapshot {
 func (st *state) runQuery(args ...string) (result, bool) {
 	res, err := st.r.run(st.r.cfg.Xbps.QueryPath, args...)
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		res.exitCode = exitRuntime
 		return res, false
 	}
@@ -89,8 +89,8 @@ func (st *state) runQuery(args ...string) (result, bool) {
 }
 
 // loadSnapshot runs the fixed offline passes and parses their answers.
-func (st *state) loadSnapshot(needs discoveryNeeds) (*snapshot, int, bool) {
-	s := newSnapshot()
+func (st *state) loadDiscoverySnapshot(needs discoveryNeeds) (*discoverySnapshot, int, bool) {
+	s := newDiscoverySnapshot()
 
 	if needs.installed {
 		res, ok := st.runQuery("-l")
@@ -172,10 +172,10 @@ func (st *state) loadSnapshot(needs discoveryNeeds) (*snapshot, int, bool) {
 
 // loadPlan runs the one root-free `-n -u` plan. A failure is deliberately not
 // fatal: FR-023 says to forward stderr, omit Upgradable from:, and exit 0.
-func (s *snapshot) loadPlan(st *state) {
+func (s *discoverySnapshot) loadPlan(st *state) {
 	res, err := st.r.run(st.r.cfg.Xbps.InstallPath, "-n", "-u")
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return
 	}
 	if res.stderr != "" {
@@ -196,7 +196,7 @@ func (s *snapshot) loadPlan(st *state) {
 	s.planOK = true
 }
 
-func (s *snapshot) parseInstalled(stdout string) {
+func (s *discoverySnapshot) parseInstalled(stdout string) {
 	for _, line := range strings.Split(stdout, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
@@ -218,7 +218,7 @@ func (s *snapshot) parseInstalled(stdout string) {
 	}
 }
 
-func (s *snapshot) parseNames(stdout string, dst map[string]bool) {
+func (s *discoverySnapshot) parseNames(stdout string, dst map[string]bool) {
 	for _, line := range strings.Split(stdout, "\n") {
 		if name, _ := discovery.SplitPkgverVersion(strings.TrimSpace(line)); name != "" {
 			dst[name] = true
@@ -265,7 +265,7 @@ func parseRepositoryDescriptions(stdout string) map[string]string {
 // rows. Two repositories offering the same pkgver stay two variants because
 // the key is (repository, pkgver), and the first repository seen sets the
 // precedence the rest of the model sorts by.
-func (s *snapshot) parseRepository(rows []architectureRow, desc map[string]string) {
+func (s *discoverySnapshot) parseRepository(rows []architectureRow, desc map[string]string) {
 	for _, ar := range rows {
 		name, version := discovery.SplitPkgverVersion(ar.Pkgver)
 		if name == "" {
@@ -454,7 +454,7 @@ func (st *state) runDiscoveryRows(opts *options, search bool) int {
 		installed: true, manual: true, holds: true, orphans: true, repolocked: true,
 		plan: !opts.virtual, description: opts.description, virtual: opts.virtual,
 	}
-	s, code, ok := st.loadSnapshot(needs)
+	s, code, ok := st.loadDiscoverySnapshot(needs)
 	if !ok {
 		return code
 	}
@@ -463,7 +463,7 @@ func (st *state) runDiscoveryRows(opts *options, search bool) int {
 	if len(namesNeedingResolution) > 0 {
 		resolved, err := st.resolveMultiVariant(namesNeedingResolution)
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			st.errorf("%v\n", err)
 			return exitRuntime
 		}
 		s.resolved = resolved
@@ -473,14 +473,14 @@ func (st *state) runDiscoveryRows(opts *options, search bool) int {
 	if search {
 		filtered, badPattern, err := filterSearchRows(rows, opts.args, opts.namesOnly)
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: invalid pattern '%s': %v\n", badPattern, err)
+			st.errorf("invalid pattern '%s': %v\n", badPattern, err)
 			return exitRuntime
 		}
 		rows = filtered
 	} else {
 		filtered, notices, badPattern, err := filterGlobRows(rows, opts.args)
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: invalid pattern '%s': %v\n", badPattern, err)
+			st.errorf("invalid pattern '%s': %v\n", badPattern, err)
 			return exitRuntime
 		}
 		for _, notice := range notices {
@@ -491,7 +491,7 @@ func (st *state) runDiscoveryRows(opts *options, search bool) int {
 	return st.renderDiscoveryRows(rows, opts, s)
 }
 
-func (s *snapshot) namesNeedingResolution(opts *options) []string {
+func (s *discoverySnapshot) namesNeedingResolution(opts *options) []string {
 	if opts.virtual || opts.installed || opts.upgradable || opts.allVersions {
 		return nil
 	}
@@ -512,7 +512,7 @@ func (s *snapshot) namesNeedingResolution(opts *options) []string {
 	return names
 }
 
-func (s *snapshot) rows(opts *options) []discovery.Row {
+func (s *discoverySnapshot) rows(opts *options) []discovery.Row {
 	if opts.virtual {
 		if opts.upgradable {
 			return nil
@@ -569,7 +569,7 @@ func (s *snapshot) rows(opts *options) []discovery.Row {
 	return rows
 }
 
-func (s *snapshot) defaultRow(name string) discovery.Row {
+func (s *discoverySnapshot) defaultRow(name string) discovery.Row {
 	if plan, ok := s.plan[name]; ok && s.planOK {
 		return s.planRow(plan, false)
 	}
@@ -597,7 +597,7 @@ func (s *snapshot) defaultRow(name string) discovery.Row {
 	return chosen
 }
 
-func (s *snapshot) installedRow(name string, info installedInfo) discovery.Row {
+func (s *discoverySnapshot) installedRow(name string, info installedInfo) discovery.Row {
 	if variants := s.repo[name]; len(variants) > 0 {
 		for _, variant := range variants {
 			if variant.Pkgver == info.Pkgver {
@@ -614,7 +614,7 @@ func (s *snapshot) installedRow(name string, info installedInfo) discovery.Row {
 	return s.attachInstalled(row, info)
 }
 
-func (s *snapshot) attachInstalled(row discovery.Row, info installedInfo) discovery.Row {
+func (s *discoverySnapshot) attachInstalled(row discovery.Row, info installedInfo) discovery.Row {
 	row.Installed = true
 	row.InstalledVersion = info.Version
 	row.Unpacked = info.Unpacked
@@ -626,7 +626,7 @@ func (s *snapshot) attachInstalled(row discovery.Row, info installedInfo) discov
 	return row
 }
 
-func (s *snapshot) variantRows(name string, opts *options) []discovery.Row {
+func (s *discoverySnapshot) variantRows(name string, opts *options) []discovery.Row {
 	var rows []discovery.Row
 	info, installed := s.installed[name]
 	installedAttached := false
@@ -676,7 +676,7 @@ func (s *snapshot) variantRows(name string, opts *options) []discovery.Row {
 	return rows
 }
 
-func (s *snapshot) planRow(plan xbps.Row, withSizes bool) discovery.Row {
+func (s *discoverySnapshot) planRow(plan xbps.Row, withSizes bool) discovery.Row {
 	name, version := discovery.SplitPkgverVersion(plan.Pkgver())
 	upstream, revision := discovery.SplitRevision(version)
 	row := discovery.Row{
@@ -707,7 +707,7 @@ func setPlanSizes(row *discovery.Row, plan xbps.Row) {
 	}
 }
 
-func (s *snapshot) virtualRows(installedOnly bool) []discovery.Row {
+func (s *discoverySnapshot) virtualRows(installedOnly bool) []discovery.Row {
 	providers := map[string]map[string]bool{}
 	for pkgver, values := range s.provides {
 		name, _ := discovery.SplitPkgverVersion(pkgver)
@@ -889,7 +889,7 @@ func filterSearchRows(rows []discovery.Row, tokens []string, namesOnly bool) ([]
 	return out, "", nil
 }
 
-func (st *state) renderDiscoveryRows(rows []discovery.Row, opts *options, s *snapshot) int {
+func (st *state) renderDiscoveryRows(rows []discovery.Row, opts *options, s *discoverySnapshot) int {
 	for _, row := range rows {
 		if opts.machine {
 			if err := st.writeMachineRow(row, nil); err != nil {
@@ -933,7 +933,7 @@ func (st *state) writeMachineRow(row discovery.Row, properties map[string]any) e
 
 // runShow implements FR-025 for show and info.
 func (st *state) runShow(opts *options) int {
-	s, code, ok := st.loadSnapshot(discoveryNeeds{orphans: true})
+	s, code, ok := st.loadDiscoverySnapshot(discoveryNeeds{orphans: true})
 	if !ok {
 		return code
 	}
@@ -1040,7 +1040,7 @@ func (st *state) runShow(opts *options) int {
 func (st *state) record(args ...string) (*xbpsRecord, bool, int) {
 	res, err := st.r.run(st.r.cfg.Xbps.QueryPath, args...)
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return nil, false, exitRuntime
 	}
 	if res.exitCode != 0 {
@@ -1062,7 +1062,7 @@ func (st *state) record(args ...string) (*xbpsRecord, bool, int) {
 	return rec, true, -1
 }
 
-func (s *snapshot) recordRow(rec *xbpsRecord, installed bool) discovery.Row {
+func (s *discoverySnapshot) recordRow(rec *xbpsRecord, installed bool) discovery.Row {
 	name, version := discovery.SplitPkgverVersion(rec.scalar["pkgver"])
 	if name == "" {
 		name = rec.scalar["pkgname"]

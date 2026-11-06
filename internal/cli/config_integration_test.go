@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -18,37 +17,6 @@ import (
 // internal/cli/root_testhook.go.
 
 const aggregateRev5Warning = "https://github.com/soubarnak/xbpretty/blob/main/docs/migration-rev6.md"
-
-var (
-	taggedBinOnce sync.Once
-	taggedBinPath string
-	taggedBinErr  error
-)
-
-// taggedBinary builds the binary with the test-only euid/system-path hook.
-func taggedBinary(t *testing.T) string {
-	t.Helper()
-	taggedBinOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "xbp-tagged-")
-		if err != nil {
-			taggedBinErr = err
-			return
-		}
-		bin := filepath.Join(dir, "xbpretty")
-		cmd := exec.Command("go", "build", "-tags", "xbpretty_testroot", "-o", bin, "../../cmd/xbpretty")
-		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			taggedBinErr = err
-			t.Logf("tagged build output:\n%s", out)
-			return
-		}
-		taggedBinPath = bin
-	})
-	if taggedBinErr != nil {
-		t.Fatalf("building tagged test binary: %v", taggedBinErr)
-	}
-	return taggedBinPath
-}
 
 // testEnv is the environment of one built-binary run.
 type testEnv map[string]string
@@ -137,7 +105,7 @@ func dryRunArgs(extra ...string) []string {
 }
 
 func TestConfigRelativeXDGFallsBackToHome(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	env := cleanEnv(t, dir).with("XDG_CONFIG_HOME", "relative/config")
 	homeCfg := writeLayer(t, filepath.Join(dir, "home", ".config"), "[Ui]\nunit = \"Decimal\"\n")
@@ -153,7 +121,7 @@ func TestConfigRelativeXDGFallsBackToHome(t *testing.T) {
 }
 
 func TestConfigSudoUserSuppressesXDG(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	env := cleanEnv(t, dir).
 		with("XDG_CONFIG_HOME", filepath.Join(dir, "xdg")).
@@ -178,7 +146,7 @@ func TestConfigSudoUserSuppressesXDG(t *testing.T) {
 }
 
 func TestConfigLayersComposeAndLaterLayerWins(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	env := cleanEnv(t, dir)
 	sysPath := filepath.Join(dir, "system.toml")
@@ -214,7 +182,7 @@ func TestConfigLayersComposeAndLaterLayerWins(t *testing.T) {
 }
 
 func TestConfigFlagReplacesBothLayers(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	sysPath := filepath.Join(dir, "system.toml")
 	if err := os.WriteFile(sysPath, []byte("[Ui]\nmode = \"bogus\"\n"), 0o644); err != nil {
@@ -248,7 +216,7 @@ func TestConfigFlagReplacesBothLayers(t *testing.T) {
 }
 
 func TestConfigMissingSystemLayerIsSilent(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	env := cleanEnv(t, dir).with("XBPRETTY_TEST_SYSTEM_CONFIG", filepath.Join(dir, "absent.toml"))
 	_, errs, code := runBinary(t, bin, env, dryRunArgs()...)
@@ -261,7 +229,7 @@ func TestConfigMissingSystemLayerIsSilent(t *testing.T) {
 }
 
 func TestConfigMalformedSystemLayerIsHardError(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	sysPath := filepath.Join(dir, "system.toml")
 	if err := os.WriteFile(sysPath, []byte("[Ui]\nmode = \"bogus\"\n"), 0o644); err != nil {
@@ -280,7 +248,7 @@ func TestConfigMalformedSystemLayerIsHardError(t *testing.T) {
 }
 
 func TestConfigDebugImpliesVerboseAndDumpsResolvedConfig(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	env := cleanEnv(t, dir)
 	path := writeLayer(t, filepath.Join(dir, "config"), "[Nala]\nassume_yes = true\n\n[Ui]\nmode = \"Plain\"\nunit = \"Decimal\"\n")
@@ -370,7 +338,7 @@ func trustFixture(t *testing.T, dir string) (cfgPath string, stubBin string) {
 }
 
 func TestConfigTrustGateUnderRoot(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	cfgPath, _ := trustFixture(t, dir)
 	stubDir, err := filepath.Abs("../../testdata/stub")
@@ -447,7 +415,7 @@ func TestConfigTrustGateUnderRoot(t *testing.T) {
 }
 
 func TestConfigLegacyPathIsTrustGatedAfterAliasing(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	stubDir, err := filepath.Abs("../../testdata/stub")
 	if err != nil {
@@ -482,7 +450,7 @@ func TestConfigLegacyPathIsTrustGatedAfterAliasing(t *testing.T) {
 }
 
 func TestConfigSystemLayerIsNotAutomaticallyTrusted(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	stubDir, err := filepath.Abs("../../testdata/stub")
 	if err != nil {
@@ -510,7 +478,7 @@ func TestConfigSystemLayerIsNotAutomaticallyTrusted(t *testing.T) {
 }
 
 func TestConfigSymlinkIsJudgedOnItsTarget(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	cfgPath, _ := trustFixture(t, dir)
 	link := filepath.Join(dir, "link.toml")
@@ -533,7 +501,7 @@ func TestConfigSymlinkIsJudgedOnItsTarget(t *testing.T) {
 // TestConfigSudoUserBinaryPathIsIgnored is the real threat case: root reads the
 // invoking user's layer, and a user-owned install_path must never execute.
 func TestConfigSudoUserBinaryPathIsIgnored(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	stubDir, err := filepath.Abs("../../testdata/stub")
 	if err != nil {

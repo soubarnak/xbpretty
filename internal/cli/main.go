@@ -65,11 +65,11 @@ type state struct {
 	stderr      io.Writer
 	stdin       io.Reader
 	r           *runner
-	color       bool
+	color       bool // stdout
+	colorErr    bool // stderr diagnostics
 	autoUpdate  bool
 	showPkgs    bool
 	log         bool
-	boxStyle    string
 	progressBar bool
 	unit        summary.SizeUnit
 	theme       summary.Theme
@@ -77,7 +77,6 @@ type state struct {
 	assumeYes   bool
 	autoRemove  bool
 	simple      bool
-	full        bool
 	historyDir  string
 	// downloadSink receives FR-041's event stream. It is created lazily by the
 	// predownload pass so a run that never downloads allocates nothing.
@@ -132,6 +131,12 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		return exitUsage
 	}
 	st := &state{stdout: newResilientWriter(out), stderr: err, stdin: in}
+	// FR-057: before config resolution a usage error still has the default
+	// palette and any explicit colour flag, so its prefix is themed too.
+	defaults := config.Defaults()
+	st.theme = summaryTheme(defaults.Color.Theme)
+	st.color = wantColor(defaults.Color.Mode, opts, isTTY(out))
+	st.colorErr = wantColor(defaults.Color.Mode, opts, isTTY(err))
 	// FR-030: the entry's command is the invocation without the program name.
 	// A link invocation (xbp-install ...) prepends its canonical verb.
 	if knownCmd != "" {
@@ -154,13 +159,17 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 	}
 	if opts.command == "" {
 		usage(out)
-		fmt.Fprintln(err, "xbpretty: no command given; run 'xbpretty --help' for usage")
-		return exitRuntime
+		if len(opts.passthru) > 0 || len(opts.args) > 0 {
+			fmt.Fprintln(err, "xbpretty: no command given; name the command before the arguments (for example 'xbpretty install -- <xbps args>')")
+		} else {
+			fmt.Fprintln(err, "xbpretty: no command given; run 'xbpretty --help' for usage")
+		}
+		return exitUsage
 	}
 
 	// Positional validation runs before config, so completion and link still
 	// bypass config while their arity is checked.
-	if code, stop := validateInvocation(opts, err); stop {
+	if code, stop := validateInvocation(opts, st); stop {
 		return code
 	}
 
@@ -175,7 +184,7 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 	// FR-053: every remaining command validates the selected config layer.
 	res, loadErr := loadConfig(opts)
 	if loadErr != nil {
-		fmt.Fprintf(err, "xbpretty: %v\n", loadErr)
+		st.errorf("%v\n", loadErr)
 		return exitUsage
 	}
 	cfg := res.Config
@@ -187,20 +196,13 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 	st.assumeYes = resolved.assumeYes
 	st.autoRemove = resolved.autoRemove
 	st.simple = resolved.simple
-	st.full = resolved.full
 	st.historyDir = resolved.historyDir
 	st.autoUpdate = resolved.sync
 	st.showPkgs = resolved.showPkgs
 	st.log = resolved.log
-	st.color = wantColor(resolved.color, opts)
-	st.boxStyle = "rounded"
-	if opts.explicit["box_style"] {
-		st.boxStyle = opts.boxStyle
-	}
+	st.color = wantColor(resolved.color, opts, isTTY(out))
+	st.colorErr = wantColor(resolved.color, opts, isTTY(err))
 	st.progressBar = resolved.mode != config.ModePlain
-	if opts.explicit["progress_bar"] && opts.progressBar != nil {
-		st.progressBar = *opts.progressBar
-	}
 	st.unit = summary.SizeUnit(resolved.unit)
 	st.theme = summaryTheme(cfg.Color.Theme)
 	st.r = &runner{
@@ -262,33 +264,33 @@ func (st *state) dispatch(opts *options) int {
 		// the same predownload path as a real transaction.
 		return st.runReplay(opts.command, opts)
 	}
-	fmt.Fprintf(st.stderr, "xbpretty: unknown command %q\n", opts.command)
+	st.errorf("unknown command %q\n", opts.command)
 	return exitUsage
 }
 
 // validateInvocation applies FR-021's positional rules before config is read.
-func validateInvocation(opts *options, err io.Writer) (int, bool) {
+func validateInvocation(opts *options, st *state) (int, bool) {
 	args := opts.args
 	switch opts.command {
 	case "install", "remove", "purge", "download":
 		if !hasPackageWord(opts) {
-			fmt.Fprintf(err, "xbpretty: %s needs at least one package\n", opts.command)
+			st.errorf("%s needs at least one package\n", opts.command)
 			return exitRuntime, true
 		}
 	case "show":
 		if len(args) == 0 {
-			fmt.Fprintf(err, "xbpretty: %s needs at least one package\n", opts.command)
+			st.errorf("%s needs at least one package\n", opts.command)
 			return exitRuntime, true
 		}
 	case "search":
 		if len(args) == 0 {
-			fmt.Fprintln(err, "xbpretty: search needs at least one pattern")
+			st.errorf("%s\n", "search needs at least one pattern")
 			return exitRuntime, true
 		}
 	case "fetch":
 		if len(args) > 0 || opts.dashDash {
 			// FR-042: no positional arguments and no -- passthrough.
-			fmt.Fprintln(err, "xbpretty: fetch takes no arguments and no -- passthrough")
+			st.errorf("%s\n", "fetch takes no arguments and no -- passthrough")
 			return exitUsage, true
 		}
 	case "update":
@@ -296,54 +298,54 @@ func validateInvocation(opts *options, err io.Writer) (int, bool) {
 		// plus one count dry run. Reject the passthrough rather than silently
 		// dropping it (FR-012, FR-021).
 		if opts.dashDash {
-			fmt.Fprintln(err, "xbpretty: update takes no arguments and no -- passthrough")
+			st.errorf("%s\n", "update takes no arguments and no -- passthrough")
 			return exitUsage, true
 		}
 		if len(args) > 0 {
-			fmt.Fprintf(err, "xbpretty: %s takes no package arguments\n", opts.command)
+			st.errorf("%s takes no package arguments\n", opts.command)
 			return exitUsage, true
 		}
 	case "upgrade", "full-upgrade", "safe-upgrade", "autoremove", "autopurge", "clean":
 		if len(args) > 0 {
-			fmt.Fprintf(err, "xbpretty: %s takes no package arguments\n", opts.command)
+			st.errorf("%s takes no package arguments\n", opts.command)
 			return exitUsage, true
 		}
 	case "completion":
 		if len(args) == 0 || len(args) > 1 {
-			fmt.Fprintln(err, "usage: xbpretty completion bash|zsh|fish")
+			fmt.Fprintln(st.stderr, "usage: xbpretty completion bash|zsh|fish")
 			return exitUsage, true
 		}
 	case "link":
 		if len(args) > 1 {
-			fmt.Fprintln(err, "xbpretty: link takes at most one directory")
+			st.errorf("%s\n", "link takes at most one directory")
 			return exitUsage, true
 		}
 	case "history":
 		if opts.clearAll && opts.subcommand != "clear" {
-			fmt.Fprintln(err, "xbpretty: --all is only for history clear")
+			st.errorf("%s\n", "--all is only for history clear")
 			return exitUsage, true
 		}
 		if opts.subcommand == "" || opts.subcommand == "info" || opts.subcommand == "show" {
 			if len(args) > 1 {
-				fmt.Fprintln(err, "xbpretty: history takes no package arguments")
+				st.errorf("%s\n", "history takes no package arguments")
 				return exitUsage, true
 			}
 		}
 		if (opts.subcommand == "info" || opts.subcommand == "show") && len(args) == 0 {
-			fmt.Fprintln(err, "xbpretty: history info needs an entry id or 'last'")
+			st.errorf("%s\n", "history info needs an entry id or 'last'")
 			return exitUsage, true
 		}
 		if opts.subcommand == "clear" {
 			if len(args) > 1 {
-				fmt.Fprintln(err, "xbpretty: history takes no package arguments")
+				st.errorf("%s\n", "history takes no package arguments")
 				return exitUsage, true
 			}
 			if opts.clearAll && len(args) > 0 {
-				fmt.Fprintln(err, "xbpretty: history clear takes no package arguments")
+				st.errorf("%s\n", "history clear takes no package arguments")
 				return exitUsage, true
 			}
 			if !opts.clearAll && len(args) == 0 {
-				fmt.Fprintln(err, "xbpretty: history clear needs an entry id, 'last' or --all")
+				st.errorf("%s\n", "history clear needs an entry id, 'last' or --all")
 				return exitUsage, true
 			}
 		}
@@ -351,11 +353,11 @@ func validateInvocation(opts *options, err io.Writer) (int, bool) {
 		if opts.dashDash {
 			// Replays build their own pinned argv; a passthrough has no place
 			// in it (FR-033, FR-035).
-			fmt.Fprintf(err, "xbpretty: %s takes no arguments and no -- passthrough\n", opts.command)
+			st.errorf("%s takes no arguments and no -- passthrough\n", opts.command)
 			return exitUsage, true
 		}
 		if len(args) > 1 {
-			fmt.Fprintf(err, "xbpretty: %s takes at most one entry id or 'last'\n", opts.command)
+			st.errorf("%s takes at most one entry id or 'last'\n", opts.command)
 			return exitUsage, true
 		}
 	}
@@ -394,10 +396,11 @@ func splitArgv(argv []string) (cmd string, args []string) {
 	return "", argv[1:]
 }
 
-// wantColor decides whether the summary carries ANSI colour, per FR-057: an
-// explicit --color wins over [Color] mode, and Auto means colour only on a
-// terminal with a non-empty NO_COLOR unset.
-func wantColor(mode config.ColorMode, opts *options) bool {
+// wantColor decides whether one stream carries ANSI colour, per FR-057: an
+// explicit --color wins over [Color] mode, and Auto means colour only when that
+// stream is a terminal and NO_COLOR is unset/empty. It is called once per
+// stream, so a TTY stdout and a piped stderr resolve independently.
+func wantColor(mode config.ColorMode, opts *options, streamTTY bool) bool {
 	value := mode
 	if opts.noColor {
 		value = config.ColorNever
@@ -413,7 +416,7 @@ func wantColor(mode config.ColorMode, opts *options) bool {
 	if os.Getenv("NO_COLOR") != "" {
 		return false
 	}
-	return isTerminalFn(os.Stdout)
+	return streamTTY
 }
 
 // colorModeFromFlag maps the lowercase command-line spelling to the
@@ -435,7 +438,7 @@ func (st *state) runCompletion(opts *options) int {
 	}
 	script, err := completion.Script(opts.args[0])
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitUsage
 	}
 	fmt.Fprint(st.stdout, script)
@@ -449,7 +452,7 @@ func (st *state) runLink(opts *options) int {
 	}
 	target, err := os.Executable()
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: cannot locate this binary: %v\n", err)
+		st.errorf("cannot locate this binary: %v\n", err)
 		return exitRuntime
 	}
 	if dir == "" {
@@ -465,20 +468,20 @@ func (st *state) runLink(opts *options) int {
 				if sameSymlinkTarget(dir, existing, target) {
 					continue
 				}
-				fmt.Fprintf(st.stderr, "xbpretty: %s already exists and points to %s, not overwriting\n", link, existing)
+				st.errorf("%s already exists and points to %s, not overwriting\n", link, existing)
 			} else {
-				fmt.Fprintf(st.stderr, "xbpretty: %s already exists and points to %s, not overwriting\n", link, describeExisting(info))
+				st.errorf("%s already exists and points to %s, not overwriting\n", link, describeExisting(info))
 			}
 			status = exitRuntime
 			continue
 		}
 		if !os.IsNotExist(lerr) {
-			fmt.Fprintf(st.stderr, "xbpretty: cannot create %s: %v\n", link, lerr)
+			st.errorf("cannot create %s: %v\n", link, lerr)
 			status = exitRuntime
 			continue
 		}
 		if err := os.Symlink(target, link); err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: cannot create %s: %v\n", link, err)
+			st.errorf("cannot create %s: %v\n", link, err)
 			status = exitRuntime
 		}
 	}

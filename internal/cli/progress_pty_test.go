@@ -17,12 +17,22 @@ import (
 	"github.com/soubarnak/xbpretty/internal/summary"
 )
 
-// setPtySize applies a TIOCSWINSZ window size to a pty file.
-func setProgressPtySize(t *testing.T, f *os.File, cols, rows int) {
-	t.Helper()
+// setPtySize applies a TIOCSWINSZ window size to a pty file. It is the one
+// ioctl helper the PTY tests share.
+func setPtySize(f *os.File, cols, rows int) error {
 	ws := winsize{ws_col: uint16(cols), ws_row: uint16(rows)}
 	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), syscall.TIOCSWINSZ, uintptr(unsafe.Pointer(&ws))); errno != 0 {
-		t.Skipf("setting pty size: %v", errno)
+		return errno
+	}
+	return nil
+}
+
+// setProgressPtySize is the test-friendly form: an unsupported terminal skips
+// the surrounding test instead of failing it.
+func setProgressPtySize(t *testing.T, f *os.File, cols, rows int) {
+	t.Helper()
+	if err := setPtySize(f, cols, rows); err != nil {
+		t.Skipf("setting pty size: %v", err)
 	}
 }
 

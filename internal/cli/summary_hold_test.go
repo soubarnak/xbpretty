@@ -9,6 +9,10 @@ import (
 
 var ansiEscape = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
+// plainTestOutput removes the SGR prefixes the themed diagnostic helpers add,
+// so a PTY test can compare the message text regardless of its colour setting.
+func plainTestOutput(s string) string { return ansiEscape.ReplaceAllString(s, "") }
+
 // corpusPlans are the captured multi-row plans the cli harness renders, with
 // the command each was captured from.
 var corpusPlans = []struct{ capture, command string }{

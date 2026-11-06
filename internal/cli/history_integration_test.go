@@ -67,7 +67,7 @@ func entryFiles(t *testing.T, dir string) []string {
 // transaction, schema 1, before/after snapshots from the bulk queries and the
 // operation derived from them.
 func TestHistorySuccessfulInstallWritesSchemaOneEntry(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	env := historyRunEnv(t, dir)
 	_, errs, code := runBinary(t, bin, env, "install", "figlet", "-y")
@@ -149,7 +149,7 @@ func TestHistorySuccessfulInstallWritesSchemaOneEntry(t *testing.T) {
 // TestHistoryIDsAreMaxPlusOne pins FR-029's allocation through the binary: two
 // successful transactions produce 1.json then 2.json.
 func TestHistoryIDsAreMaxPlusOne(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	env := historyRunEnv(t, dir)
 	for i := 0; i < 2; i++ {
@@ -169,7 +169,7 @@ func TestHistoryIDsAreMaxPlusOne(t *testing.T) {
 // binary: ascending list columns and the detail's metadata, Replay of and
 // operation groups, all root-free.
 func TestHistoryListAndDetail(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	env := historyRunEnv(t, dir)
 	for i := 0; i < 2; i++ {
@@ -255,7 +255,7 @@ func TestHistoryListAndDetail(t *testing.T) {
 // FR-032's fixed operation-group order, including an unparseable timestamp
 // shown verbatim.
 func TestHistoryDetailReplayAndGroupOrder(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	env := historyRunEnv(t, dir)
 	historyDir := historyDirOf(dir)
@@ -312,7 +312,7 @@ func TestHistoryDetailReplayAndGroupOrder(t *testing.T) {
 // TestHistoryEmptyStore pins AC-043's empty-store contract: stdout line,
 // exit 0, no store created, and `last` failing with the empty message.
 func TestHistoryEmptyStore(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	env := historyRunEnv(t, dir).readOnlyEnv()
 	out, errs, code := runBinary(t, bin, env, "history")
@@ -343,7 +343,7 @@ func TestHistoryEmptyStore(t *testing.T) {
 // TestHistoryLineLogNote pins AC-043's note: only a readable, non-empty line
 // log produces it, and no history file is created either way.
 func TestHistoryLineLogNote(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	const note = "xbpretty: earlier transactions are only in the line log and cannot be replayed; run 'xbp log' to read them\n"
 	for _, tt := range []struct {
 		name    string
@@ -383,7 +383,7 @@ func TestHistoryLineLogNote(t *testing.T) {
 // TestHistoryErrors pins FR-032's selector and corruption errors and exit
 // codes.
 func TestHistoryErrors(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	cases := []struct {
 		name  string
 		args  []string
@@ -449,7 +449,7 @@ func assertNoHistoryEntry(t *testing.T, dir string) {
 // TestHistoryNoWriteMatrix pins FR-031's negative list through the built
 // binary: none of these runs may create an entry.
 func TestHistoryNoWriteMatrix(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	holdPlan := "figlet-2.2.5_6 hold x86_64 https://repo-default.voidlinux.org/current\n"
 	cases := []struct {
 		name  string
@@ -512,7 +512,7 @@ func TestHistoryNoWriteMatrix(t *testing.T) {
 // TestHistoryWriteFailureIsAWarning pins FR-031's best-effort write: a store
 // that cannot be written warns and leaves the run's exit code alone.
 func TestHistoryWriteFailureIsAWarning(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	// A regular file where the store directory belongs makes the write fail
 	// for root and non-root alike.
@@ -538,7 +538,7 @@ func TestHistoryWriteFailureIsAWarning(t *testing.T) {
 // TestHistoryDualWrite pins FR-035's line-log split: a successful transaction
 // writes both, and --no-log stops only the line log.
 func TestHistoryDualWrite(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	t.Run("default writes both", func(t *testing.T) {
 		dir := t.TempDir()
 		env := historyRunEnv(t, dir)
@@ -577,7 +577,7 @@ func TestHistoryDualWrite(t *testing.T) {
 // built binary: each operation comes from the before/after bulk snapshots and
 // the plan action, not from the command name.
 func TestHistoryOperationsFromSnapshots(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	const repo = "https://repo-default.voidlinux.org/current"
 	cases := []struct {
 		name         string
@@ -693,7 +693,7 @@ func TestHistoryOperationsFromSnapshots(t *testing.T) {
 // TestHistoryRecordsHeldRowsWithReason pins FR-031: hold rows are recorded
 // with the entry but are never replayed, and a mixed plan keeps both.
 func TestHistoryRecordsHeldRowsWithReason(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	const repo = "https://repo-default.voidlinux.org/current"
 	dir := t.TempDir()
 	env := historyRunEnv(t, dir).
@@ -737,7 +737,7 @@ func TestHistoryRecordsHeldRowsWithReason(t *testing.T) {
 // state: auto_installed is the inverse of the manual pass, and hold/repolock
 // come from -H and --list-repolock-pkgs.
 func TestHistorySnapshotBits(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	const repo = "https://repo-default.voidlinux.org/current"
 	dir := t.TempDir()
 	env := historyRunEnv(t, dir).
@@ -766,7 +766,7 @@ func TestHistorySnapshotBits(t *testing.T) {
 // TestHistoryDirPrecedenceThroughBinary pins FR-029's resolution through the binary:
 // --history-dir beats XBPRETTY_HISTORY_DIR, which beats the default.
 func TestHistoryDirPrecedenceThroughBinary(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	envDir := filepath.Join(dir, "env-history")
 	cliDir := filepath.Join(dir, "cli-history")
@@ -790,7 +790,7 @@ func TestHistoryDirPrecedenceThroughBinary(t *testing.T) {
 // TestHistoryNoWriteOnFetch pins FR-031's fetch exclusion through the binary
 // with a local mirror fixture, so no network is touched.
 func TestHistoryNoWriteOnFetch(t *testing.T) {
-	bin := taggedBinary(t)
+	bin := testrootBinary(t)
 	dir := t.TempDir()
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

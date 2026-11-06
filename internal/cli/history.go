@@ -115,7 +115,7 @@ func (st *state) finishHistory() {
 }
 
 func (st *state) historyWarning(err error) {
-	fmt.Fprintf(st.stderr, "xbpretty: history entry not saved: %v\n", err)
+	st.errorf("history entry not saved: %v\n", err)
 }
 
 // requestedTargets is FR-030's raw positional list: not deduplicated, and
@@ -162,7 +162,7 @@ func requestedBy() string {
 // from: installed pkgvers (-l), the manual set (-m), holds (-H) and repolocks
 // (--list-repolock-pkgs). A failure is an error, not a partial snapshot.
 func (st *state) capturePackageStates() (map[string]history.PackageState, error) {
-	s := newSnapshot()
+	s := newDiscoverySnapshot()
 	installed, err := st.historyBulkQuery("-l")
 	if err != nil {
 		return nil, err
@@ -327,7 +327,7 @@ func (st *state) compareVersions(before, after string) int {
 			return -1
 		}
 	}
-	fmt.Fprintf(st.stderr, "xbpretty: warning: xbps-uhelper cmpver %s %s failed; recording the change as an upgrade\n", before, after)
+	st.warnf("xbps-uhelper cmpver %s %s failed; recording the change as an upgrade\n", before, after)
 	return -1
 }
 
@@ -345,7 +345,7 @@ func (st *state) runHistory(opts *options) int {
 func (st *state) runHistoryList() int {
 	entries, err := history.New(st.historyDir).List()
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 	if len(entries) == 0 {
@@ -378,13 +378,13 @@ func (st *state) lineLogNote() {
 	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
 		return
 	}
-	fmt.Fprintln(st.stderr, "xbpretty: earlier transactions are only in the line log and cannot be replayed; run 'xbp log' to read them")
+	st.errorf("%s\n", "earlier transactions are only in the line log and cannot be replayed; run 'xbp log' to read them")
 }
 
 func (st *state) runHistoryDetail(opts *options, selector string) int {
 	id, last, ok := parseHistorySelector(selector)
 	if !ok {
-		fmt.Fprintf(st.stderr, "xbpretty: invalid history selector %q; use an integer id or 'last'\n", selector)
+		st.errorf("invalid history selector %q; use an integer id or 'last'\n", selector)
 		return exitUsage
 	}
 	store := history.New(st.historyDir)
@@ -392,22 +392,22 @@ func (st *state) runHistoryDetail(opts *options, selector string) int {
 	if last {
 		found, present, err := store.Last()
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			st.errorf("%v\n", err)
 			return exitRuntime
 		}
 		if !present {
-			fmt.Fprintln(st.stderr, "xbpretty: history is empty")
+			st.errorf("%s\n", "history is empty")
 			return exitRuntime
 		}
 		entry = found
 	} else {
 		found, err := store.Load(id)
 		if errors.Is(err, history.ErrNotFound) {
-			fmt.Fprintf(st.stderr, "xbpretty: history entry %d not found\n", id)
+			st.errorf("history entry %d not found\n", id)
 			return exitRuntime
 		}
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			st.errorf("%v\n", err)
 			return exitRuntime
 		}
 		entry = found
@@ -539,17 +539,16 @@ func (st *state) runHistoryClear(opts *options) int {
 	store := history.New(st.historyDir)
 	if opts.clearAll {
 		count, err := store.Clear()
-		// A partial clear still reports what it deleted before the error, so
-		// the operator can see the store's actual state.
-		if count > 0 {
-			if count == 1 {
-				fmt.Fprintln(st.stdout, "Cleared 1 history entry.")
-			} else {
-				fmt.Fprintf(st.stdout, "Cleared %d history entries.\n", count)
-			}
+		// FR-035/AC-029: --all always reports the count, including zero on
+		// an empty store. A partial clear still reports what it deleted
+		// before the error, so the operator can see the store's actual state.
+		if count == 1 {
+			fmt.Fprintln(st.stdout, "Cleared 1 history entry.")
+		} else {
+			fmt.Fprintf(st.stdout, "Cleared %d history entries.\n", count)
 		}
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			st.errorf("%v\n", err)
 			return exitRuntime
 		}
 		return exitOK
@@ -558,27 +557,27 @@ func (st *state) runHistoryClear(opts *options) int {
 	selector := opts.args[0]
 	id, last, ok := parseHistorySelector(selector)
 	if !ok {
-		fmt.Fprintf(st.stderr, "xbpretty: invalid history selector %q; use an integer id or 'last'\n", selector)
+		st.errorf("invalid history selector %q; use an integer id or 'last'\n", selector)
 		return exitUsage
 	}
 	if last {
 		entry, present, err := store.Last()
 		if err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+			st.errorf("%v\n", err)
 			return exitRuntime
 		}
 		if !present {
-			fmt.Fprintln(st.stderr, "xbpretty: history is empty")
+			st.errorf("%s\n", "history is empty")
 			return exitRuntime
 		}
 		id = entry.ID
 	}
 	if err := store.Delete(id); err != nil {
 		if errors.Is(err, history.ErrNotFound) {
-			fmt.Fprintf(st.stderr, "xbpretty: history entry %d not found\n", id)
+			st.errorf("history entry %d not found\n", id)
 			return exitRuntime
 		}
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 	fmt.Fprintf(st.stdout, "Cleared history entry %d.\n", id)
@@ -598,5 +597,5 @@ func (st *state) clearRootHint(opts *options) {
 	} else if len(opts.args) > 0 {
 		line += " " + opts.args[0]
 	}
-	fmt.Fprintf(st.stderr, "hint: rerun as root: %s %s\n", elevate, line)
+	st.hintf("rerun as root: %s %s\n", elevate, line)
 }

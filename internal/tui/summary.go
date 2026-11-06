@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 
+	"github.com/soubarnak/xbpretty/internal/summary"
 	"github.com/soubarnak/xbpretty/internal/term"
 )
 
@@ -207,58 +208,21 @@ func roleFor(label string) Role {
 	return RoleNotice
 }
 
-// versionSpans implements FR-063's version diff as cell styles. The whole row
-// is painted Primary when selected, so the spans only matter otherwise.
-func versionSpans(oldV, newV string) []Span {
-	decompose := func(v string) (up, rev string) {
-		if i := strings.LastIndex(v, "_"); i >= 0 {
-			return v[:i], v[i+1:]
+// VersionSpans maps FR-063's shared version-diff segments to cell styles.
+// The whole row is painted Primary when selected, so the spans only matter
+// otherwise.
+func VersionSpans(oldV, newV string) []Span {
+	parts := summary.VersionParts(oldV, newV)
+	spans := make([]Span, 0, len(parts))
+	for _, part := range parts {
+		role := RoleRegular
+		if part.Changed {
+			role = RoleNotice
 		}
-		return v, ""
-	}
-	oldUp, oldRev := decompose(oldV)
-	newUp, newRev := decompose(newV)
-	if oldUp == newUp {
-		if oldRev == newRev {
-			return []Span{{Text: newV, Role: RoleRegular}}
-		}
-		prefix := newUp
-		if newRev != "" {
-			prefix += "_"
-		}
-		if prefix == "" {
-			return []Span{{Text: newRev, Role: RoleNotice}}
-		}
-		return []Span{{Text: prefix, Role: RoleRegular}, {Text: newRev, Role: RoleNotice}}
-	}
-	op := strings.Split(oldUp, ".")
-	np := strings.Split(newUp, ".")
-	k := 0
-	for k < len(op) && k < len(np) && op[k] == np[k] {
-		k++
-	}
-	var spans []Span
-	if k > 0 {
-		spans = append(spans, Span{Text: strings.Join(np[:k], ".") + ".", Role: RoleRegular})
-	}
-	for j := k; j < len(np); j++ {
-		text := np[j]
-		if j == len(np)-1 && newRev != "" {
-			text += "_" + newRev
-		}
-		spans = append(spans, Span{Text: text, Role: RoleNotice})
-		if j < len(np)-1 {
-			spans = append(spans, Span{Text: ".", Role: RoleRegular})
-		}
-	}
-	if len(spans) == 0 {
-		return []Span{{Text: newV, Role: RoleRegular}}
+		spans = append(spans, Span{Text: part.Text, Role: role})
 	}
 	return spans
 }
-
-// VersionSpans exposes the diff algorithm the model builders use.
-func VersionSpans(oldV, newV string) []Span { return versionSpans(oldV, newV) }
 
 func spanWidth(spans []Span) int {
 	w := 0
@@ -308,6 +272,10 @@ func (b *block) title(buf *Buffer, title string, st Style) {
 	buf.DrawTextLimit(start, b.Y, s, st, b.W-2)
 }
 
+// Fits reports whether a width and height meet ADR-0017's 60x18 entry
+// floor. Below it every full-screen surface falls back to its text path.
+func Fits(w, h int) bool { return w >= 60 && h >= 18 }
+
 // RenderSummary draws the operation-tabbed transaction summary (S1) or the
 // read-only history detail (S2). It is the frame only: the caller chooses the
 // active tab and selection, and owns the key loop.
@@ -319,7 +287,7 @@ func RenderSummary(m *SummaryModel, w, h int, t Theme) *Buffer {
 	border := &block{X: 0, Y: 0, W: w, H: h}
 	border.fill(buf, t.Primary)
 	border.title(buf, m.Title, t.style(RoleHighlight))
-	if w < 60 || h < 18 {
+	if !Fits(w, h) {
 		centerText(buf, h/2, TooSmall(w, h), t.style(RoleNotice))
 		return buf
 	}

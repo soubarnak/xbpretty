@@ -11,9 +11,9 @@ func goldenUpgrade() *SummaryModel {
 	return &SummaryModel{
 		Title: "xbpretty Upgrade",
 		Tabs: []Tab{{Label: "Upgrade", Rows: []PkgRow{
-			{Name: "libfoo", Old: "1.2_1", New: "1.3_1", Size: "120 KiB", NewSpans: versionSpans("1.2_1", "1.3_1")},
-			{Name: "libbar", Old: "0.9_2", New: "0.9_3", Size: "44 KiB", NewSpans: versionSpans("0.9_2", "0.9_3")},
-			{Name: "libbaz", Old: "2.0_1", New: "2.0_2", Size: "8 KiB", NewSpans: versionSpans("2.0_1", "2.0_2")},
+			{Name: "libfoo", Old: "1.2_1", New: "1.3_1", Size: "120 KiB", NewSpans: VersionSpans("1.2_1", "1.3_1")},
+			{Name: "libbar", Old: "0.9_2", New: "0.9_3", Size: "44 KiB", NewSpans: VersionSpans("0.9_2", "0.9_3")},
+			{Name: "libbaz", Old: "2.0_1", New: "2.0_2", Size: "8 KiB", NewSpans: VersionSpans("2.0_1", "2.0_2")},
 		}}},
 		Download:  "12.4 MiB",
 		DiskLabel: "Disk space required:",
@@ -340,7 +340,7 @@ func TestDowngradeTabShowsBothVersions(t *testing.T) {
 		Title:   "xbpretty History",
 		History: true,
 		Tabs: []Tab{{Label: "Downgrade", Rows: []PkgRow{
-			{Name: "curl", Old: "8.17.0_1", New: "8.16.0_1", Size: "2 MiB", NewSpans: versionSpans("8.17.0_1", "8.16.0_1")},
+			{Name: "curl", Old: "8.17.0_1", New: "8.16.0_1", Size: "2 MiB", NewSpans: VersionSpans("8.17.0_1", "8.16.0_1")},
 		}}},
 	}
 	frame := RenderSummary(model, 80, 24, DefaultTheme()).Text()

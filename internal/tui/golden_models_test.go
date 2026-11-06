@@ -18,10 +18,10 @@ func goldenMultiTab() *SummaryModel {
 				{Name: "zsh", New: "5.9_3", Size: "2 MiB"},
 			}},
 			{Label: "Upgrade", Rows: []PkgRow{
-				{Name: "glibc", Old: "2.41_1", New: "2.41_2", Size: "12 MiB", NewSpans: versionSpans("2.41_1", "2.41_2")},
+				{Name: "glibc", Old: "2.41_1", New: "2.41_2", Size: "12 MiB", NewSpans: VersionSpans("2.41_1", "2.41_2")},
 			}},
 			{Label: "Held", Rows: []PkgRow{
-				{Name: "bash", Old: "5.2_1", New: "5.2_2", Reason: "Manual hold", Size: "1 MiB", NewSpans: versionSpans("5.2_1", "5.2_2")},
+				{Name: "bash", Old: "5.2_1", New: "5.2_2", Reason: "Manual hold", Size: "1 MiB", NewSpans: VersionSpans("5.2_1", "5.2_2")},
 				{Name: "tzdata", Old: "2025a_1", New: "2025a_1", Reason: "Manual hold", Size: "100 KiB"},
 			}},
 		},
@@ -40,9 +40,9 @@ func goldenHeldMixed() *SummaryModel {
 	return &SummaryModel{
 		Title: "xbpretty Upgrade",
 		Tabs: []Tab{{Label: "Held", Rows: []PkgRow{
-			{Name: "bash", Old: "5.2_1", New: "5.2_2", Reason: "Manual hold", Size: "1 MiB", NewSpans: versionSpans("5.2_1", "5.2_2")},
+			{Name: "bash", Old: "5.2_1", New: "5.2_2", Reason: "Manual hold", Size: "1 MiB", NewSpans: VersionSpans("5.2_1", "5.2_2")},
 			{Name: "tzdata", Old: "2025a_1", New: "2025a_1", Reason: "Manual hold", Size: "100 KiB"},
-			{Name: "openssl", Old: "3.3.1_1", New: "3.3.2_1", Reason: "Manual hold", Size: "4 MiB", NewSpans: versionSpans("3.3.1_1", "3.3.2_1")},
+			{Name: "openssl", Old: "3.3.1_1", New: "3.3.2_1", Reason: "Manual hold", Size: "4 MiB", NewSpans: VersionSpans("3.3.1_1", "3.3.2_1")},
 		}}},
 		Sel:       1,
 		Download:  "2.0 MiB",
@@ -62,7 +62,7 @@ func goldenScrollable() *SummaryModel {
 		name := "pkg" + itoa(i)
 		rows = append(rows, PkgRow{
 			Name: name, Old: "1.0_" + itoa(i), New: "1.1_" + itoa(i), Size: "1 MiB",
-			NewSpans: versionSpans("1.0_"+itoa(i), "1.1_"+itoa(i)),
+			NewSpans: VersionSpans("1.0_"+itoa(i), "1.1_"+itoa(i)),
 		})
 	}
 	return &SummaryModel{
@@ -107,8 +107,8 @@ func goldenDowngrade() *SummaryModel {
 		Title:   "xbpretty History",
 		History: true,
 		Tabs: []Tab{{Label: "Downgrade", Rows: []PkgRow{
-			{Name: "curl", Old: "8.17.0_1", New: "8.16.0_1", Size: "2 MiB", NewSpans: versionSpans("8.17.0_1", "8.16.0_1")},
-			{Name: "wget", Old: "1.24.5_1", New: "1.24.4_1", Size: "1 MiB", NewSpans: versionSpans("1.24.5_1", "1.24.4_1")},
+			{Name: "curl", Old: "8.17.0_1", New: "8.16.0_1", Size: "2 MiB", NewSpans: VersionSpans("8.17.0_1", "8.16.0_1")},
+			{Name: "wget", Old: "1.24.5_1", New: "1.24.4_1", Size: "1 MiB", NewSpans: VersionSpans("1.24.5_1", "1.24.4_1")},
 		}}},
 		Help: []string{
 			"(↑) move up | (↓) move down",
@@ -137,9 +137,9 @@ func goldenRealistic60x18() *SummaryModel {
 	return &SummaryModel{
 		Title: "xbpretty Upgrade",
 		Tabs: []Tab{{Label: "Upgrade", Rows: []PkgRow{
-			{Name: "python3-requests", Old: "2.32.3_1", New: "2.32.4_1", Size: "412 KiB", NewSpans: versionSpans("2.32.3_1", "2.32.4_1")},
-			{Name: "libglib-2.0-devel", Old: "2.82.1_1", New: "2.82.2_1", Size: "1.4 MiB", NewSpans: versionSpans("2.82.1_1", "2.82.2_1")},
-			{Name: "python3-cryptography", Old: "43.0.1_1", New: "43.0.3_1", Size: "1.1 MiB", NewSpans: versionSpans("43.0.1_1", "43.0.3_1")},
+			{Name: "python3-requests", Old: "2.32.3_1", New: "2.32.4_1", Size: "412 KiB", NewSpans: VersionSpans("2.32.3_1", "2.32.4_1")},
+			{Name: "libglib-2.0-devel", Old: "2.82.1_1", New: "2.82.2_1", Size: "1.4 MiB", NewSpans: VersionSpans("2.82.1_1", "2.82.2_1")},
+			{Name: "python3-cryptography", Old: "43.0.1_1", New: "43.0.3_1", Size: "1.1 MiB", NewSpans: VersionSpans("43.0.1_1", "43.0.3_1")},
 		}}},
 		Download:  "2.9 MiB",
 		DiskLabel: "Disk space required:",

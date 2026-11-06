@@ -189,11 +189,7 @@ for __xbpretty_cmd in xbpretty xbp xbp-install xbp-remove xbp-upgrade xbp-autore
     complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l safe -d 'accepted no-op for nala compatibility'
     complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) upgrade full-upgrade safe-upgrade' -l print-uris -d 'print the plans download URLs and stop'
     complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade update undo redo' -l no-log -d 'do not append to the transaction log'
-    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-fix-broken
-    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-install-recommends
-    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) install remove purge autoremove autopurge upgrade full-upgrade safe-upgrade' -l no-install-suggests
     complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) list search show' -s a -l all-versions -d 'show every version of a package'
-    complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) list search show' -s A -l all-arches -d 'accepted no-op; xbps covers all architectures'
     complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) list search' -s i -l installed -d 'show installed packages only'
     complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) list search' -s u -l upgradable -d 'show upgradable packages only'
     complete -c $__xbpretty_cmd -n 'contains (__xbpretty_verb) list search' -l description -d 'print the long description under each row'

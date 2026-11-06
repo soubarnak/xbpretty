@@ -259,21 +259,6 @@ func relativeSuffix(fullPath string, bases []string) string {
 	return fullPath
 }
 
-// MirrorHosts returns the hostnames of every mirror in the loaded list.
-func MirrorHosts(mirrors []Mirror) []string {
-	hosts := make([]string, 0, len(mirrors))
-	for _, mirror := range mirrors {
-		u, err := url.Parse(mirror.URL)
-		if err != nil {
-			continue
-		}
-		if host := u.Hostname(); host != "" {
-			hosts = append(hosts, strings.ToLower(host))
-		}
-	}
-	return hosts
-}
-
 // normaliseHost accepts either a bare hostname or a URL and returns the
 // lower-case hostname.
 func normaliseHost(raw string) string {

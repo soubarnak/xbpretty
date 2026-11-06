@@ -29,15 +29,15 @@ func TestCommandTableIsCanonicalAndClosed(t *testing.T) {
 		"dist-up":      "upgrade",
 	}
 	for alias, canonical := range aliases {
-		got, ok := ResolveCommand(alias)
+		got, ok := LookupCommand(alias)
 		if !ok || got != canonical {
-			t.Errorf("ResolveCommand(%q) = %q, %v; want %q, true", alias, got, ok, canonical)
+			t.Errorf("LookupCommand(%q) = %q, %v; want %q, true", alias, got, ok, canonical)
 		}
 	}
 
 	for _, name := range []string{"clear", "help", "xbp-history", "xbp-fetch", "xbp-undo", "xbp-redo", "xbp-clean", "xbp-log", "purge-all"} {
-		if got, ok := ResolveCommand(name); ok {
-			t.Errorf("ResolveCommand(%q) = %q, true; want no command", name, got)
+		if got, ok := LookupCommand(name); ok {
+			t.Errorf("LookupCommand(%q) = %q, true; want no command", name, got)
 		}
 	}
 }
@@ -276,9 +276,9 @@ func TestDryRunIsLongOnlyAndAssumeNoTakesTheShortN(t *testing.T) {
 
 func TestUndocumentedAliasesResolveButStayOutOfHelp(t *testing.T) {
 	for _, alias := range []string{"up", "dist-up"} {
-		got, ok := ResolveCommand(alias)
+		got, ok := LookupCommand(alias)
 		if !ok || got != "upgrade" {
-			t.Errorf("ResolveCommand(%q) = %q, %v; want upgrade", alias, got, ok)
+			t.Errorf("LookupCommand(%q) = %q, %v; want upgrade", alias, got, ok)
 		}
 	}
 	text := Usage()

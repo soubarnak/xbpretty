@@ -240,7 +240,7 @@ func writePolicyGlobal(out io.Writer, files []discovery.PolicyFile, pinned []dis
 // policyPrecedence maps a repository URL to its 1-based -L precedence. When
 // the repository list did not run or omitted a row, the architecture pass
 // order the row model already carries is the fallback.
-func policyPrecedence(files []discovery.PolicyFile, s *snapshot) map[string]int {
+func policyPrecedence(files []discovery.PolicyFile, s *discoverySnapshot) map[string]int {
 	out := make(map[string]int, len(files)+len(s.repoRank))
 	for _, file := range files {
 		out[file.Repository] = file.Precedence
@@ -285,7 +285,7 @@ func policyRecordName(rec *xbpsRecord) string {
 
 // runPolicyPackages implements FR-026's with-names view and FR-027's array.
 func (st *state) runPolicyPackages(opts *options) int {
-	s, code, ok := st.loadSnapshot(discoveryNeeds{})
+	s, code, ok := st.loadDiscoverySnapshot(discoveryNeeds{})
 	if !ok {
 		return code
 	}

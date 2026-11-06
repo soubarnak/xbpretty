@@ -60,7 +60,7 @@ type fetchWritePlan struct {
 func (st *state) runFetch(opts *options) int {
 	cfg, err := fetch.DiscoverRepositories(fetchXBPSDDirs)
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 
@@ -70,10 +70,10 @@ func (st *state) runFetch(opts *options) int {
 	mirrors, warnings, err := fetch.FetchMirrorsDetailed(ctx, client, fetchMirrorListURL, userAgent)
 	cancel()
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: mirror list unavailable; using the built-in snapshot from %s\n", fetch.SnapshotDate)
+		st.errorf("mirror list unavailable; using the built-in snapshot from %s\n", fetch.SnapshotDate)
 		mirrors, err = fetch.Snapshot()
 		if err != nil {
-			fmt.Fprintln(st.stderr, "xbpretty: no mirror list available")
+			st.errorf("%s\n", "no mirror list available")
 			return exitRuntime
 		}
 		warnings = nil
@@ -86,7 +86,7 @@ func (st *state) runFetch(opts *options) int {
 
 	repos, err := fetch.ClassifyRepositories(cfg, mirrorBaseURLs(mirrors), fetchPreviousHosts())
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 	arch := repos.Arch
@@ -96,7 +96,7 @@ func (st *state) runFetch(opts *options) int {
 
 	mirrors = fetch.FilterMirrors(mirrors, opts.country)
 	if len(mirrors) == 0 {
-		fmt.Fprintln(st.stderr, "xbpretty: no mirrors match the requested country or region")
+		st.errorf("%s\n", "no mirrors match the requested country or region")
 		return exitRuntime
 	}
 	if opts.httpsOnly {
@@ -137,7 +137,7 @@ func (st *state) runFetch(opts *options) int {
 	}()
 	if mode := st.mirrorLiveMode(opts); mode != liveOff {
 		model := newProgressModel("mirror", nil, nil)
-		live = newLiveProgress(st.stderr, st.color, terminalWidth(st.stderr), mode, model, st.theme)
+		live = newLiveProgress(st.stderr, st.colorErr, terminalWidth(st.stderr), mode, model, st.theme)
 		st.r.live = true
 		st.r.liveProgress = live
 		defer live.Finish()
@@ -168,7 +168,7 @@ func (st *state) runFetch(opts *options) int {
 		sigMu.Lock()
 		interruptedBy := delivered
 		sigMu.Unlock()
-		fmt.Fprintln(st.stderr, "xbpretty: interrupted")
+		st.errorf("%s\n", "interrupted")
 		if interruptedBy == syscall.SIGTERM {
 			return 128 + int(syscall.SIGTERM)
 		}
@@ -180,7 +180,7 @@ func (st *state) runFetch(opts *options) int {
 				fmt.Fprintf(st.stderr, "verbose: %s: %v\n", failure.Mirror.URL, failure.Err)
 			}
 		}
-		fmt.Fprintf(st.stderr, "xbpretty: %d of %d mirrors did not respond\n", len(report.Failures), len(mirrors))
+		st.errorf("%d of %d mirrors did not respond\n", len(report.Failures), len(mirrors))
 	}
 
 	ranked := fetch.Rank(report.Results)
@@ -188,7 +188,7 @@ func (st *state) runFetch(opts *options) int {
 		ranked = fetchRankedHook(ranked)
 	}
 	if len(ranked) == 0 {
-		fmt.Fprintln(st.stderr, "xbpretty: no mirrors responded")
+		st.errorf("%s\n", "no mirrors responded")
 		return exitRuntime
 	}
 
@@ -203,7 +203,7 @@ func (st *state) runFetch(opts *options) int {
 	}
 
 	if err := fetch.RenderTable(st.stdout, ranked, chosen.URL); err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 
@@ -212,13 +212,13 @@ func (st *state) runFetch(opts *options) int {
 		return exitOK
 	}
 	if euidFn() != 0 {
-		fmt.Fprintln(st.stderr, "hint: run with sudo to write the repository configuration")
+		st.hintf("%s\n", "run with sudo to write the repository configuration")
 		return exitRuntime
 	}
 	// FR-053: prove the configured sync binary before the first byte is
 	// written, so a missing xbps-install cannot leave a half-done fetch.
 	if err := st.r.cfg.ResolveFor("install"); err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 
@@ -232,7 +232,7 @@ func (st *state) runFetch(opts *options) int {
 		WrittenAt:    time.Now(),
 	})
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return code
 	}
 	for _, path := range paths {
@@ -272,14 +272,14 @@ func (st *state) chooseMirror(client *http.Client, ranked []fetch.Result, suffix
 
 	validatePick := func(index int) (fetch.Result, int, bool) {
 		if index < 0 || index >= len(ranked) {
-			fmt.Fprintln(st.stderr, "xbpretty: no candidate mirror serves all configured repositories")
+			st.errorf("%s\n", "no candidate mirror serves all configured repositories")
 			return fetch.Result{}, exitRuntime, false
 		}
 		if err := validate(ranked[index]); err != nil {
 			if st.r != nil && st.r.verbose {
 				fmt.Fprintf(st.stderr, "verbose: %s: %v\n", ranked[index].URL, err)
 			}
-			fmt.Fprintln(st.stderr, "xbpretty: no candidate mirror serves all configured repositories")
+			st.errorf("%s\n", "no candidate mirror serves all configured repositories")
 			return fetch.Result{}, exitRuntime, false
 		}
 		return ranked[index], exitOK, true
@@ -288,7 +288,7 @@ func (st *state) chooseMirror(client *http.Client, ranked []fetch.Result, suffix
 	if allowPicker && pickMirror != nil {
 		index, ok := pickMirror(ranked)
 		if !ok {
-			fmt.Fprintln(st.stderr, "xbpretty: no mirror was selected")
+			st.errorf("%s\n", "no mirror was selected")
 			return fetch.Result{}, exitRuntime, false
 		}
 		return validatePick(index)
@@ -303,7 +303,7 @@ func (st *state) chooseMirror(client *http.Client, ranked []fetch.Result, suffix
 			if code > 0 {
 				return fetch.Result{}, code, false
 			}
-			fmt.Fprintln(st.stderr, "xbpretty: no mirror was selected")
+			st.errorf("%s\n", "no mirror was selected")
 			return fetch.Result{}, exitRuntime, false
 		default:
 			return validatePick(index)
@@ -326,7 +326,7 @@ func (st *state) chooseMirror(client *http.Client, ranked []fetch.Result, suffix
 		}
 		return candidate, exitOK, true
 	}
-	fmt.Fprintln(st.stderr, "xbpretty: no candidate mirror serves all configured repositories")
+	st.errorf("%s\n", "no candidate mirror serves all configured repositories")
 	return fetch.Result{}, exitRuntime, false
 }
 
@@ -377,7 +377,7 @@ func (st *state) writeRepositoryConfiguration(plan fetchWritePlan) ([]string, in
 		return nil, exitRuntime, nil
 	}
 	if foreign {
-		fmt.Fprintln(st.stderr, "xbpretty: repository sync reported errors; review the output above")
+		st.errorf("%s\n", "repository sync reported errors; review the output above")
 	}
 	return paths, exitOK, nil
 }
@@ -400,7 +400,7 @@ func (st *state) revertFetchWrites(preImages []fetch.PreImage, previous fetch.Ma
 			}
 		}
 		if revertErr != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: reverting %s: %v\n", pre.Path, revertErr)
+			st.errorf("reverting %s: %v\n", pre.Path, revertErr)
 			restored = false
 		}
 	}
@@ -409,13 +409,13 @@ func (st *state) revertFetchWrites(preImages []fetch.PreImage, previous fetch.Ma
 	}
 	if len(previous.Files) > 0 {
 		if err := fetch.WriteManifest(fetchManifestPath, previous); err != nil {
-			fmt.Fprintf(st.stderr, "xbpretty: reverting %s: %v\n", fetchManifestPath, err)
+			st.errorf("reverting %s: %v\n", fetchManifestPath, err)
 			return
 		}
 	} else {
 		_ = os.Remove(fetchManifestPath)
 	}
-	fmt.Fprintln(st.stderr, "xbpretty: repository sync failed; previous configuration restored")
+	st.errorf("%s\n", "repository sync failed; previous configuration restored")
 }
 
 // mirrorBaseURLs returns the live mirror URLs, whose paths are the bases a

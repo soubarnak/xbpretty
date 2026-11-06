@@ -15,34 +15,56 @@ import (
 // testdata/stub, so the whole flow runs without touching a package system.
 
 var (
-	plainBinOnce sync.Once
-	plainBinPath string
-	plainBinErr  error
+	testBinMu    sync.Mutex
+	testBinaries = map[string]builtTestBinary{}
 )
 
-func buildBinary(t *testing.T) string {
-	t.Helper()
-	plainBinOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "xbp-plain-")
-		if err != nil {
-			plainBinErr = err
-			return
-		}
-		bin := filepath.Join(dir, "xbpretty")
-		cmd := exec.Command("go", "build", "-o", bin, "../../cmd/xbpretty")
-		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			plainBinErr = err
-			t.Logf("plain build output:\n%s", out)
-			return
-		}
-		plainBinPath = bin
-	})
-	if plainBinErr != nil {
-		t.Fatalf("building test binary: %v", plainBinErr)
-	}
-	return plainBinPath
+// builtTestBinary caches one built binary per build-tag set. The whole cli
+// suite shares it so the plain and xbpretty_testroot builds happen once.
+type builtTestBinary struct {
+	path string
+	err  error
 }
+
+func buildTestBinary(t *testing.T, tags string) string {
+	t.Helper()
+	testBinMu.Lock()
+	defer testBinMu.Unlock()
+	if b, ok := testBinaries[tags]; ok {
+		if b.err != nil {
+			t.Fatalf("building test binary: %v", b.err)
+		}
+		return b.path
+	}
+	dir, err := os.MkdirTemp("", "xbp-test-")
+	if err != nil {
+		testBinaries[tags] = builtTestBinary{err: err}
+		t.Fatalf("building test binary: %v", err)
+	}
+	bin := filepath.Join(dir, "xbpretty")
+	args := []string{"build"}
+	if tags != "" {
+		args = append(args, "-tags", tags)
+	}
+	args = append(args, "-o", bin, "../../cmd/xbpretty")
+	cmd := exec.Command("go", args...)
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Logf("test build output:\n%s", out)
+	}
+	testBinaries[tags] = builtTestBinary{path: bin, err: err}
+	if err != nil {
+		t.Fatalf("building test binary: %v", err)
+	}
+	return bin
+}
+
+func buildBinary(t *testing.T) string { return buildTestBinary(t, "") }
+
+// testrootBinary is the xbpretty_testroot build: the production binary never
+// carries the euid, path or TUI test hooks.
+func testrootBinary(t *testing.T) string { return buildTestBinary(t, "xbpretty_testroot") }
 
 // integrationConfig writes a rev 6 default layer pointing at the stubs, with
 // the given [Color] mode and any extra lines appended. It returns the

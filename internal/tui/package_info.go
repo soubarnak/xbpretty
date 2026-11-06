@@ -24,7 +24,7 @@ func RenderPackageInfo(m *PackageInfoModel, w, h int, t Theme) *Buffer {
 	border := &block{X: 0, Y: 0, W: w, H: h}
 	border.fill(buf, t.Primary)
 	border.title(buf, m.Title, t.style(RoleHighlight))
-	if w < 60 || h < 18 {
+	if !Fits(w, h) {
 		centerText(buf, h/2, TooSmall(w, h), t.style(RoleNotice))
 		return buf
 	}

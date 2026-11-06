@@ -149,27 +149,26 @@ func (t Theme) prefix(role Role) string {
 	return ""
 }
 
-// VersionDiff highlights the changed components of newVer with nala's Notice
-// role. oldVer is never painted. The revision rides on the last highlighted
-// component, and a '.' between two highlighted components stays plain.
-func VersionDiff(oldVer, newVer string, color bool) string {
-	if !color {
-		return newVer
-	}
-	return versionDiffWith(oldVer, newVer, func(part string) string {
-		return DefaultTheme().Notice + part + resetSeq
-	})
+// VersionPart is one segment of FR-063's version diff. Changed marks the
+// components the Notice role paints; unchanged text (including the dots
+// between changed components) stays raw. Splitting the algorithm into
+// segments lets the inline renderer and the TUI share it without either
+// re-typing the boundaries.
+type VersionPart struct {
+	Text    string
+	Changed bool
 }
 
-// versionDiffWith is VersionDiff's algorithm with a caller-supplied painter,
-// so a renderer can apply its resolved theme role.
-func versionDiffWith(oldVer, newVer string, paint func(string) string) string {
+// VersionParts splits newVer into the raw and changed components of the
+// version diff, split at the last '_' and then on '.'. A missing or identical
+// old version yields one unchanged part.
+func VersionParts(oldVer, newVer string) []VersionPart {
 	if oldVer == "" || oldVer == newVer {
-		return newVer
+		return []VersionPart{{Text: newVer}}
 	}
 	if oldUp, _, ok := splitRevision(oldVer); ok {
 		if newUp, newRev, ok2 := splitRevision(newVer); ok2 && oldUp == newUp {
-			return newUp + "_" + paint(newRev)
+			return []VersionPart{{Text: newUp + "_"}, {Text: newRev, Changed: true}}
 		}
 	}
 	oldParts := strings.Split(oldVer, ".")
@@ -181,15 +180,35 @@ func versionDiffWith(oldVer, newVer string, paint func(string) string) string {
 			break
 		}
 	}
-	parts := make([]string, len(newParts))
+	var out []VersionPart
 	for i, part := range newParts {
-		if i >= start {
-			parts[i] = paint(part)
+		if i > 0 {
+			out = append(out, VersionPart{Text: "."})
+		}
+		out = append(out, VersionPart{Text: part, Changed: i >= start})
+	}
+	if len(out) == 0 {
+		return []VersionPart{{Text: newVer}}
+	}
+	return out
+}
+
+// VersionDiff highlights the changed components of newVer with nala's Notice
+// role. oldVer is never painted. The revision rides on the last highlighted
+// component, and a '.' between two highlighted components stays plain.
+func VersionDiff(oldVer, newVer string, color bool) string {
+	if !color {
+		return newVer
+	}
+	var b strings.Builder
+	for _, part := range VersionParts(oldVer, newVer) {
+		if part.Changed {
+			b.WriteString(DefaultTheme().Notice + part.Text + resetSeq)
 		} else {
-			parts[i] = part
+			b.WriteString(part.Text)
 		}
 	}
-	return strings.Join(parts, ".")
+	return b.String()
 }
 
 // splitRevision splits an xbps version at its last '_', the revision
@@ -200,42 +219,6 @@ func splitRevision(v string) (upstream, revision string, ok bool) {
 		return v, "", false
 	}
 	return v[:i], v[i+1:], true
-}
-
-// BoxChars holds the characters used to render container borders.
-type BoxChars struct {
-	TopLeft      string
-	TopRight     string
-	BottomLeft   string
-	BottomRight  string
-	Horizontal   string
-	Vertical     string
-	DividerLeft  string
-	DividerRight string
-}
-
-// BoxCharacterSet returns the BoxChars for the specified box style
-// ("rounded", "classic", "ascii"). Empty or unknown styles fall back to "rounded".
-func BoxCharacterSet(style string) BoxChars {
-	switch style {
-	case "classic":
-		return BoxChars{
-			TopLeft: "┌", TopRight: "┐", BottomLeft: "└", BottomRight: "┘",
-			Horizontal: "─", Vertical: "│", DividerLeft: "├", DividerRight: "┤",
-		}
-	case "ascii":
-		return BoxChars{
-			TopLeft: "+", TopRight: "+", BottomLeft: "+", BottomRight: "+",
-			Horizontal: "-", Vertical: "|", DividerLeft: "+", DividerRight: "+",
-		}
-	case "rounded", "":
-		fallthrough
-	default:
-		return BoxChars{
-			TopLeft: "╭", TopRight: "╮", BottomLeft: "╰", BottomRight: "╯",
-			Horizontal: "─", Vertical: "│", DividerLeft: "├", DividerRight: "┤",
-		}
-	}
 }
 
 func itoa(n uint64) string {
