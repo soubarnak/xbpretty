@@ -2,8 +2,8 @@
 ┃ utoRemove Purge AutoPurge Install Reinstall Upgrade Downgrade Configure Held ┃
 ┃                                                                         ━━━━ ┃
 ┃ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┏━┓ ┃
-┃ ┃    Package:     Old Version:     New Version:     Reason:      Size:  ┃┃█┃ ┃
-┃ ┃❯   held-pkg        2.0_1            2.1_1        ManualHold    2 MiB  ┃┃ ┃ ┃
+┃ ┃    Package:     Old Version:    New Version:      Reason:      Size:  ┃┃█┃ ┃
+┃ ┃❯   held-pkg        2.0_1           2.1_1        Manual hold    2 MiB  ┃┃ ┃ ┃
 ┃ ┃                                                                       ┃┃ ┃ ┃
 ┃ ┃                                                                       ┃┃ ┃ ┃
 ┃ ┃                                                                       ┃┃ ┃ ┃

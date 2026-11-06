@@ -434,14 +434,22 @@ func (st *state) buildReplayPlan(entry history.Entry, cmd string, current map[st
 		}
 
 		currentVersion, present := current[transition.Name]
-		// The recorded after state is what the current state should match;
-		// a mismatch is a warning, never a reason to refuse (FR-033).
-		recordedAfter := stateVersion(transition.After)
+		// Undo starts from the recorded after state. Redo starts from the
+		// before state, which the undo that precedes it left on the machine
+		// (BF-35). A mismatch is a warning, never a reason to refuse (FR-033).
+		expected := transition.After
+		if cmd == "redo" {
+			expected = transition.Before
+		}
+		expectedVersion := stateVersion(expected)
 		currentDisplay := presentVersion(present, currentVersion)
-		if currentDisplay != recordedAfter {
+		// A redo of an entry that was never undone finds the package already
+		// at its after state. Redo leaves it alone, so that is not drift.
+		alreadyAfter := cmd == "redo" && currentDisplay == stateVersion(transition.After)
+		if currentDisplay != expectedVersion && !alreadyAfter {
 			target := stateVersion(targetState)
 			st.warnf("%s is %s but history entry %d recorded %s; %s still restores %s\n",
-				transition.Name, currentDisplay, entry.ID, recordedAfter, cmd, target)
+				transition.Name, currentDisplay, entry.ID, expectedVersion, cmd, target)
 		}
 
 		targetVersion := stateVersion(targetState)
@@ -582,20 +590,36 @@ func (st *state) preflightReplay(plan *replayPlan, cmd string) int {
 	failures := make([]string, 0)
 	for i := range plan.restores {
 		target := &plan.restores[i]
-		if info, err := os.Stat(filepath.Join(cacheDir, target.archive)); err == nil && info.Mode().IsRegular() {
-			target.cacheHit = true
-			continue
+		pkgver := target.name + "-" + target.version
+		info, err := os.Stat(filepath.Join(cacheDir, target.archive))
+		cached := err == nil && info.Mode().IsRegular()
+		if !cached {
+			served, err := st.repositoryServes(pkgver)
+			if err != nil {
+				st.errorf("%v\n", err)
+				return exitRuntime
+			}
+			if !served {
+				failures = append(failures, fmt.Sprintf(
+					"xbpretty: %s cannot restore %s-%s.%s: not in %s and no configured repository serves that version",
+					cmd, target.name, target.version, target.arch, cacheDirDisplay))
+				continue
+			}
 		}
-		served, err := st.repositoryServes(target.name + "-" + target.version)
+		// The restored version's own repository and archive size, not the
+		// after version's (BF-36). A cache hit's size is the archive on disk.
+		repository, size, err := st.replayRepositoryMetadata(pkgver)
 		if err != nil {
 			st.errorf("%v\n", err)
 			return exitRuntime
 		}
-		if !served {
-			failures = append(failures, fmt.Sprintf(
-				"xbpretty: %s cannot restore %s-%s.%s: not in %s and no configured repository serves that version",
-				cmd, target.name, target.version, target.arch, cacheDirDisplay))
-			continue
+		if repository != "" {
+			target.repository = repository
+		}
+		target.cacheHit = cached
+		target.size = size
+		if cached {
+			target.size = clampReplaySize(uint64(info.Size()))
 		}
 	}
 	if len(failures) > 0 {
@@ -624,6 +648,36 @@ func (st *state) repositoryServes(pkgver string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// replayRepositoryMetadata asks xbps which repository serves the exact pkgver
+// and how large its archive is. xbps prints the pkgver, the repository and the
+// filename-size, one value per line; the first such group is the one xbps
+// would install from. Any other answer is unknown: an empty repository and a
+// zero size, so the caller keeps the recorded repository and the predownload
+// body limit is not enforced (BF-36).
+func (st *state) replayRepositoryMetadata(pkgver string) (string, uint64, error) {
+	res, err := st.r.run(st.r.cfg.Xbps.QueryPath, "-R", "-p", "pkgver,repository,filename-size", pkgver)
+	if err != nil {
+		return "", 0, err
+	}
+	if res.exitCode != 0 {
+		return "", 0, nil
+	}
+	var fields []string
+	for _, line := range strings.Split(res.stdout, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			fields = append(fields, line)
+		}
+	}
+	if len(fields) < 3 || fields[0] != pkgver {
+		return "", 0, nil
+	}
+	size, err := parseSize(fields[2])
+	if err != nil {
+		return fields[1], 0, nil
+	}
+	return fields[1], clampReplaySize(size), nil
 }
 
 // replayRepo is the temporary cache-only repository FR-034 describes.

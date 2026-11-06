@@ -508,7 +508,7 @@ func TestHistoryListStaysText(t *testing.T) {
 	if strings.Contains(out, term.AltEnter) {
 		t.Errorf("the history list opened the alternate screen: %q", out)
 	}
-	for _, want := range []string{"ID", "Command", "Date", "Requested-By", "Altered"} {
+	for _, want := range []string{"ID", "Command", "Date and Time", "Requested-By", "Altered"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("list missing %q:\n%q", want, out)
 		}

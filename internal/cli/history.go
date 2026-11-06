@@ -363,7 +363,7 @@ func (st *state) runHistoryList() int {
 			strconv.Itoa(entry.Altered()),
 		})
 	}
-	writeHistoryTable(st.stdout, []string{"ID", "Command", "Date", "Requested-By", "Altered"}, rows)
+	writeHistoryTable(st.stdout, []string{"ID", "Command", "Date and Time", "Requested-By", "Altered"}, rows)
 	return exitOK
 }
 
@@ -472,7 +472,7 @@ func writeHistoryDetail(w io.Writer, entry history.Entry) {
 			}
 			row := []string{transition.Name, versionOrDash(transition.Before), versionOrDash(transition.After)}
 			if held {
-				row = append(row, transition.HeldReason)
+				row = append(row, heldReasonLabel(transition.HeldReason))
 			}
 			rows = append(rows, row)
 		}
@@ -486,6 +486,15 @@ func writeHistoryDetail(w io.Writer, entry history.Entry) {
 		fmt.Fprintf(w, "\n%s:\n", operation)
 		writeHistoryTable(w, headers, rows)
 	}
+}
+
+// heldReasonLabel is the word a Held row shows for its stored reason: the
+// recorded ManualHold is nala's Manual hold. Any other reason passes through.
+func heldReasonLabel(reason string) string {
+	if reason == "ManualHold" {
+		return "Manual hold"
+	}
+	return reason
 }
 
 func versionOrDash(state *history.PackageState) string {

@@ -115,7 +115,7 @@ func TestHistoryToTuiGroupsInFixedOrder(t *testing.T) {
 		t.Errorf("downgrade row = %+v", downgrade)
 	}
 	held := model.Tabs[5].Rows[0]
-	if held.Old != "5.2_1" || held.New != "5.2_1" || held.Reason != "ManualHold" {
+	if held.Old != "5.2_1" || held.New != "5.2_1" || held.Reason != "Manual hold" {
 		t.Errorf("held row = %+v", held)
 	}
 	if model.Download != "" || model.Disk != "" || model.DiskLabel != "" {

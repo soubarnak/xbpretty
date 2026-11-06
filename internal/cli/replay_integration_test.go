@@ -801,6 +801,9 @@ func TestReplayRoutesItsDownloadSetThroughPredownload(t *testing.T) {
 	entry.Packages[0].Repository = "https://repo-default.voidlinux.org/current"
 	writeReplayEntry(t, store, entry)
 	env := replayEnv(t, dir, "uu figlet-2.2.6_1 figlet\n", "uu figlet-2.2.5_6 figlet\n")
+	// The repository reports the restored version's archive size (BF-36),
+	// which is what puts the restore in the download set.
+	env = withRepositoryMetadata(t, dir, env, "https://repo-default.voidlinux.org/current", "94KB")
 
 	out, errs, code := runBinary(t, bin, env, "undo", "1", "-y")
 	if code != 0 {

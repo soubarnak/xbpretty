@@ -188,7 +188,7 @@ func TestHistoryListAndDetail(t *testing.T) {
 		t.Fatalf("history = %q, want a header and two rows", out)
 	}
 	last := -1
-	for _, header := range []string{"ID", "Command", "Date", "Requested-By", "Altered"} {
+	for _, header := range []string{"ID", "Command", "Date and Time", "Requested-By", "Altered"} {
 		index := strings.Index(lines[0], header)
 		if index < 0 {
 			t.Errorf("header %q missing from %q", header, lines[0])
@@ -304,8 +304,8 @@ func TestHistoryDetailReplayAndGroupOrder(t *testing.T) {
 	if !(remove >= 0 && remove < install && install < held) {
 		t.Errorf("operation groups are not in fixed order:\n%s", out)
 	}
-	if !strings.Contains(out, "ManualHold") {
-		t.Errorf("Held reason missing:\n%s", out)
+	if !strings.Contains(out, "Manual hold") || strings.Contains(out, "ManualHold") {
+		t.Errorf("Held reason is not shown as Manual hold:\n%s", out)
 	}
 }
 

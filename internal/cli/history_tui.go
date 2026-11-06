@@ -64,7 +64,7 @@ func historyPkgRow(operation string, transition history.Transition, unit summary
 		Name:   transition.Name,
 		Old:    historyStateVersion(transition.Before),
 		New:    historyStateVersion(transition.After),
-		Reason: transition.HeldReason,
+		Reason: heldReasonLabel(transition.HeldReason),
 		Size:   historyRowSize(operation, transition, unit),
 	}
 	switch operation {
