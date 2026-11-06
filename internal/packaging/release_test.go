@@ -656,3 +656,58 @@ func contentFixture(t *testing.T) string {
 	}
 	return root
 }
+
+// TestReleaseArchitecturesCrossBuild compiles the release binary for each of
+// the nine Void architectures tools/build-xbps.sh packages (FR-076, AC-060).
+// The glibc and musl names share one Go target because the binary is
+// CGO-free, but every name is built so a broken architecture cannot hide
+// behind the default amd64 test run. Packaging and signing are out of scope.
+func TestReleaseArchitecturesCrossBuild(t *testing.T) {
+	requireLinux(t)
+	if testing.Short() {
+		t.Skip("cross-builds the nine release architectures")
+	}
+	archs := []struct {
+		name  string
+		arch  string
+		goarm string
+	}{
+		{"x86_64", "amd64", ""},
+		{"x86_64-musl", "amd64", ""},
+		{"i686", "386", ""},
+		{"aarch64", "arm64", ""},
+		{"aarch64-musl", "arm64", ""},
+		{"armv7l", "arm", "7"},
+		{"armv7l-musl", "arm", "7"},
+		{"armv6l", "arm", "6"},
+		{"armv6l-musl", "arm", "6"},
+	}
+	for _, tt := range archs {
+		t.Run(tt.name, func(t *testing.T) {
+			bin := filepath.Join(t.TempDir(), "xbpretty")
+			cmd := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-o", bin, "./cmd/xbpretty")
+			cmd.Dir = repoPath()
+			cmd.Env = append(crossEnv(), "GOOS=linux", "GOARCH="+tt.arch, "GOARM="+tt.goarm, "CGO_ENABLED=0")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("cross-build %s (GOARCH=%s GOARM=%s): %v\n%s", tt.name, tt.arch, tt.goarm, err, out)
+			}
+			if info, err := os.Stat(bin); err != nil || info.Size() == 0 {
+				t.Fatalf("cross-build %s produced no binary: %v", tt.name, err)
+			}
+		})
+	}
+}
+
+// crossEnv drops the ambient Go target so a cross-build test is not silently
+// skipped by a GOARCH/GOARM left in the environment.
+func crossEnv() []string {
+	drop := map[string]bool{"GOOS": true, "GOARCH": true, "GOARM": true, "CGO_ENABLED": true}
+	var env []string
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if !drop[key] {
+			env = append(env, entry)
+		}
+	}
+	return env
+}

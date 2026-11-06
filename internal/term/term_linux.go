@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -114,7 +115,9 @@ func waitReadable(fd uintptr, timeoutMS int) (bool, error) {
 	}
 	var set syscall.FdSet
 	set.Bits[fd/64] |= 1 << (fd % 64)
-	tv := syscall.Timeval{Sec: int64(timeoutMS / 1000), Usec: int64((timeoutMS % 1000) * 1000)}
+	// NsecToTimeval keeps the field width correct on every architecture:
+	// 32-bit targets declare Timeval.Sec/Usec as int32, not int64.
+	tv := syscall.NsecToTimeval(int64(timeoutMS) * int64(time.Millisecond))
 	n, err := syscall.Select(int(fd)+1, &set, nil, nil, &tv)
 	if err != nil {
 		if err == syscall.EINTR {
