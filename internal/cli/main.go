@@ -119,7 +119,7 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 
 	opts, parseErr := parseArgs(args, knownCmd)
 	if parseErr != nil {
-		printUsageError(err, parseErr)
+		printUsageError(err, parseErr, args)
 		return exitUsage
 	}
 	// FR-019: an N/A flag is accepted by the parser and refused before config
@@ -220,13 +220,59 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 	return st.dispatch(opts)
 }
 
-// printUsageError prints a parse error and the optional FR-059 hint.
-func printUsageError(err io.Writer, parseErr error) {
-	fmt.Fprintf(err, "xbpretty: %v\n", parseErr)
+// printUsageError prints a parse error and the optional FR-059 hint. No
+// options exist when parsing fails, so the colour flag is read back from argv
+// and the default palette themes the prefix like every other diagnostic.
+func printUsageError(err io.Writer, parseErr error, args []string) {
+	mode, explicit, noColor := usageColor(args)
+	color := wantColor(mode, &options{
+		color:    colorSpelling(mode),
+		noColor:  noColor,
+		explicit: map[string]bool{"color": explicit},
+	}, isTTY(err))
+	prefix := paintRole(summaryTheme(config.Defaults().Color.Theme), color, roleError, "xbpretty: ")
+	fmt.Fprint(err, prefix)
+	fmt.Fprintf(err, "%v\n", parseErr)
 	if ue, ok := parseErr.(*usageError); ok && ue.hint != "" {
-		fmt.Fprintf(err, "xbpretty: %s\n", ue.hint)
+		fmt.Fprint(err, prefix)
+		fmt.Fprintf(err, "%s\n", ue.hint)
 	}
 	usage(err)
+}
+
+// usageColor scans argv for the colour flags a failed parse could not apply.
+func usageColor(args []string) (config.ColorMode, bool, bool) {
+	mode := config.ColorAuto
+	explicit := false
+	noColor := false
+	for i := 0; i < len(args); i++ {
+		switch arg := args[i]; {
+		case arg == "--no-color":
+			noColor = true
+		case strings.HasPrefix(arg, "--color="):
+			mode = colorModeFromFlag(strings.TrimPrefix(arg, "--color="))
+			explicit = true
+		case arg == "--color" && i+1 < len(args):
+			mode = colorModeFromFlag(args[i+1])
+			explicit = true
+			i++
+		}
+	}
+	if noColor {
+		mode = config.ColorNever
+	}
+	return mode, explicit, noColor
+}
+
+// colorSpelling maps the resolved enum back to the lowercase flag value.
+func colorSpelling(mode config.ColorMode) string {
+	switch mode {
+	case config.ColorAlways:
+		return "always"
+	case config.ColorNever:
+		return "never"
+	}
+	return "auto"
 }
 
 // dispatch routes a parsed command to its implementation.

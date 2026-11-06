@@ -1388,6 +1388,16 @@ func TestColorAlwaysThemesPipedStderr(t *testing.T) {
 	if !strings.Contains(errs, "\x1b[1;91mxbpretty: \x1b[0m") {
 		t.Errorf("piped stderr error is not Error-themed:\n%q", errs)
 	}
+
+	// A parse error happens before options exist; the prefix is still themed
+	// from an explicit --color in argv.
+	code, _, errs := e.run("xbpretty", "install", "--bogus", "--color=always")
+	if code != 2 {
+		t.Fatalf("parse error exit = %d, want 2", code)
+	}
+	if !strings.Contains(errs, "\x1b[1;91mxbpretty: \x1b[0munknown flag --bogus") {
+		t.Errorf("parse-error prefix is not Error-themed:\n%q", errs)
+	}
 }
 
 // TestAutoColorIsPerStream pins FR-057's Auto rule: each stream decides for
