@@ -172,6 +172,11 @@ func parseLongFlag(argv []string, i int) (occurrence, int, error) {
 	if !ok {
 		return occurrence{}, i, fmt.Errorf("unknown flag --%s", name)
 	}
+	// BF-14: a boolean takes no value, so `--yes=false` must not silently set
+	// the flag. It is a usage error, like every other refused spelling.
+	if hasValue && f.Kind == spec.BoolFlag {
+		return occurrence{}, i, fmt.Errorf("--%s does not take a value", name)
+	}
 	occ := occurrence{flag: f, value: value, hasValue: hasValue}
 	switch f.Kind {
 	case spec.ValueFlag:

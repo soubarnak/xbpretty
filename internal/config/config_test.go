@@ -159,7 +159,14 @@ func TestUserHomeFollowsSudoAndDoas(t *testing.T) {
 		if name != "alice" {
 			return nil, fmt.Errorf("no such user %q", name)
 		}
-		return &user.User{Username: "alice", HomeDir: aliceHome}, nil
+		// The uid and gid are the test's own, so the state directory the
+		// sudo case creates is chowned to a user the test may chown to.
+		return &user.User{
+			Username: "alice",
+			HomeDir:  aliceHome,
+			Uid:      strconv.Itoa(os.Getuid()),
+			Gid:      strconv.Itoa(os.Getgid()),
+		}, nil
 	}
 
 	tests := []struct {

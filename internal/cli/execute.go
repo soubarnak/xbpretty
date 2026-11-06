@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -219,12 +218,17 @@ func (st *state) revdepsHint(packages []string) {
 // an error. The line names the xbpretty command, not xbps's own argv, so the
 // log reads back as the user ran it.
 func (st *state) writeLog(cmd string, args []string, rows []xbps.Row) {
+	// BF-09, BF-10: the state directory walk runs inside TransactionLog. It
+	// refuses a symlink on the way down and creates nothing through one.
 	path, err := config.TransactionLog()
 	if err != nil {
 		st.errorf("transaction log unavailable: %v\n", err)
 		return
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	// BF-09: the open refuses a symlink and a FIFO, and under sudo or doas a
+	// hard link as well. Every later step works on this descriptor, never on
+	// the path again.
+	f, err := config.OpenTransactionLog(path)
 	if err != nil {
 		st.errorf("transaction log unavailable: %v\n", err)
 		return
@@ -232,13 +236,11 @@ func (st *state) writeLog(cmd string, args []string, rows []xbps.Row) {
 	defer f.Close()
 
 	// AC-012: under sudo or doas the log belongs to the invoking user, whose
-	// state home it sits in, not to root. A failed chown is a warning, like
-	// every other log failure.
+	// state home it sits in, not to root. The chown goes through the
+	// descriptor. A failed chown is a warning, like every other log failure.
 	if uid, gid, ok := config.Invoker(); ok {
-		for _, p := range []string{filepath.Dir(path), path} {
-			if err := os.Chown(p, uid, gid); err != nil {
-				st.errorf("transaction log ownership not changed: %v\n", err)
-			}
+		if err := f.Chown(uid, gid); err != nil {
+			st.errorf("transaction log ownership not changed: %v\n", err)
 		}
 	}
 

@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -238,6 +240,8 @@ func (c Config) ResolveFor(names ...string) error {
 			path = c.Xbps.RindexPath
 		case "pkgdb":
 			path = c.Xbps.PkgdbPath
+		case "uhelper":
+			path = c.Xbps.UhelperPath
 		default:
 			continue
 		}
@@ -249,16 +253,188 @@ func (c Config) ResolveFor(names ...string) error {
 }
 
 // StateDir returns the directory holding xbpretty's state files, creating it
-// on first use.
+// on first use. Under sudo or doas the directories it creates belong to the
+// invoking user, and a symlink on the way down is refused (BF-09, BF-10).
 func StateDir() (string, error) {
 	dir, err := stateDirPath()
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := makeStateDir(dir); err != nil {
 		return "", fmt.Errorf("creating state directory: %w", err)
 	}
 	return dir, nil
+}
+
+// makeStateDir creates dir. An ordinary run uses plain MkdirAll. An invoking
+// user's directories are created one component at a time from their home, and
+// each new one is handed to the invoker.
+func makeStateDir(dir string) error {
+	id, invoking, err := invoker()
+	if err != nil {
+		return err
+	}
+	if !invoking {
+		return os.MkdirAll(dir, 0o755)
+	}
+	return walkInvokerDir(id, dir, true)
+}
+
+// invokerID is the identity behind sudo or doas. Files and directories under
+// the invoker's home must belong to root or to the invoker.
+type invokerID struct {
+	home string
+	uid  int
+	gid  int
+}
+
+// invoker returns the user behind sudo or doas when xbpretty runs as root. ok
+// is false for an ordinary run and for plain root. An invoker whose uid cannot
+// be resolved is an error, because ownership could then not be checked.
+func invoker() (id invokerID, ok bool, err error) {
+	home, invoking, err := invokingUser()
+	if err != nil || !invoking {
+		return invokerID{}, false, err
+	}
+	uid, gid, resolved := Invoker()
+	if !resolved {
+		return invokerID{}, false, errors.New("cannot resolve the uid of the invoking user")
+	}
+	return invokerID{home: home, uid: uid, gid: gid}, true, nil
+}
+
+// lchown is os.Lchown in production. Tests replace it to observe the owner
+// given to each directory the walk creates, without root.
+var lchown = os.Lchown
+
+// ownerOf reads the owning uid of a file. Tests replace it to exercise the
+// foreign-owner refusal.
+var ownerOf = fileOwner
+
+// SafeInvokerDir checks dir and every component from the invoking user's home
+// down to it. Each must exist, be a real directory rather than a symlink, and
+// be owned by root or by the invoker. It creates nothing, and it returns nil
+// when no invoking user is present, because an ordinary run owns its own state.
+func SafeInvokerDir(dir string) error {
+	id, invoking, err := invoker()
+	if err != nil || !invoking {
+		return err
+	}
+	return walkInvokerDir(id, dir, false)
+}
+
+// walkInvokerDir is the component walk BF-09 and BF-10 share. With create set, a
+// missing component below the home is made with Mkdir and handed to the
+// invoker with lchown before the walk goes on. A component that exists must
+// pass the same checks either way. The home itself is never created.
+func walkInvokerDir(id invokerID, dir string, create bool) error {
+	rel, err := filepath.Rel(id.home, dir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%s is outside the invoking user's home %s", dir, id.home)
+	}
+	if _, err := checkInvokerComponent(id, id.home); err != nil {
+		return err
+	}
+	if rel == "." {
+		return nil
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	current := id.home
+	for i, part := range parts {
+		current = filepath.Join(current, part)
+		if _, err := os.Lstat(current); errors.Is(err, fs.ErrNotExist) && create {
+			if err := os.Mkdir(current, 0o755); err != nil {
+				return err
+			}
+			if err := lchown(current, id.uid, id.gid); err != nil {
+				return fmt.Errorf("giving %s to the invoking user: %w", current, err)
+			}
+			continue
+		}
+		owner, err := checkInvokerComponent(id, current)
+		if err != nil {
+			return err
+		}
+		// The state directory itself may be a root-owned leftover from an
+		// earlier sudo run; hand it to the invoker, as the log write always did.
+		if create && i == len(parts)-1 && owner != uint32(id.uid) {
+			if err := lchown(current, id.uid, id.gid); err != nil {
+				return fmt.Errorf("giving %s to the invoking user: %w", current, err)
+			}
+		}
+	}
+	return nil
+}
+
+// checkInvokerComponent refuses p unless it is a real directory owned by root or
+// by the invoker. It returns the owner it found.
+func checkInvokerComponent(id invokerID, p string) (uint32, error) {
+	info, err := os.Lstat(p)
+	if err != nil {
+		return 0, err
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		return 0, fmt.Errorf("%s is a symbolic link", p)
+	}
+	if !info.IsDir() {
+		return 0, fmt.Errorf("%s is not a directory", p)
+	}
+	owner, ok := ownerOf(info)
+	if !ok {
+		return 0, fmt.Errorf("cannot read the owner of %s", p)
+	}
+	if owner != 0 && owner != uint32(id.uid) {
+		return 0, fmt.Errorf("%s is owned by uid %d, not root or the invoking user", p, owner)
+	}
+	return owner, nil
+}
+
+// OpenTransactionLog opens the transaction log for appending, creating it when
+// missing. The open refuses a symlink at the path. The file must be a regular
+// file. Under an invoking user it must also be owned by root or by the invoker
+// and have exactly one hard link, so a link to a file the invoker can write
+// cannot make root append to it. The caller chowns the returned descriptor and
+// never the path.
+func OpenTransactionLog(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY|logOpenFlags, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkTransactionLog(f); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// checkTransactionLog judges the opened log through its descriptor.
+func checkTransactionLog(f *os.File) error {
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", f.Name())
+	}
+	id, invoking, err := invoker()
+	if err != nil || !invoking {
+		return err
+	}
+	owner, ok := ownerOf(info)
+	if !ok {
+		return fmt.Errorf("cannot read the owner of %s", f.Name())
+	}
+	if owner != 0 && owner != uint32(id.uid) {
+		return fmt.Errorf("%s is owned by uid %d, not root or the invoking user", f.Name(), owner)
+	}
+	links, ok := fileNlink(info)
+	if !ok {
+		return fmt.Errorf("cannot count the hard links of %s", f.Name())
+	}
+	if links != 1 {
+		return fmt.Errorf("%s has %d hard links", f.Name(), links)
+	}
+	return nil
 }
 
 // transactionLogName is the file name of the transaction log in the state
