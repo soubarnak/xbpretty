@@ -30,15 +30,16 @@ func cleanEnv(t *testing.T, dir string) testEnv {
 		t.Fatal(err)
 	}
 	return testEnv{
-		"HOME":            filepath.Join(dir, "home"),
-		"XDG_CONFIG_HOME": filepath.Join(dir, "config"),
-		"XDG_STATE_HOME":  filepath.Join(dir, "state"),
-		"PATH":            stubDir + ":" + os.Getenv("PATH"),
-		"NO_COLOR":        "1",
-		"XB_STUB_LOG":     filepath.Join(dir, "commands.log"),
-		"XB_STUB_STDOUT":  planFixture,
-		"XB_STUB_QUERY":   "figlet-2.2.5_6\n657KB\n",
-		"XB_STUB_EXIT":    "0",
+		"HOME":                 filepath.Join(dir, "home"),
+		"XDG_CONFIG_HOME":      filepath.Join(dir, "config"),
+		"XDG_STATE_HOME":       filepath.Join(dir, "state"),
+		"XBPRETTY_HISTORY_DIR": filepath.Join(dir, "history"),
+		"PATH":                 stubDir + ":" + os.Getenv("PATH"),
+		"NO_COLOR":             "1",
+		"XB_STUB_LOG":          filepath.Join(dir, "commands.log"),
+		"XB_STUB_STDOUT":       planFixture,
+		"XB_STUB_QUERY":        "figlet-2.2.5_6\n657KB\n",
+		"XB_STUB_EXIT":         "0",
 		// Every fake-root real transaction predownloads. Give it a writable
 		// cache in the test's temp dir and point any transfer at a closed
 		// local port, so no test touches /var/cache/xbps or the network.
@@ -70,6 +71,7 @@ func (e testEnv) slice() []string {
 func runBinary(t *testing.T, bin string, env testEnv, args ...string) (string, string, int) {
 	t.Helper()
 	cmd := exec.Command(bin, args...)
+	env = hermeticEnv(t, env)
 	cmd.Env = env.slice()
 	var out, errs strings.Builder
 	cmd.Stdout, cmd.Stderr = &out, &errs

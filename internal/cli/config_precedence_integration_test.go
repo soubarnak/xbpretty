@@ -35,19 +35,24 @@ transaction_log = true
 	if code != 0 {
 		t.Fatalf("exit = %d\n%s", code, errs)
 	}
-	if !strings.Contains(errs, "resolved effective mode=Tui unit=Binary color=Always assume_yes=true auto_remove=false simple=false full=true sync=true log=true verbose=true history_dir=/var/lib/xbpretty/history") {
+	// The default history store is whatever the hermetic env names, not the
+	// host's /var/lib/xbpretty/history.
+	wantHistory := env["XBPRETTY_HISTORY_DIR"]
+	if !strings.Contains(errs, "resolved effective mode=Tui unit=Binary color=Always assume_yes=true auto_remove=false simple=false full=true sync=true log=true verbose=true history_dir="+wantHistory) {
 		t.Errorf("file values were not effective:\n%s", errs)
 	}
 
-	// Every applicable flag overrides its file value.
+	// Every applicable flag overrides its file value. The flag's store lives
+	// under the test's own directory.
+	flagHistory := filepath.Join(dir, "flag-history")
 	_, errs, code = runBinary(t, bin, env,
 		"--debug", "--config", cfgPath, "--no-color", "--no-tui", "--no-update",
-		"--assume-no", "--no-full", "--no-log", "--history-dir", "/tmp/xbp-history",
+		"--assume-no", "--no-full", "--no-log", "--history-dir", flagHistory,
 		"install", "--dry-run", "figlet")
 	if code != 0 {
 		t.Fatalf("exit = %d\n%s", code, errs)
 	}
-	if !strings.Contains(errs, "resolved effective mode=Auto unit=Binary color=Never assume_yes=false auto_remove=false simple=false full=false sync=false log=false verbose=true history_dir=/tmp/xbp-history") {
+	if !strings.Contains(errs, "resolved effective mode=Auto unit=Binary color=Never assume_yes=false auto_remove=false simple=false full=false sync=false log=false verbose=true history_dir="+flagHistory) {
 		t.Errorf("CLI values did not override the file:\n%s", errs)
 	}
 }

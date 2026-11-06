@@ -13,7 +13,7 @@ import (
 func surfaceRun(t *testing.T, bin string, env map[string]string, args ...string) (int, string, string) {
 	t.Helper()
 	cmd := exec.Command(bin, args...)
-	cmd.Env = envWith(env)
+	cmd.Env = envWith(hermeticEnv(t, env))
 	cmd.Stdin = nil
 	var out, errb strings.Builder
 	cmd.Stdout, cmd.Stderr = &out, &errb
@@ -39,12 +39,12 @@ func invalidConfigDir(t *testing.T) map[string]string {
 	if err := os.WriteFile(filepath.Join(dir, "xbpretty", "config.toml"), []byte("this is not toml\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return map[string]string{"XDG_CONFIG_HOME": dir}
+	return hermeticEnv(t, map[string]string{"XDG_CONFIG_HOME": dir})
 }
 
 func emptyConfigDir(t *testing.T) map[string]string {
 	t.Helper()
-	return map[string]string{"XDG_CONFIG_HOME": t.TempDir(), "XDG_STATE_HOME": t.TempDir()}
+	return hermeticEnv(t, map[string]string{"XDG_CONFIG_HOME": t.TempDir(), "XDG_STATE_HOME": t.TempDir()})
 }
 
 // xbpsStubPath puts logging stubs for every xbps binary on PATH so a run can

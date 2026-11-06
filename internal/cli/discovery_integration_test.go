@@ -88,7 +88,7 @@ func discoveryEnv(t *testing.T) (bin, cfgDir, logPath string, env map[string]str
 		"XB_STUB_SHOW":      discShowInstalled,
 		"XB_STUB_SHOW_REPO": discShowRepo,
 	}
-	return bin, cfgDir, logPath, env
+	return bin, cfgDir, logPath, hermeticEnv(t, env)
 }
 
 // envWith replaces the override keys instead of appending duplicates, which
@@ -111,7 +111,7 @@ func envWith(overrides map[string]string) []string {
 func runDiscovery(t *testing.T, bin string, env map[string]string, args ...string) (int, string, string) {
 	t.Helper()
 	cmd := exec.Command(bin, args...)
-	cmd.Env = envWith(env)
+	cmd.Env = envWith(hermeticEnv(t, env))
 	cmd.Stdin = nil
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

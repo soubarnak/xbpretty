@@ -415,7 +415,7 @@ func startPtyAllMode(t *testing.T, bin string, env map[string]string, args []str
 	}
 	setProgressPtySize(t, slave, cols, rows)
 	cmd := exec.Command(bin, args...)
-	cmd.Env = envWith(env)
+	cmd.Env = envWith(hermeticEnv(t, env))
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
 	if controlling {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
@@ -548,7 +548,7 @@ func inlineScreenEnv(t *testing.T, dir, query, stub string) map[string]string {
 	if err := os.WriteFile(filepath.Join(cfgDir, "xbpretty", "config.toml"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return map[string]string{
+	return hermeticEnv(t, map[string]string{
 		"XDG_CONFIG_HOME":         cfgDir,
 		"XDG_STATE_HOME":          filepath.Join(dir, "state"),
 		"XB_STUB_LOG":             filepath.Join(dir, "commands.log"),
@@ -561,7 +561,31 @@ func inlineScreenEnv(t *testing.T, dir, query, stub string) map[string]string {
 		"NO_COLOR":                "",
 		"COLUMNS":                 "",
 		"XBPRETTY_HISTORY_DIR":    filepath.Join(dir, "history"),
-	}
+	})
+}
+
+// TestInlineEnvIsHermetic is the Linux half of TestIntegrationEnvIsHermetic:
+// the inline helpers build their environments here, so they are checked here.
+func TestInlineEnvIsHermetic(t *testing.T) {
+	bin := buildBinary(t)
+
+	t.Run("inlineScreenEnv", func(t *testing.T) {
+		root := testTempRoot(t)
+		query, err := filepath.Abs("../../testdata/stub/xbps-query")
+		if err != nil {
+			t.Fatal(err)
+		}
+		env := inlineScreenEnv(t, t.TempDir(), query, writeInlineScreenStub(t))
+		assertHermeticVars(t, root, env)
+		assertEmptyHistoryListing(t, bin, envWith(env))
+	})
+
+	t.Run("newInlineEnv", func(t *testing.T) {
+		root := testTempRoot(t)
+		newInlineEnv(t, writeInlineStub(t, ""))
+		assertHermeticVars(t, root, environMap())
+		assertEmptyHistoryListing(t, bin, os.Environ())
+	})
 }
 
 // TestInlineViewportAfterS1Confirm is FR-072's handoff: confirming S1 leaves

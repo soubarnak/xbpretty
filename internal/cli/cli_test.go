@@ -53,6 +53,10 @@ func newEnv(t *testing.T) *env {
 	e.writeConfig("")
 	t.Setenv("XDG_CONFIG_HOME", cfgDir)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+	// The in-process run and every child it starts share these, so no run
+	// reads or writes the host's history store or home directory.
+	t.Setenv("XBPRETTY_HISTORY_DIR", filepath.Join(dir, "history"))
+	t.Setenv("HOME", filepath.Join(dir, "home"))
 	t.Setenv("NO_COLOR", "")
 	t.Setenv("TERM", "xterm")
 	t.Setenv("XB_STUB_LOG", filepath.Join(dir, "commands.log"))

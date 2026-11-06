@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/soubarnak/xbpretty/internal/history"
 )
 
 // implicitPlan is an orphan plan in the shape `xbps-remove -n -o` prints.
@@ -22,7 +24,7 @@ func implicitEnv(t *testing.T, extra ...string) (bin string, env map[string]stri
 	bin = testrootBinary(t)
 	cfgDir, _ := integrationConfig(t, "Never", extra...)
 	logPath := filepath.Join(filepath.Dir(cfgDir), "commands.log")
-	return bin, map[string]string{
+	return bin, hermeticEnv(t, map[string]string{
 		"XDG_CONFIG_HOME":         cfgDir,
 		"XDG_STATE_HOME":          filepath.Join(filepath.Dir(cfgDir), "state"),
 		"XB_STUB_LOG":             logPath,
@@ -38,11 +40,38 @@ func implicitEnv(t *testing.T, extra ...string) (bin string, env map[string]stri
 		"XBPRETTY_TEST_CACHE_DIR": filepath.Join(filepath.Dir(cfgDir), "xbps-cache"),
 		"HTTP_PROXY":              "http://127.0.0.1:1",
 		"HTTPS_PROXY":             "http://127.0.0.1:1",
-	}
+	})
 }
 
 // implicitLog is the stub log path inside implicitEnv's environment.
 func implicitLog(env map[string]string) string { return env["XB_STUB_LOG"] }
+
+// seedImplicitHistory writes one applied install of figlet into the store at
+// dir, the target the replay verbs need. It goes through the history package,
+// so the built binary reads it exactly as it reads a real entry.
+func seedImplicitHistory(t *testing.T, dir string) {
+	t.Helper()
+	version := "2.2.5_6"
+	entry := history.Entry{
+		Status:      history.StatusApplied,
+		RequestedBy: "tester (0)",
+		StartedAt:   "2026-11-05T10:00:00Z",
+		FinishedAt:  "2026-11-05T10:00:01Z",
+		Command:     []string{"install", "figlet", "-y"},
+		Packages: []history.Transition{{
+			Name:          "figlet",
+			Arch:          "x86_64",
+			Repository:    "https://repo-default.voidlinux.org/current",
+			Size:          94372,
+			InstalledSize: 672593,
+			Operation:     history.OpInstall,
+			After:         &history.PackageState{Version: &version},
+		}},
+	}
+	if _, err := history.New(dir).Write(entry); err != nil {
+		t.Fatalf("seeding history: %v", err)
+	}
+}
 
 // clearLog makes a run's calls unambiguous.
 func clearLog(t *testing.T, path string) {
@@ -63,7 +92,7 @@ func runPTYBinary(t *testing.T, bin string, env map[string]string, answers strin
 	defer master.Close()
 
 	cmd := exec.Command(bin, args...)
-	cmd.Env = envWith(env)
+	cmd.Env = envWith(hermeticEnv(t, env))
 	cmd.Stdin = slave
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -478,15 +507,25 @@ func TestAC013ImplicitAutoremove(t *testing.T) {
 		}
 	})
 
+	// undo is implemented, so it has a real target: one applied entry seeded
+	// in this test's own store. undo removes that install and exits 0; the
+	// assertion that matters is that no recorded call is an orphan (`-o`)
+	// transaction.
 	t.Run("replay verbs never run the orphan transaction", func(t *testing.T) {
 		bin, env := implicitEnv(t)
+		seedImplicitHistory(t, env["XBPRETTY_HISTORY_DIR"])
+		// figlet is installed now, so undo has a removal to plan.
+		env["XB_STUB_LIST"] = "ii figlet-2.2.5_6 figlet\n"
 		clearLog(t, implicitLog(env))
-		code, _, errs := surfaceRun(t, bin, env, "undo")
-		if code != 1 {
-			t.Errorf("exit = %d, want 1 (#69's unimplemented seam)\n%s", code, errs)
+		code, out, errs := surfaceRun(t, bin, env, "undo", "-y")
+		if code != 0 {
+			t.Fatalf("undo exit = %d, want 0 (the seeded install is removable)\nstdout:\n%s\nstderr:\n%s", code, out, errs)
 		}
-		if calls := stubCalls(t, implicitLog(env)); len(calls) != 0 {
-			t.Errorf("undo ran a child: %q", calls)
+		wantArgv(t, transactionArgv(t, implicitLog(env)), []string{"-y -f figlet"})
+		for _, call := range stubCalls(t, implicitLog(env)) {
+			if strings.Contains(" "+call+" ", " -o ") {
+				t.Errorf("undo planned or ran the orphan transaction: %q", call)
+			}
 		}
 	})
 
