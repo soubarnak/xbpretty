@@ -12,7 +12,7 @@ maintainer="soubarnak <soubarna@live.in>"
 license="MIT"
 homepage="https://github.com/soubarnak/xbpretty"
 distfiles="https://github.com/soubarnak/xbpretty/archive/refs/tags/xbpretty-v${version}.tar.gz"
-checksum=9cb2111fe7b7476461aa8f79e96fb3792ca543c25d93947cc9e4ab8a2849d568
+checksum=07f99c6d88ff025c79c72bbb53660b2f5d4c22998d413855bdd615a859f97dff
 
 pre_build() {
 	# One static binary with no runtime dependency but xbps (NFR-001). Without
