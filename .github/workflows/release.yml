@@ -28,7 +28,7 @@ jobs:
       - name: Install build tools
         run: |
           xbps-install -Syu xbps
-          xbps-install -Sy go bash make git shadow util-linux github-cli file binutils mandoc zsh fish shellcheck python3
+          xbps-install -Sy go bash make git shadow util-linux github-cli file binutils mdocml zsh fish-shell shellcheck python3
       - uses: actions/checkout@v4
       - name: Check tag against the template identity
         run: |
