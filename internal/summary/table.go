@@ -41,10 +41,17 @@ func (t table) render(width int, fullWidth bool, r Renderer) []string {
 			if i < len(cells) {
 				text = cells[i]
 			}
-			if paintHeader {
-				text = r.paint(RoleHighlight, text)
+			if !paintHeader {
+				out[i] = wrapCell(text, widths[i])
+				continue
 			}
-			out[i] = wrapCell(text, widths[i])
+			// Headers wrap as plain text so colour cannot move a break; each
+			// wrapped line is then painted on its own.
+			lines := wrapCell(text, widths[i])
+			for j, line := range lines {
+				lines[j] = r.paint(RoleHighlight, line)
+			}
+			out[i] = lines
 		}
 		return out
 	}

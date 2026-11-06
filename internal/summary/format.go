@@ -193,24 +193,6 @@ func VersionParts(oldVer, newVer string) []VersionPart {
 	return out
 }
 
-// VersionDiff highlights the changed components of newVer with nala's Notice
-// role. oldVer is never painted. The revision rides on the last highlighted
-// component, and a '.' between two highlighted components stays plain.
-func VersionDiff(oldVer, newVer string, color bool) string {
-	if !color {
-		return newVer
-	}
-	var b strings.Builder
-	for _, part := range VersionParts(oldVer, newVer) {
-		if part.Changed {
-			b.WriteString(DefaultTheme().Notice + part.Text + resetSeq)
-		} else {
-			b.WriteString(part.Text)
-		}
-	}
-	return b.String()
-}
-
 // splitRevision splits an xbps version at its last '_', the revision
 // separator (xbps uses '_' where Debian uses '-').
 func splitRevision(v string) (upstream, revision string, ok bool) {

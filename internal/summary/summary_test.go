@@ -154,7 +154,8 @@ const (
 	reset     = "\x1b[0m"
 )
 
-// TestVersionDiffNala pins AC-045 and FR-063's exact span boundaries.
+// TestVersionDiffNala pins AC-045 and FR-063's exact span boundaries through
+// the renderer's own version cell, the only producer of the diff spans.
 func TestVersionDiffNala(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -203,17 +204,19 @@ func TestVersionDiffNala(t *testing.T) {
 			want: "1.0.0_1",
 		},
 	}
+	coloured := Renderer{Color: true, Theme: DefaultTheme()}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := VersionDiff(tt.oldVer, tt.newVer, true); got != tt.want {
-				t.Errorf("VersionDiff(%q, %q) = %q, want %q", tt.oldVer, tt.newVer, got, tt.want)
+			if got := coloured.diffCell(tt.oldVer, tt.newVer); got != tt.want {
+				t.Errorf("diffCell(%q, %q) = %q, want %q", tt.oldVer, tt.newVer, got, tt.want)
 			}
 		})
 	}
-	if got := VersionDiff("3.5.1_1", "3.5.4_1", false); got != "3.5.4_1" {
-		t.Errorf("no-color VersionDiff = %q, want the raw new version", got)
+	plain := Renderer{Color: false, Theme: DefaultTheme()}
+	if got := plain.diffCell("3.5.1_1", "3.5.4_1"); got != "3.5.4_1" {
+		t.Errorf("no-colour diff cell = %q, want the raw new version", got)
 	}
-	if strings.Contains(VersionDiff("1.2.3_1", "1.3.0_1", true), "\x1b[38;5;202m") {
+	if strings.Contains(coloured.diffCell("1.2.3_1", "1.3.0_1"), "\x1b[38;5;202m") {
 		t.Error("the retired ANSI-202 implementation is still in use")
 	}
 }
@@ -618,6 +621,61 @@ func TestReInstallSection(t *testing.T) {
 	}
 	if !strings.Contains(out, "ReInstall 1") {
 		t.Errorf("footer is missing the ReInstall count:\n%s", out)
+	}
+}
+
+// TestReInstallDiskDeltaNetsOldSize covers FR-012's net delta for a reinstall:
+// it replaces files the package already holds, so the installed size it
+// occupies today is netted out rather than counted as new disk use.
+func TestReInstallDiskDeltaNetsOldSize(t *testing.T) {
+	const figletInstalled = 10 * testMiB
+	s := Build(
+		[]Row{{
+			Name: "figlet", Version: "2.2.5_6", Action: actionReinstall,
+			DownloadSize: 92 * testKiB, HasDownload: true,
+			InstalledSize: figletInstalled, HasInstalled: true,
+		}},
+		nil,
+		map[string]Old{"figlet": {Version: "2.2.5_6", InstalledSize: figletInstalled, HasSize: true}},
+	)
+	if got := s.NetDiskBytes(); got != 0 {
+		t.Errorf("NetDiskBytes = %d, want 0 for a reinstall of an unchanged package", got)
+	}
+	var b strings.Builder
+	if err := (Renderer{Width: 80, Theme: DefaultTheme()}).Render(&b, s); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !strings.Contains(b.String(), "\n Disk space required: 0 B\n") {
+		t.Errorf("reinstall disk line is not 0 B:\n%s", b.String())
+	}
+}
+
+// TestNarrowWrapIndependentOfColour pins that colour does not change how a
+// narrow header wraps. Plain headers word-wrap at spaces, so the coloured
+// frame must strip to exactly the plain frame.
+func TestNarrowWrapIndependentOfColour(t *testing.T) {
+	s := Build(
+		[]Row{{
+			Name: "libreoffice-extensions", Version: "7.5.4.2_1", Action: actionHold,
+			InstalledSize: 20 * testKiB, HasInstalled: true,
+		}},
+		nil,
+		map[string]Old{"libreoffice-extensions": {Version: "7.5.3.1_1", InstalledSize: 20 * testKiB, HasSize: true}},
+	)
+	for _, width := range []int{50, 60} {
+		var plain, coloured strings.Builder
+		if err := (Renderer{Color: false, Width: width, Theme: DefaultTheme()}).Render(&plain, s); err != nil {
+			t.Fatalf("Render plain at %d: %v", width, err)
+		}
+		if err := (Renderer{Color: true, Width: width, Theme: DefaultTheme()}).Render(&coloured, s); err != nil {
+			t.Fatalf("Render coloured at %d: %v", width, err)
+		}
+		if strings.Contains(plain.String(), "Old Version:") {
+			t.Fatalf("width %d: the fixture does not wrap the Old Version header:\n%s", width, plain.String())
+		}
+		if got, want := stripANSI(coloured.String()), plain.String(); got != want {
+			t.Errorf("width %d: colour changes the wrap\n--- stripped colour ---\n%s\n--- plain ---\n%s", width, got, want)
+		}
 	}
 }
 

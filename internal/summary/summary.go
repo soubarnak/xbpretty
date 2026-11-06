@@ -63,7 +63,7 @@ type Summary struct {
 	Download uint64
 	// AddBytes is the installed size of what the transaction unpacks,
 	// RemoveBytes is the size removals free, and OldBytes is the size the
-	// packages an upgrade replaces hold today.
+	// packages an upgrade or a reinstall replaces hold today.
 	AddBytes, RemoveBytes, OldBytes uint64
 }
 
@@ -100,6 +100,11 @@ func Build(rows []Row, held map[string]bool, old map[string]Old) *Summary {
 		case actionReinstall:
 			s.ReInstall = append(s.ReInstall, row)
 			s.addFetched(row)
+			// A reinstall replaces files the package already holds, so the
+			// installed size it occupies today is netted out of FR-012's delta.
+			if old, ok := s.Old[row.Name]; ok && old.HasSize {
+				s.OldBytes += old.InstalledSize
+			}
 		case actionInstall:
 			s.Install = append(s.Install, row)
 			s.addFetched(row)
@@ -352,12 +357,11 @@ func (r Renderer) rowCells(s *Summary, sec Section, row Row) []string {
 	}
 	hasDiff := sectionHasVersionDiff(s, sec)
 	oldVer, hasOld := s.oldVersion(row)
-	differs := hasOld && oldVer != row.Version
 	switch {
 	case hasDiff && sec.Rows[0].Reason != "":
-		return []string{name, oldVersionCell(oldVer, hasOld), r.diffCell(oldVer, version, differs), row.Reason, size}
+		return []string{name, oldVersionCell(oldVer, hasOld), r.diffCell(oldVer, version), row.Reason, size}
 	case hasDiff:
-		return []string{name, oldVersionCell(oldVer, hasOld), r.diffCell(oldVer, version, differs), size}
+		return []string{name, oldVersionCell(oldVer, hasOld), r.diffCell(oldVer, version), size}
 	case row.Reason != "":
 		return []string{name, version, row.Reason, size}
 	default:
@@ -373,11 +377,9 @@ func oldVersionCell(oldVer string, ok bool) string {
 	return oldVer
 }
 
-// diffCell highlights only the new version's changed components.
-func (r Renderer) diffCell(oldVer, newVer string, differs bool) string {
-	if !differs {
-		return newVer
-	}
+// diffCell highlights only the new version's changed components. VersionParts
+// leaves the text raw when the old version is missing or identical.
+func (r Renderer) diffCell(oldVer, newVer string) string {
 	var b strings.Builder
 	for _, part := range VersionParts(oldVer, newVer) {
 		if part.Changed {
