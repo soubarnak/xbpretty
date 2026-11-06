@@ -49,8 +49,9 @@ type progressModel struct {
 	// box on the next draw (FR-072). Without a viewport they are dropped.
 	inserts []string
 
-	// Install state: U = 2·A unpack units for install/update rows plus one
-	// configure unit for configure-only rows.
+	// Install state: U = 2·A unpack units for install/update rows, one configure
+	// unit for each configure-only row and one unit for each removal (BF-19).
+	// unpacked, configured and removed are keyed by package name (BF-17).
 	installTotal   int
 	configureTotal int
 	unpacked       map[string]bool
@@ -204,6 +205,31 @@ func (m *progressModel) downloadDone(done DownloadComplete) {
 	delete(m.inFlight, key)
 }
 
+// removeOnly reports whether the plan has no unpack or configure work. Only a
+// remove-only plan owns the Remove view; a plan that also installs or updates
+// keeps the Install view and counts its removals there (BF-19).
+func (m *progressModel) removeOnly() bool {
+	return m.installTotal == 0 && m.configureTotal == 0
+}
+
+// actionKind is the view an unpack, configure or removal step draws.
+func (m *progressModel) actionKind() progressKind {
+	if m.removeOnly() {
+		return viewRemove
+	}
+	return viewInstall
+}
+
+// eventKey is the package name an event belongs to. xbps prints the old pkgver
+// on an update and the new pkgver on its unpack, so counters key on the name
+// and count the package once (BF-17).
+func eventKey(pkgver string) string {
+	if name, _ := xbps.SplitPkgver(pkgver); name != "" {
+		return name
+	}
+	return pkgver
+}
+
 // phase applies an xbps phase header. Verification snaps the Download view to
 // 100% for exactly one rendered frame; the following phase switches views.
 func (m *progressModel) phase(phase string) {
@@ -214,34 +240,63 @@ func (m *progressModel) phase(phase string) {
 		}
 	case "Unpacking", "Configuring", "Collecting":
 		if m.kind == viewDownload {
-			if m.removeTotal > 0 {
-				m.kind = viewRemove
-			} else if m.installTotal > 0 {
-				m.kind = viewInstall
-			}
+			m.kind = m.actionKind()
 		}
 	}
 }
 
+// markCached records an archive the predownload fill finished before the commit
+// child started (BF-18). It counts like a completion but queues no scrollback
+// line, and a plan whose every archive is cached starts on the Install view.
+func (m *progressModel) markCached(filename string) {
+	if strings.HasSuffix(filename, ".sig2") {
+		return
+	}
+	key, size, ok := m.archiveBytes(filename)
+	if !ok || m.completed[key] {
+		return
+	}
+	m.completed[key] = true
+	m.completedBytes += size
+	m.completedCount++
+	m.lastCompleted = filename
+	if m.totalArchives > 0 && m.completedCount == m.totalArchives {
+		m.kind = viewInstall
+	}
+}
+
+// clearInFlight drops one archive's in-flight bytes when its transfer fails, so
+// a dead attempt leaves the position (BF-20).
+func (m *progressModel) clearInFlight(filename string) {
+	if key, _, ok := m.archiveBytes(filename); ok {
+		delete(m.inFlight, key)
+	}
+}
+
 func (m *progressModel) packageEvent(event PackageEvent) {
+	key := eventKey(event.Package)
 	switch event.Action {
 	case "unpacking", "updating":
 		m.kind = viewInstall
 		m.currentPkg = event.Package
+		if event.Action == "updating" && event.Details != "" {
+			// The status names the version being installed, not the old pkgver.
+			m.currentPkg = key + "-" + event.Details
+		}
 		m.status = "Unpacking"
-		m.unpacked[event.Package] = true
+		m.unpacked[key] = true
 	case "configuring":
 		m.kind = viewInstall
 		m.currentPkg = event.Package
 		m.status = "Configuring"
-		m.configured[event.Package] = true
+		m.configured[key] = true
 	case "removing":
-		m.kind = viewRemove
+		m.kind = m.actionKind()
 		m.currentPkg = event.Package
 		m.status = "Removing"
 	case "removed":
-		m.kind = viewRemove
-		m.removed[event.Package] = true
+		m.kind = m.actionKind()
+		m.removed[key] = true
 	}
 	// A finished package action is a completed child line; the viewport
 	// inserts it into scrollback above the box (FR-072).
@@ -291,7 +346,8 @@ func clampRatio(ratio float64) float64 {
 }
 
 // ratio is the fraction each view draws. Install is the two-unit model:
-// (unpacked + configured) / (2·A + configure-only rows).
+// (unpacked + configured + removed) / (2·A + C + R). A remove-only plan has
+// A = C = 0, so the same formula gives removed / R for the Remove view.
 func (m *progressModel) ratio() float64 {
 	switch m.kind {
 	case viewDownload:
@@ -299,17 +355,13 @@ func (m *progressModel) ratio() float64 {
 			return 0
 		}
 		return clampRatio(float64(m.position()) / float64(m.totalBytes))
-	case viewInstall:
-		denominator := 2*m.installTotal + m.configureTotal
+	case viewInstall, viewRemove:
+		denominator := 2*m.installTotal + m.configureTotal + m.removeTotal
 		if denominator == 0 {
 			return 0
 		}
-		return clampRatio(float64(len(m.unpacked)+len(m.configured)) / float64(denominator))
-	case viewRemove:
-		if m.removeTotal == 0 {
-			return 0
-		}
-		return clampRatio(float64(len(m.removed)) / float64(m.removeTotal))
+		done := len(m.unpacked) + len(m.configured) + len(m.removed)
+		return clampRatio(float64(done) / float64(denominator))
 	case viewUpdate:
 		if m.reposTotal == 0 {
 			return 0
@@ -334,10 +386,7 @@ func (m *progressModel) elapsedText() string {
 func (m *progressModel) view() progressView {
 	if m.verifying {
 		m.verifying = false
-		m.kind = viewInstall
-		if m.removeTotal > 0 {
-			m.kind = viewRemove
-		}
+		m.kind = m.actionKind()
 		return progressView{
 			kind:      viewDownload,
 			msgHeader: "Last completed",

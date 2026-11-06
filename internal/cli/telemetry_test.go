@@ -207,6 +207,10 @@ func TestParseStdoutEvents(t *testing.T) {
 			{"curl-8.2.1_1: updated successfully.", "curl-8.2.1_1", "updated"},
 			{"Removing 'wget-1.25.0_1' ...", "wget-1.25.0_1", "removing"},
 			{"Removed 'wget-1.25.0_1' successfully.", "wget-1.25.0_1", "removed"},
+			// xbps-install's own removal lines, printed by a plan that replaces a package.
+			{"wget-1.25.0_1: removing ...", "wget-1.25.0_1", "removing"},
+			{"wget-1.25.0_1: removed successfully.", "wget-1.25.0_1", "removed"},
+			{"ca-certificates-20250419+3.127_1: removing ...", "ca-certificates-20250419+3.127_1", "removing"},
 		}
 
 		for _, ev := range events {

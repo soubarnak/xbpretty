@@ -322,3 +322,105 @@ func TestPlainLiveRedrawsInPlaceWithoutColour(t *testing.T) {
 		t.Errorf("plain teardown did not clear the line: %q", out.String())
 	}
 }
+
+// TestInstallRatioUpdateCountsOnce pins BF-17: an update prints the old pkgver
+// on `updating` and the new pkgver on `unpacking`. The package counts once, and
+// the status names the version being installed.
+func TestInstallRatioUpdateCountsOnce(t *testing.T) {
+	rows := []xbps.Row{{Name: "curl", Version: "8.22.0_1", Action: xbps.ActionUpdate}}
+	m := newProgressModel("upgrade", rows, nil)
+	m.packageEvent(PackageEvent{Package: "curl-8.21.0_1", Action: "updating", Details: "8.22.0_1"})
+	m.packageEvent(PackageEvent{Package: "curl-8.22.0_1", Action: "unpacking"})
+	if got, want := m.ratio(), 0.5; got != want {
+		t.Fatalf("after updating+unpacking ratio = %v, want %v (one package, two units)", got, want)
+	}
+	if view := m.view(); view.msgText != "Unpacking curl-8.22.0_1" {
+		t.Errorf("status = %q, want Unpacking curl-8.22.0_1", view.msgText)
+	}
+	m.packageEvent(PackageEvent{Package: "curl-8.22.0_1", Action: "configuring"})
+	if got := m.ratio(); got != 1 {
+		t.Errorf("after configuring ratio = %v, want 1", got)
+	}
+}
+
+// TestModelSeededFromPredownload pins BF-18: an archive the predownload cached
+// counts as completed the moment the commit view starts, with no scrollback
+// line, and a fully cached plan starts on the Install view.
+func TestModelSeededFromPredownload(t *testing.T) {
+	m := newProgressModel("install", downloadPlan(), nil)
+	m.markCached("alpha-1_1.x86_64.xbps")
+	if m.completedCount != 1 {
+		t.Fatalf("completed count = %d, want 1", m.completedCount)
+	}
+	if got := m.view().left[0].value; got != "1/2" {
+		t.Errorf("Packages counter = %q, want 1/2", got)
+	}
+	if got, want := m.position(), uint64(400*1024); got != want {
+		t.Errorf("position = %d, want %d", got, want)
+	}
+	if m.kind != viewDownload {
+		t.Errorf("kind = %d, want Download while an archive is still missing", m.kind)
+	}
+	if len(m.inserts) != 0 {
+		t.Errorf("a cached archive queued scrollback lines: %q", m.inserts)
+	}
+	m.markCached("alpha-1_1.x86_64.xbps")
+	if m.completedCount != 1 {
+		t.Errorf("a repeated cache mark double-counted: %d", m.completedCount)
+	}
+	m.markCached("beta-1_1.x86_64.xbps.sig2")
+	if m.completedCount != 1 {
+		t.Errorf("a signature mark counted as an archive: %d", m.completedCount)
+	}
+	m.markCached("beta-1_1.x86_64.xbps")
+	if m.completedCount != 2 || m.position() != 1000*1024 {
+		t.Errorf("all cached: count %d position %d", m.completedCount, m.position())
+	}
+	if m.kind != viewInstall {
+		t.Errorf("kind = %d, want Install once every archive is cached", m.kind)
+	}
+}
+
+// TestMixedPlanStaysInstallView pins BF-19: a plan that replaces a package (one
+// remove row beside an update) stays on the Install view through the
+// verification frame and the removal. The removal counts in 2A + C + R.
+func TestMixedPlanStaysInstallView(t *testing.T) {
+	rows := []xbps.Row{
+		{Name: "alpha", Version: "2.0_1", Action: xbps.ActionUpdate, HasDownload: true, DownloadSize: 400 * 1024},
+		{Name: "beta", Version: "1.0_1", Action: xbps.ActionRemove},
+	}
+	m := newProgressModel("upgrade", rows, nil)
+	m.downloadDone(DownloadComplete{Filename: "alpha-2.0_1.x86_64.xbps"})
+	m.phase("Verifying")
+	if first := m.view(); first.kind != viewDownload || first.ratio != 1 {
+		t.Fatalf("verification frame = kind %d ratio %v, want the Download view at 100%%", first.kind, first.ratio)
+	}
+	if second := m.view(); second.kind != viewInstall {
+		t.Fatalf("frame after verification = kind %d, want Install (not Remove)", second.kind)
+	}
+	m.phase("Collecting")
+	m.phase("Unpacking")
+	if m.kind != viewInstall {
+		t.Fatalf("kind after Collecting and Unpacking = %d, want Install", m.kind)
+	}
+
+	m.packageEvent(PackageEvent{Package: "beta-1.0_1", Action: "removing"})
+	if m.kind != viewInstall {
+		t.Fatalf("a removal switched a mixed plan to kind %d, want Install", m.kind)
+	}
+	if got := m.view().msgText; got != "Removing beta-1.0_1" {
+		t.Errorf("status = %q, want Removing beta-1.0_1", got)
+	}
+	m.packageEvent(PackageEvent{Package: "beta-1.0_1", Action: "removed"})
+	if got, want := m.ratio(), 1.0/3.0; got != want {
+		t.Errorf("after the removal ratio = %v, want %v (one removal of 2·1+0+1)", got, want)
+	}
+	m.packageEvent(PackageEvent{Package: "alpha-2.0_1", Action: "unpacking"})
+	if got, want := m.ratio(), 2.0/3.0; got != want {
+		t.Errorf("after the unpack ratio = %v, want %v", got, want)
+	}
+	m.packageEvent(PackageEvent{Package: "alpha-2.0_1", Action: "configuring"})
+	if got := m.ratio(); got != 1 {
+		t.Errorf("finished mixed plan ratio = %v, want 1", got)
+	}
+}

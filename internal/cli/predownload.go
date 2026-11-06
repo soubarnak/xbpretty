@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -31,6 +32,7 @@ var preflightFn = download.Preflight
 type downloadSink interface {
 	Event(download.Event)
 	Seed(*StreamParser)
+	Completed() map[string]int64
 }
 
 // newDownloadSink builds the completion sink for one run; the live view is
@@ -73,13 +75,52 @@ func (s *cacheSeedSink) Seed(p *StreamParser) {
 	}
 }
 
+// Completed returns a copy of the archives the fill finished, keyed by filename.
+func (s *cacheSeedSink) Completed() map[string]int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]int64, len(s.completed))
+	for file, size := range s.completed {
+		out[file] = size
+	}
+	return out
+}
+
+// seedPredownloaded counts the archives the predownload fill finished into the
+// commit view's model before its child starts (BF-18). Without it the view
+// restarts at Packages 0/N and xbps's fallback transfers count from zero.
+func (st *state) seedPredownloaded(model *progressModel) {
+	if st.downloadSink == nil {
+		return
+	}
+	completed := st.downloadSink.Completed()
+	files := make([]string, 0, len(completed))
+	for file := range completed {
+		files = append(files, file)
+	}
+	sort.Strings(files)
+	for _, file := range files {
+		model.markCached(file)
+	}
+}
+
 // predownloadOutcome is one cache-fill attempt.
 type predownloadOutcome struct {
 	attempted   int
 	failed      int
 	interrupted bool
-	skipped     error // the pass could not start; xbps must do the work
-	invalid     error // repository metadata yielded an unusable filename
+	signal      os.Signal // the SIGINT or SIGTERM that stopped the fill (FR-074)
+	skipped     error     // the pass could not start; xbps must do the work
+	invalid     error     // repository metadata yielded an unusable filename
+}
+
+// interruptExitCode is FR-074's 128-plus-signal rule. A fill can only be stopped
+// by SIGINT or SIGTERM; any other value keeps the interrupted code, 130.
+func interruptExitCode(sig os.Signal) int {
+	if s, ok := sig.(syscall.Signal); ok {
+		return 128 + int(s)
+	}
+	return exitInterrupted
 }
 
 // predownload fills the cache from the plan's download set (FR-036, FR-038)
@@ -90,7 +131,7 @@ func (st *state) predownload(rows []xbps.Row, failClosed bool) int {
 	outcome := st.fillCache(rows, failClosed)
 	switch {
 	case outcome.interrupted:
-		return exitInterrupted
+		return interruptExitCode(outcome.signal)
 	case outcome.invalid != nil:
 		// FR-037 names the offending metadata; there is nothing to fetch for
 		// that row. A real transaction keeps FR-038's skip shape and lets
@@ -191,11 +232,25 @@ func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome 
 	if st.downloadSink == nil {
 		st.downloadSink = newDownloadSink(st)
 	}
-	// FR-041/FR-072: Ctrl-C cancels the engine, which removes `.part`, then
-	// the run exits 130 before any child is started. The handler is armed
-	// before cbreak so a signal cannot catch the terminal mid-change.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	// FR-041/FR-072/FR-074: Ctrl-C or SIGTERM cancels the engine, which removes
+	// `.part`, then the run exits 128 plus the signal before any child is started.
+	// The handler is armed before cbreak so a signal cannot catch the terminal
+	// mid-change. The signal is queued in caught before cancel runs, so a
+	// cancelled context always has its signal ready to read.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigs)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	caught := make(chan os.Signal, 1)
+	go func() {
+		select {
+		case sig := <-sigs:
+			caught <- sig
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	// FR-041: the fill feeds the seven-row Download view from the engine's
 	// event stream. The view is created only when the live surface is allowed
 	// (TTY, no -v, not plain); the thin sink still records completions for
@@ -250,6 +305,10 @@ func (st *state) fillCache(rows []xbps.Row, failClosed bool) predownloadOutcome 
 		}
 		st.errorf("%s\n", "interrupted")
 		outcome.interrupted = true
+		select {
+		case outcome.signal = <-caught:
+		default:
+		}
 		return outcome
 	}
 	// FR-041: on success clear; on failure clear before the per-file errors.
@@ -299,8 +358,17 @@ func (v *downloadEventView) apply(ev download.Event) {
 		v.live.Apply(true, func(m *progressModel) {
 			m.downloadDone(DownloadComplete{Filename: ev.File})
 		})
-	case download.EventRetry, download.EventFileFailed, download.EventFileStart:
+	case download.EventFileStart, download.EventRetry:
+		// A new attempt starts the archive's byte count again (BF-20).
+		v.written[ev.File] = 0
 		v.live.Request(true)
+	case download.EventFileFailed:
+		// A failed file gives back its in-flight bytes, and its next attempt
+		// starts from zero (BF-20).
+		v.written[ev.File] = 0
+		v.live.Apply(true, func(m *progressModel) {
+			m.clearInFlight(ev.File)
+		})
 	case download.EventFinished:
 		v.live.Request(true)
 	}

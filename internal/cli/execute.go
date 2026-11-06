@@ -47,11 +47,9 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 	if st.r.parser == nil {
 		st.r.parser = NewStreamParser(len(rows), totalDl)
 	}
-	// FR-041: predownload completions seed the child's parser so xbps's own
-	// fallback transfers continue the same counters.
-	if st.downloadSink != nil {
-		st.downloadSink.Seed(st.r.parser)
-	}
+	// BF-18: the phase's parser is dropped on return, so no later phase inherits
+	// its totals or callbacks. The progress model owns every displayed counter.
+	defer func() { st.r.parser = nil }()
 
 	// FR-064: the widget or FR-065's plain line draws from the same telemetry
 	// the parser already reads. No live view means the child output is
@@ -64,6 +62,9 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 	var sigs chan os.Signal
 	if mode := st.liveMode(); mode != liveOff {
 		model := newProgressModel(cmd, rows, nil)
+		// BF-18: archives the predownload cached are already done, so the view
+		// does not restart at Packages 0/N.
+		st.seedPredownloaded(model)
 		live = newLiveProgress(st.stderr, st.colorErr, terminalWidth(st.stderr), mode, model, st.theme)
 		st.r.live = true
 		st.r.liveProgress = live

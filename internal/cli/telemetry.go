@@ -36,6 +36,9 @@ var (
 	configOkRegex  = regexp.MustCompile(`^([\w.+~\-]+):\s+configured successfully\.$`)
 	removeRunRegex = regexp.MustCompile(`^Removing ['"\x60]([\w.+~\-]+)['"\x60] \.\.\.$`)
 	removeOkRegex  = regexp.MustCompile(`^Removed ['"\x60]([\w.+~\-]+)['"\x60] successfully\.$`)
+	// xbps-install's own removal lines, printed when a plan replaces a package (BF-19).
+	installRemoveRunRegex = regexp.MustCompile(`^([\w.+~\-]+):\s+removing \.\.\.$`)
+	installRemoveOkRegex  = regexp.MustCompile(`^([\w.+~\-]+):\s+removed successfully\.$`)
 
 	// Transaction summary regex:
 	summaryRegex = regexp.MustCompile(`^(\d+)\s+downloaded,\s+(\d+)\s+installed,\s+(\d+)\s+updated,\s+(\d+)\s+configured,\s+(\d+)\s+removed,\s+(\d+)\s+on hold\.$`)
@@ -294,6 +297,12 @@ func ParsePackageEvent(line string) (*PackageEvent, bool) {
 		return &PackageEvent{Package: m[1], Action: "removing"}, true
 	}
 	if m := removeOkRegex.FindStringSubmatch(clean); len(m) >= 2 {
+		return &PackageEvent{Package: m[1], Action: "removed"}, true
+	}
+	if m := installRemoveRunRegex.FindStringSubmatch(clean); len(m) >= 2 {
+		return &PackageEvent{Package: m[1], Action: "removing"}, true
+	}
+	if m := installRemoveOkRegex.FindStringSubmatch(clean); len(m) >= 2 {
 		return &PackageEvent{Package: m[1], Action: "removed"}, true
 	}
 

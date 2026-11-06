@@ -16,6 +16,7 @@ import (
 
 	"github.com/soubarnak/xbpretty/internal/config"
 	"github.com/soubarnak/xbpretty/internal/download"
+	"github.com/soubarnak/xbpretty/internal/xbps"
 )
 
 // repoFixture is a local HTTP repository: it serves the exact
@@ -984,5 +985,38 @@ func TestPredownloadFeedsTheDownloadView(t *testing.T) {
 	}
 	if strings.Contains(errs, "Transaction complete") {
 		t.Errorf("the view printed a completion line:\n%q", errs)
+	}
+}
+
+// TestPredownloadCompletionsSeedCommitView pins BF-18's wiring: the archives the
+// fill finished are counted by the commit view's model before the child starts,
+// so the view does not restart at Packages 0/N. A remove-only plan is untouched.
+func TestPredownloadCompletionsSeedCommitView(t *testing.T) {
+	sink := &cacheSeedSink{completed: map[string]int64{}}
+	sink.Event(downloadEventFileDone("alpha-1_1.x86_64.xbps", 400*1024))
+	sink.Event(downloadEventFileDone("alpha-1_1.x86_64.xbps.sig2", 20))
+	st := &state{downloadSink: sink}
+
+	partial := newProgressModel("install", downloadPlan(), nil)
+	st.seedPredownloaded(partial)
+	if got := partial.view().left[0].value; got != "1/2" {
+		t.Errorf("Packages after a partial predownload = %q, want 1/2", got)
+	}
+	if got, want := partial.position(), uint64(400*1024); got != want {
+		t.Errorf("position after a partial predownload = %d, want %d", got, want)
+	}
+
+	sink.Event(downloadEventCacheHit("beta-1_1.x86_64.xbps", 600*1024))
+	full := newProgressModel("install", downloadPlan(), nil)
+	st.seedPredownloaded(full)
+	if full.kind != viewInstall {
+		t.Errorf("kind after a full predownload = %d, want Install", full.kind)
+	}
+
+	removes := []xbps.Row{{Name: "wget", Version: "1.25.0_1", Action: xbps.ActionRemove}}
+	remove := newProgressModel("remove", removes, nil)
+	st.seedPredownloaded(remove)
+	if remove.kind != viewRemove || remove.completedCount != 0 {
+		t.Errorf("remove-only plan changed: kind %d, completed %d", remove.kind, remove.completedCount)
 	}
 }
