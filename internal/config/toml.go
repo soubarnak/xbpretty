@@ -395,6 +395,9 @@ func (p *valueParser) parseString() (tomlValue, error) {
 			if c == '\'' {
 				return tomlValue{kind: tomlString, str: b.String(), line: p.line}, nil
 			}
+			if isRawControlCharacter(c) {
+				return tomlValue{}, p.errorf("control characters are not allowed in strings")
+			}
 			b.WriteByte(c)
 		}
 	}
@@ -408,6 +411,9 @@ func (p *valueParser) parseString() (tomlValue, error) {
 			return tomlValue{kind: tomlString, str: b.String(), line: p.line}, nil
 		}
 		if c != '\\' {
+			if isRawControlCharacter(c) {
+				return tomlValue{}, p.errorf("control characters are not allowed in strings")
+			}
 			b.WriteByte(c)
 			continue
 		}
@@ -447,6 +453,12 @@ func (p *valueParser) parseString() (tomlValue, error) {
 			return tomlValue{}, p.errorf("invalid escape sequence \\%c", esc)
 		}
 	}
+}
+
+// isRawControlCharacter reports a byte TOML forbids unescaped inside a string:
+// U+0000-U+001F except tab, and U+007F. The escaped forms remain valid.
+func isRawControlCharacter(c byte) bool {
+	return (c < 0x20 && c != '\t') || c == 0x7f
 }
 
 func (p *valueParser) readUnicodeEscape(digits int) (rune, error) {
@@ -703,7 +715,7 @@ func startsNumeric(token string) bool {
 		return false
 	}
 	switch c := token[0]; {
-	case c >= '0' && c <= '9', c == '+', c == '-', c == '.':
+	case c >= '0' && c <= '9', c == '+', c == '-':
 		return true
 	}
 	return false

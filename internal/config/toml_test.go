@@ -135,7 +135,9 @@ func TestParseRejectedConstructs(t *testing.T) {
 	}{
 		{"float", "[Nala]\nassume_yes = 1.5\n", 2, "floats are not supported"},
 		{"float exponent", "[Nala]\nassume_yes = 1e3\n", 2, "floats are not supported"},
-		{"float leading dot", "[Nala]\nassume_yes = .5\n", 2, "floats are not supported"},
+		{"float leading dot", "[Nala]\nassume_yes = .5\n", 2, "bare values are not supported; strings must be quoted"},
+		{"float leading dot with sign", "[Nala]\nassume_yes = -.5\n", 2, "floats are not supported"},
+		{"float with integer part", "[Nala]\nassume_yes = 0.5\n", 2, "floats are not supported"},
 		{"date", "[Nala]\nauto_remove = 2026-01-02\n", 2, "dates and times are not supported"},
 		{"datetime", "[Nala]\nauto_remove = 2026-01-02T03:04:05Z\n", 2, "dates and times are not supported"},
 		{"time", "[Nala]\nauto_remove = 03:04:05\n", 2, "dates and times are not supported"},
@@ -166,6 +168,9 @@ func TestParseRejectedConstructs(t *testing.T) {
 		{"unterminated basic string", "[Nala]\nassume_yes = \"true\n", 2, "unterminated string"},
 		{"unterminated literal string", "[Nala]\nassume_yes = 'true\n", 2, "unterminated string"},
 		{"invalid escape", "[Nala]\nassume_yes = \"tr\\q\"\n", 2, "invalid escape sequence"},
+		{"raw control in basic string", "[Color.theme]\nPrimary = { fg = \"Red\x01\" }\n", 2, "control characters are not allowed in strings"},
+		{"raw DEL in literal string", "[Color.theme]\nPrimary = { fg = 'Red\x7f' }\n", 2, "control characters are not allowed in strings"},
+		{"raw carriage return in basic string", "[Nala]\nassume_yes = \"a\rb\"\n", 2, "control characters are not allowed in strings"},
 		{"multi-line array", "[Color.theme]\nPrimary = { fg = [\n", 2, "arrays must be on one line"},
 		{"multi-line inline table", "[Color.theme]\nPrimary = {\n", 2, "inline tables must be on one line"},
 		{"unterminated array", "[Color.theme]\nPrimary = { fg = [1, 2 }\n", 2, "expected ',' or ']' in array"},
@@ -197,6 +202,34 @@ func TestParseRejectedConstructs(t *testing.T) {
 			}
 			if !strings.HasPrefix(err.Error(), "config cfg.toml:") {
 				t.Errorf("error %q does not start with the config path", err)
+			}
+		})
+	}
+}
+
+// TOML forbids raw control characters in strings except tab, but the escaped
+// forms stay valid and a raw tab is still accepted.
+func TestParseStringControlCharacterRules(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"raw tab in basic string", "\"a\tb\"", "a\tb"},
+		{"raw tab in literal string", "'a\tb'", "a\tb"},
+		{"escaped tab", `"a\tb"`, "a\tb"},
+		{"escaped unicode control", `"a\u0001b"`, "a\x01b"},
+		{"non-ASCII text", `"café"`, "café"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vp := &valueParser{path: "cfg.toml", line: 1, input: tt.in}
+			value, err := vp.parseValue()
+			if err != nil {
+				t.Fatalf("parseValue(%q): %v", tt.in, err)
+			}
+			if value.kind != tomlString || value.str != tt.want {
+				t.Errorf("parseValue(%q) = %q, want %q", tt.in, value.str, tt.want)
 			}
 		})
 	}

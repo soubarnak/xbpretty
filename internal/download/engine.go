@@ -329,19 +329,34 @@ func (e *Engine) fetchOne(ctx context.Context, target Target) Result {
 			Bytes: int64(target.Size), Total: int64(target.Size)})
 	}
 
+	// In download mode a fresh signature is staged at `.sig2.part` and
+	// published only after the archive verifies (BF-38), so a failed archive
+	// never leaves a signature behind. The cache keeps the immediate publish.
+	holdSignature := needSig && needArchive && e.opts.Mode == ModeDownload
+	stagedSignature := res.SignaturePath + ".part"
 	if needSig {
-		if err := e.transfer(ctx, target, target.SignatureURL, res.SignaturePath, "", true); err != nil {
+		if err := e.transfer(ctx, target, target.SignatureURL, res.SignaturePath, "", true, holdSignature); err != nil {
 			res.Err = err
 			return res
 		}
 		res.ReusedSignature = false
 	}
 	if needArchive {
-		if err := e.transfer(ctx, target, target.URL, res.ArchivePath, target.SHA256, false); err != nil {
+		if err := e.transfer(ctx, target, target.URL, res.ArchivePath, target.SHA256, false, false); err != nil {
+			if holdSignature {
+				_ = os.Remove(stagedSignature)
+			}
 			res.Err = err
 			return res
 		}
 		res.ReusedArchive = false
+	}
+	if holdSignature {
+		if err := publish(stagedSignature, res.SignaturePath, e.opts.ChownRoot); err != nil {
+			_ = os.Remove(stagedSignature)
+			res.Err = err
+			return res
+		}
 	}
 	return res
 }
@@ -490,7 +505,10 @@ func (e *Engine) copyFile(source, dest, wantSHA string, total int64) (int64, err
 
 // transfer runs one URL with four attempts and no backoff, retrying only the
 // classes FR-038 allows.
-func (e *Engine) transfer(ctx context.Context, target Target, sourceURL, dest, wantSHA string, signature bool) error {
+//
+// When hold is true a verified body stays at dest+".part" instead of being
+// published; the caller then publishes or removes that file.
+func (e *Engine) transfer(ctx context.Context, target Target, sourceURL, dest, wantSHA string, signature, hold bool) error {
 	file := filepath.Base(dest)
 	total := int64(-1)
 	if !signature && target.Size > 0 {
@@ -506,7 +524,7 @@ func (e *Engine) transfer(ctx context.Context, target Target, sourceURL, dest, w
 		if e.opts.Log != nil {
 			e.opts.Log("GET %s (attempt %d/%d)", sourceURL, attempt, e.opts.Attempts)
 		}
-		n, err := e.attempt(ctx, target, sourceURL, dest, wantSHA, signature, attempt, total)
+		n, err := e.attempt(ctx, target, sourceURL, dest, wantSHA, signature, hold, attempt, total)
 		if err == nil {
 			done := n
 			if total > 0 {
@@ -530,10 +548,28 @@ func (e *Engine) transfer(ctx context.Context, target Target, sourceURL, dest, w
 	return lastErr
 }
 
-// attempt is one transfer: semaphore, GET, stream to `.part`, hash, fsync and
-// atomic rename. The body is capped by the plan size (or a sanity ceiling) so
-// a hostile server cannot fill the disk before the hash check.
-func (e *Engine) attempt(ctx context.Context, target Target, sourceURL, dest, wantSHA string, signature bool, attempt int, total int64) (int64, error) {
+// attempt is one transfer: download into `.part`, then publish it by atomic
+// rename unless hold keeps it staged.
+func (e *Engine) attempt(ctx context.Context, target Target, sourceURL, dest, wantSHA string, signature, hold bool, attempt int, total int64) (int64, error) {
+	n, err := e.download(ctx, target, sourceURL, dest, wantSHA, signature, attempt, total)
+	if err != nil {
+		return 0, err
+	}
+	if hold {
+		return n, nil
+	}
+	if err := publish(dest+".part", dest, e.opts.ChownRoot); err != nil {
+		_ = os.Remove(dest + ".part")
+		return 0, err
+	}
+	return n, nil
+}
+
+// download is the body of one attempt: semaphore, GET, stream to `.part`,
+// hash and fsync. The body is capped by the plan size (or a sanity ceiling)
+// so a hostile server cannot fill the disk before the hash check. On success
+// the verified `.part` is left in place; on failure it is removed.
+func (e *Engine) download(ctx context.Context, target Target, sourceURL, dest, wantSHA string, signature bool, attempt int, total int64) (int64, error) {
 	limit, err := bodyLimit(target, signature)
 	if err != nil {
 		return 0, err
@@ -556,9 +592,9 @@ func (e *Engine) attempt(ctx context.Context, target Target, sourceURL, dest, wa
 	if err != nil {
 		return 0, err
 	}
-	published := false
+	staged := false
 	defer func() {
-		if !published {
+		if !staged {
 			_ = out.Close()
 			_ = os.Remove(part)
 		}
@@ -639,10 +675,7 @@ func (e *Engine) attempt(ctx context.Context, target Target, sourceURL, dest, wa
 	if err := out.Close(); err != nil {
 		return 0, err
 	}
-	if err := publish(part, dest, e.opts.ChownRoot); err != nil {
-		return 0, err
-	}
-	published = true
+	staged = true
 	return n, nil
 }
 

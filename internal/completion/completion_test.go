@@ -57,11 +57,12 @@ func fishFlag(script, shell, flag string) bool {
 }
 
 // allAdvertisedSpellings mirrors the completion generator's filter: every
-// visible flag spelling, excluding hidden, refused and N/A (NoOp) flags.
+// visible flag spelling, excluding hidden and refused flags. Accepted no-ops
+// (NoOp, FR-019) are advertised, as --help lists them.
 func allAdvertisedSpellings() []string {
 	var out []string
 	for _, f := range spec.Flags {
-		if f.Hidden || f.Refusal != "" || f.NoOp {
+		if f.Hidden || f.Refusal != "" {
 			continue
 		}
 		out = append(out, spec.FlagSpellings(f)...)
@@ -397,13 +398,14 @@ func TestCompletionQueryRules(t *testing.T) {
 
 // TestRev6CompletionSurface pins FR-005's rev 6 content: the six aliases,
 // every visible command, per-command flags, the colour values, history ids
-// plus last, the dual -V, and no N/A flag anywhere.
+// plus last, the dual -V, and no refused N/A flag anywhere. Accepted no-ops
+// such as --no-fix-broken are offered (FR-019) and are not banned here.
 func TestRev6CompletionSurface(t *testing.T) {
 	naFlags := []string{
 		"--allow-unauthenticated", "--fix-broken", "--target-release",
 		"--install-recommends", "--install-suggests", "--remove-essential",
 		"--remove-config", "--exclude", "--sources", "--debian", "--ubuntu",
-		"--devuan", "--no-fix-broken", "--no-install-recommends", "--no-install-suggests",
+		"--devuan",
 	}
 	for _, shell := range []string{"bash", "zsh", "fish"} {
 		t.Run(shell, func(t *testing.T) {
@@ -482,6 +484,24 @@ func TestEveryCommandOffersItsOwnFlags(t *testing.T) {
 					t.Errorf("%s after %s did not offer --%s: %q", shell, command.Name, flag, p.offered)
 				}
 			}
+
+			// FR-019: accepted no-ops complete like any other flag, as --help
+			// lists them; refused flags (FR-005) are never offered.
+			t.Run("accepted no-ops complete and refused flags do not", func(t *testing.T) {
+				list := probeCompletion(t, shell, "xbp", "list", "-")
+				for _, name := range []string{"-A", "--all-arches"} {
+					if !offers(list, name) {
+						t.Errorf("%s list did not offer %s: %q", shell, name, list.offered)
+					}
+				}
+				install := probeCompletion(t, shell, "xbp", "install", "-")
+				if !offers(install, "--no-fix-broken") {
+					t.Errorf("%s install did not offer --no-fix-broken: %q", shell, install.offered)
+				}
+				if offers(install, "--allow-unauthenticated") {
+					t.Errorf("%s install offers the refused --allow-unauthenticated", shell)
+				}
+			})
 		})
 	}
 }

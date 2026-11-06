@@ -78,7 +78,7 @@ func wordsFor(cmd string) []string {
 		out = append(out, s)
 	}
 	for _, f := range spec.FlagsFor(cmd) {
-		if f.Hidden || f.Refusal != "" || f.NoOp {
+		if f.Hidden || f.Refusal != "" {
 			continue
 		}
 		spellings := spec.FlagSpellings(f)
@@ -455,14 +455,14 @@ for __xbpretty_cmd in ` + quotedWords(completionNames()) + `
 `)
 	// Global flags are completed after a subcommand too.
 	for _, f := range spec.Flags {
-		if !f.Global || f.Hidden || f.Refusal != "" || f.NoOp || f.Long == "version" {
+		if !f.Global || f.Hidden || f.Refusal != "" || f.Long == "version" {
 			continue
 		}
 		writeFishFlag(&b, "$__xbpretty_cmd", f, "")
 	}
 	// Per-command flags, grouped by the commands that accept each one.
 	for _, f := range spec.Flags {
-		if f.Global || f.Hidden || f.Refusal != "" || f.NoOp {
+		if f.Global || f.Hidden || f.Refusal != "" {
 			continue
 		}
 		writeFishFlag(&b, "$__xbpretty_cmd", f, fishCondition(f.Commands))

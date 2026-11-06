@@ -994,6 +994,35 @@ func TestFetchDownloadModeKeepsOldArchiveOnFailedRefetch(t *testing.T) {
 	}
 }
 
+// TestDownloadModeNoSignatureWhenArchiveFails pins BF-38: in download mode the
+// signature is fetched first (FR-038) but published only once the archive
+// verifies, so a failed archive leaves no `.sig2` and no staged `.sig2.part`.
+func TestDownloadModeNoSignatureWhenArchiveFails(t *testing.T) {
+	f := newFixture(t)
+	archive := []byte("the archive bytes")
+	f.mu.Lock()
+	f.handler = func(w http.ResponseWriter, r *http.Request) bool {
+		if strings.HasSuffix(r.URL.Path, ".sig2") {
+			_, _ = w.Write([]byte("the signature bytes"))
+			return true
+		}
+		http.NotFound(w, r)
+		return true
+	}
+	f.mu.Unlock()
+	dir := t.TempDir()
+	target := targetFor(t, f.srv.URL+"/current", archive, sha256Hex(archive))
+	results := newTestEngine(dir, ModeDownload).Fetch(context.Background(), []Target{target})
+	if results[0].Err == nil {
+		t.Fatal("a failed archive was reported as success")
+	}
+	for _, name := range []string{target.Filename, target.Filename + ".part", target.Filename + ".sig2", target.Filename + ".sig2.part"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s survived a failed archive", name)
+		}
+	}
+}
+
 // TestFetchCacheModePermissions pins FR-038's 0644 root:root cache files.
 func TestFetchCacheModePermissions(t *testing.T) {
 	f := newFixture(t)

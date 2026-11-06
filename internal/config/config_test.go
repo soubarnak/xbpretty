@@ -88,6 +88,26 @@ func TestLoadFileMissingIsHardError(t *testing.T) {
 	}
 }
 
+// A dot-relative program path is a path error, not a float error: TOML never
+// accepts a leading dot in a float, so the number check must not claim it.
+func TestLegacyDotPathMessage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.toml")
+	if err := os.WriteFile(path, []byte("xbps_query_path = ./xbps-query\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadFile(path)
+	if err == nil {
+		t.Fatal("LoadFile accepted ./xbps-query")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "must be a bare program name or an absolute path") {
+		t.Errorf("error %q does not name the path rule", message)
+	}
+	if strings.Contains(message, "floats") {
+		t.Errorf("error %q blames a float", message)
+	}
+}
+
 func TestLoadFileReadsExplicitPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "custom.toml")
