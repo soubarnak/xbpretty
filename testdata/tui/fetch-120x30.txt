@@ -1,0 +1,30 @@
+╭──────────────────────────────────────────────────  xbpretty Fetch  ──────────────────────────────────────────────────╮
+│  Mirrors:                                                       Location:     Region: Tier: Latency:    Speed: Score:│
+│✓ https://repo.voidlinux.org/current                             Finland       EU          1    18 ms 4.1 MiB/s     18│
+│☐ https://mirror.example.net/voidlinux                           Germany       EU          2    31 ms 3.2 MiB/s     31│
+│☐ https://mirror.osuosl.org/voidlinux                            United States NA          2    47 ms 2.8 MiB/s     47│
+│☐ https://slow.example.org/voidlinux                             Japan         AS          3   112 ms 0.9 MiB/s    112│
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                      Score is how many milliseconds it takes to download the repository index.                       │
+│                                                                                                                      │
+│                                      Use ↓↑ to move, Home/End to go top/bottom,                                      │
+│                                          q/Enter to select, Esc to cancel.                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

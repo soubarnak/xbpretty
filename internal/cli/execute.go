@@ -3,94 +3,40 @@ package cli
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/soubarnak/xbpretty/internal/config"
 	"github.com/soubarnak/xbpretty/internal/hints"
-	"github.com/soubarnak/xbpretty/internal/summary"
 	"github.com/soubarnak/xbpretty/internal/xbps"
 )
 
-// runTransaction drives one command from the plan through the prompt to the
-// real execution, and returns xbpretty's exit code.
-func (st *state) runTransaction(cmd string, opts *options) int {
-	install := st.binaryFor(cmd)
-
-	// FR-006: update is index sync only, streamed, with no summary and no
-	// prompt.
-	if cmd == "update" {
-		args := []string{}
-		if st.sync && !opts.noSync {
-			args = append(args, "-S")
-		}
-		args = append(args, opts.args...)
-		args = append(args, opts.passthru...)
-		if euidFn() != 0 {
-			fmt.Fprintln(st.stderr, "xbpretty: update needs root; rerun with doas or sudo")
-			return exitRuntime
-		}
-		return st.execute(cmd, install, args)
+// liveMode applies FR-064/FR-065's suppression matrix. The widget needs both
+// streams on a terminal; the plain line needs only stderr. Plain mode, -v,
+// TERM=dumb and a redirected stderr all turn live output off entirely.
+func (st *state) liveMode() liveMode {
+	if !st.progressBar || st.r == nil || st.r.verbose {
+		return liveOff
 	}
-
-	// Everything else previews first.
-	wantSync := false
-	rows, code := st.plan(cmd, opts, &wantSync)
-	if code >= 0 {
-		return code
+	if strings.EqualFold(os.Getenv("TERM"), "dumb") {
+		return liveOff
 	}
-	planSynced := wantSync
-
-	if len(rows) == 0 {
-		// FR-015: nothing to do is not an error.
-		fmt.Fprintln(st.stdout, "Nothing to do.")
-		return exitNothingToDo
+	if !isTTY(st.stderr) {
+		return liveOff
 	}
-
-	sum := st.planToSummary(rows)
-	isPlain := !isTTY(st.stdout)
-	termWidth := terminalWidth(st.stdout)
-	if err := (summary.Renderer{
-		Color:       st.color,
-		Plain:       isPlain,
-		Width:       termWidth,
-		BoxStyle:    st.boxStyle,
-		ProgressBar: st.progressBar,
-	}).Render(st.stdout, sum); err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
-		return exitRuntime
+	if !isTTY(st.stdout) {
+		return livePlainMode
 	}
-
-	if opts.dryRun {
-		// FR-005 / AC-005: the plan is the whole run.
-		return exitOK
-	}
-
-	// FR-010: never block on a pipe.
-	stdinIsPipe := !isTTY(st.stdin)
-	autoAccept := opts.yes || st.r.cfg.AssumeYes
-	if stdinIsPipe && !autoAccept {
-		fmt.Fprintln(st.stderr, "xbpretty: stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed")
-		return exitRuntime
-	}
-	// FR-016: only root may execute.
-	if euidFn() != 0 {
-		st.privHint(cmd, opts)
-		return exitRuntime
-	}
-	if !autoAccept {
-		if !st.prompt() {
-			// FR-009 / AC-003: declining is not an error.
-			return exitOK
-		}
-	}
-
-	args := st.realCommand(cmd, opts, planSynced)
-	return st.execute(cmd, install, args, rows...)
+	return liveWidgetMode
 }
 
-// execute streams one xbps command live (FR-014) and handles its outcome.
+// execute streams one xbps command live (FR-014) and handles its outcome. It
+// applies no post-success side effects: the driver's commit step
+// (executePhases/completeTransaction) runs them once the whole command, which
+// may be several phases, has succeeded.
 func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 	var totalDl int64
 	for _, row := range rows {
@@ -101,59 +47,143 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 	if st.r.parser == nil {
 		st.r.parser = NewStreamParser(len(rows), totalDl)
 	}
-
-	isInteractive := isTTY(st.stdout) && isTTY(st.stderr)
-	useWidget := st.progressBar && !st.r.verbose && isInteractive
-	var widget *ProgressWidget
-	if useWidget {
-		termWidth := terminalWidth(st.stderr)
-		widget = NewProgressWidget(st.stderr, st.boxStyle, st.color, termWidth, len(rows), totalDl)
-		widget.AttachToParser(st.r.parser)
-		widget.Start()
-		st.r.widget = widget
+	// FR-041: predownload completions seed the child's parser so xbps's own
+	// fallback transfers continue the same counters.
+	if st.downloadSink != nil {
+		st.downloadSink.Seed(st.r.parser)
 	}
 
-	code, err := st.r.stream(bin, args...)
-	if widget != nil {
-		widget.Finish(code, st.r.lastStderr, rows, cmd)
-		st.r.widget = nil
+	// FR-064: the widget or FR-065's plain line draws from the same telemetry
+	// the parser already reads. No live view means the child output is
+	// forwarded verbatim instead.
+	var live *liveProgress
+	// FR-072: a signal must be caught before cbreak is entered. The channel is
+	// armed ahead of the viewport and handed to the stream, so a SIGINT in the
+	// window between the terminal change and the child is still forwarded and
+	// the deferred restore runs.
+	var sigs chan os.Signal
+	if mode := st.liveMode(); mode != liveOff {
+		model := newProgressModel(cmd, rows, nil)
+		live = newLiveProgress(st.stderr, st.colorErr, terminalWidth(st.stderr), mode, model, st.theme)
+		st.r.live = true
+		st.r.liveProgress = live
+		if mode == liveWidgetMode {
+			sigs = make(chan os.Signal, 1)
+			signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+			defer func() {
+				signal.Stop(sigs)
+				close(sigs)
+			}()
+		}
+		parser := st.r.parser
+		parser.OnDownloadTick = func(tick DownloadTick) {
+			live.Apply(false, func(m *progressModel) { m.downloadTick(tick) })
+		}
+		parser.OnDownloadComplete = func(done DownloadComplete) {
+			// A completion is also a cache hit and forces a redraw.
+			live.Apply(true, func(m *progressModel) { m.downloadDone(done) })
+		}
+		parser.OnPhaseChange = func(phase string) {
+			live.Apply(true, func(m *progressModel) { m.phase(phase) })
+		}
+		parser.OnPackageEvent = func(event PackageEvent) {
+			live.Apply(true, func(m *progressModel) { m.packageEvent(event) })
+		}
+		// FR-072: the viewport exists on the normal screen before the child
+		// starts, and termios is handed back before the commit child, which
+		// may prompt on stdin. Finish is registered after Close so it runs
+		// first, keeping teardown clear of the last draw.
+		inline := st.startInline(live)
+		defer inline.Close()
+		defer live.Finish()
+		inline.RestoreTermios()
+		live.Request(true)
+	}
+
+	code, err := st.r.streamWithSignals(sigs, bin, args...)
+	if live != nil {
+		live.Finish()
+		st.r.live = false
+		st.r.liveProgress = nil
 	}
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		st.errorf("%v\n", err)
 		return exitRuntime
 	}
 	stderr := st.r.lastStderr
 	if code == 0 {
-		// FR-013: every real execution that exits 0 is logged, and `update`
-		// is one of them even though it produces no rows of its own.
-		if st.log {
-			st.writeLog(cmd, args, rows)
-		}
-		if hint := rebootHint(rows); hint != "" {
-			fmt.Fprintf(st.stderr, "hint: %s\n", hint)
-		}
 		return exitOK
 	}
 
-	// On failure:
-	// If widget was active, raw output was suppressed during run; print it now (FR-017).
-	if widget != nil {
+	// On failure the live surface clears, then the captured child output is
+	// printed on stderr before the one matching hint (FR-064, FR-066).
+	if live != nil {
 		if st.r.lastStdout != "" {
-			fmt.Fprint(st.stdout, st.r.lastStdout)
+			fmt.Fprint(st.stderr, st.r.lastStdout)
 		}
-		if stderr != "" {
-			fmt.Fprint(st.stderr, stderr)
+		if st.r.lastStderr != "" {
+			fmt.Fprint(st.stderr, st.r.lastStderr)
 		}
 	}
-	// FR-017: the raw xbps output stays, then one matching hint if any.
 	if h := hints.Lookup(code, hints.Output{Stdout: st.r.lastStdout, Stderr: stderr}); h != nil {
-		fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
+		st.hintf("%s\n", h.Text)
 	}
 	isRemovePlan := len(rows) > 0 && rows[0].Action == "remove"
 	if isRemovePlan {
 		st.revdepsHint(optsArgs(rows))
 	}
 	return code
+}
+
+// xbpsPhase is one child invocation of a command. A replay has two phases
+// (restore, then remove); every other command has one.
+type xbpsPhase struct {
+	bin  string
+	args []string
+	rows []xbps.Row
+}
+
+// executePhases runs a command's xbps work in order and applies the
+// post-success side effects exactly once, after every phase exits 0. A replay
+// must never publish a history entry between its restore and removal phases
+// (FR-031, FR-033).
+func (st *state) executePhases(cmd string, logArgs []string, allRows []xbps.Row, phases ...xbpsPhase) int {
+	return st.executePhasesAfter(cmd, logArgs, allRows, "", nil, phases...)
+}
+
+// executePhasesAfter is executePhases with the replay extensions: partial is
+// printed when a phase after the first fails (FR-033's partial phase-2
+// message), and after runs once every phase exited 0, before the single
+// commit point. after is where a replay restores the recorded
+// automatic-install bit (FR-034), so the new entry records the final state.
+// #70 extends the #69 commit point here rather than writing history itself.
+func (st *state) executePhasesAfter(cmd string, logArgs []string, allRows []xbps.Row, partial string, after func(), phases ...xbpsPhase) int {
+	for i, phase := range phases {
+		if code := st.execute(cmd, phase.bin, phase.args, phase.rows...); code != 0 {
+			if i > 0 && partial != "" {
+				st.errorf("%s\n", partial)
+			}
+			return code
+		}
+	}
+	if after != nil {
+		after()
+	}
+	st.completeTransaction(cmd, logArgs, allRows)
+	return exitOK
+}
+
+// completeTransaction is the one post-success step: history first, then the
+// line log, then the reboot hint (FR-031). It runs only when the whole
+// command succeeded.
+func (st *state) completeTransaction(cmd string, logArgs []string, rows []xbps.Row) {
+	st.finishHistory()
+	if st.log {
+		st.writeLog(cmd, logArgs, rows)
+	}
+	if hint := rebootHint(rows); hint != "" {
+		st.hintf("%s\n", hint)
+	}
 }
 
 // optsArgs returns the package names targeted by a remove plan.
@@ -170,7 +200,7 @@ func optsArgs(rows []xbps.Row) []string {
 // `-R` would name.
 func (st *state) revdepsHint(packages []string) {
 	for _, pkg := range packages {
-		res, err := st.r.run(st.r.cfg.XBPSQuery, "-X", pkg)
+		res, err := st.r.run(st.r.cfg.Xbps.QueryPath, "-X", pkg)
 		if err != nil || res.exitCode != 0 {
 			continue
 		}
@@ -179,7 +209,7 @@ func (st *state) revdepsHint(packages []string) {
 			continue
 		}
 		if text := hints.ForceRemoveHint(pkg, dependents); text != "" {
-			fmt.Fprintf(st.stderr, "hint: %s\n", text)
+			st.hintf("%s\n", text)
 		}
 	}
 }
@@ -190,12 +220,12 @@ func (st *state) revdepsHint(packages []string) {
 func (st *state) writeLog(cmd string, args []string, rows []xbps.Row) {
 	path, err := config.TransactionLog()
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: transaction log unavailable: %v\n", err)
+		st.errorf("transaction log unavailable: %v\n", err)
 		return
 	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: transaction log unavailable: %v\n", err)
+		st.errorf("transaction log unavailable: %v\n", err)
 		return
 	}
 	defer f.Close()
@@ -206,7 +236,7 @@ func (st *state) writeLog(cmd string, args []string, rows []xbps.Row) {
 	if uid, gid, ok := config.Invoker(); ok {
 		for _, p := range []string{filepath.Dir(path), path} {
 			if err := os.Chown(p, uid, gid); err != nil {
-				fmt.Fprintf(st.stderr, "xbpretty: transaction log ownership not changed: %v\n", err)
+				st.errorf("transaction log ownership not changed: %v\n", err)
 			}
 		}
 	}
@@ -226,6 +256,6 @@ func (st *state) writeLog(cmd string, args []string, rows []xbps.Row) {
 		fields = append(fields, strings.Join(names, " "))
 	}
 	if _, err := f.WriteString(strings.Join(fields, " ") + "\n"); err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: transaction log unavailable: %v\n", err)
+		st.errorf("transaction log unavailable: %v\n", err)
 	}
 }

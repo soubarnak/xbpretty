@@ -258,6 +258,9 @@ func (m *Matrix) Validate(root string) error {
 			if acCount == 0 {
 				return fmt.Errorf("parity: %s is n/a but cites no AC in its spec column", r.ID)
 			}
+			if err := checkNABehaviour(r); err != nil {
+				return err
+			}
 			if err := checkNAProof(r, ir); err != nil {
 				return err
 			}
@@ -281,6 +284,9 @@ func (m *Matrix) Validate(root string) error {
 		if !seenMat[r.ID] {
 			return fmt.Errorf("parity: %s is in the inventory but has no matrix row", r.ID)
 		}
+	}
+	if err := m.checkOrder(); err != nil {
+		return err
 	}
 
 	// spec revision and refs.
@@ -328,14 +334,66 @@ func (m *Matrix) Validate(root string) error {
 			return fmt.Errorf("parity: %s is a [P] AC but no matrix row cites it", ac)
 		}
 	}
+	if implementationMode(root) {
+		if err := m.requireTestCells(); err != nil {
+			return err
+		}
+	}
 	tests, err := declaredTests(root)
 	if err != nil {
 		return err
 	}
+	return m.checkTestCells(tests)
+}
+
+// implementationMode reports whether the packaged spec exists. ADR-0020: the
+// spec phase may leave `test` cells at the em dash; once internal/spec exists,
+// the release half of the contract is live and every cell must resolve.
+func implementationMode(root string) bool {
+	_, err := os.Stat(filepath.Join(root, "internal", "spec"))
+	return err == nil
+}
+
+// requireTestCells is the release-phase rule: no row may keep the spec-phase
+// placeholder. A `release:` gate is the only accepted non-test value.
+func (m *Matrix) requireTestCells() error {
 	for _, r := range m.Matrix {
+		if strings.TrimSpace(r.Test) == "—" || strings.TrimSpace(r.Test) == "" {
+			return fmt.Errorf("parity: %s has no test cell; implementation mode requires a TestParity_ name or a release: gate", r.ID)
+		}
+	}
+	return nil
+}
+
+// checkOrder requires the matrix to carry exactly the inventory's order.
+func (m *Matrix) checkOrder() error {
+	if len(m.Matrix) != len(m.Inventory) {
+		return fmt.Errorf("parity: matrix has %d rows, inventory has %d", len(m.Matrix), len(m.Inventory))
+	}
+	for i := range m.Matrix {
+		if m.Matrix[i].ID != m.Inventory[i].ID {
+			return fmt.Errorf("parity: matrix row %d is %s, inventory row %d is %s; the matrix must follow the inventory order", i+1, m.Matrix[i].ID, i+1, m.Inventory[i].ID)
+		}
+	}
+	return nil
+}
+
+// checkTestCells resolves every cited Test* name against the module's declared
+// tests. This is AC-063's renamed/deleted clause and its exact message is
+// asserted by TestCitedTestMustExist. A TestParity_ cell must also carry its
+// own row id so the mapping cannot be copied between rows.
+func (m *Matrix) checkTestCells(tests map[string]bool) error {
+	for _, r := range m.Matrix {
+		wantPrefix := "TestParity_" + strings.ReplaceAll(r.ID, "-", "_") + "_"
 		for _, tok := range strings.Split(r.Test, ",") {
 			tok = strings.TrimSpace(tok)
-			if strings.HasPrefix(tok, "Test") && !tests[tok] {
+			if !strings.HasPrefix(tok, "Test") {
+				continue
+			}
+			if strings.HasPrefix(tok, "TestParity_") && !strings.HasPrefix(tok, wantPrefix) {
+				return fmt.Errorf("parity: %s cites test %s, which does not carry its id prefix %s", r.ID, tok, wantPrefix)
+			}
+			if !tests[tok] {
 				return fmt.Errorf("parity: %s cites test %s, which no *_test.go declares", r.ID, tok)
 			}
 		}
@@ -384,6 +442,17 @@ func checkNAProof(r MatrixRow, ir InventoryRow) error {
 			return fmt.Errorf("parity: %s is n/a but its behaviour names no exit code and no stderr string", r.ID)
 		default:
 			return fmt.Errorf("parity: %s is n/a but its behaviour names no backticked literal and does not say never", r.ID)
+		}
+	}
+	return nil
+}
+
+// checkNABehaviour rejects the vague prose AC-062 forbids on an n/a row.
+func checkNABehaviour(r MatrixRow) error {
+	low := strings.ToLower(r.Behaviour)
+	for _, generic := range []string{"not applicable", "unsupported", "no equivalent"} {
+		if strings.Contains(low, generic) {
+			return fmt.Errorf("parity: %s is n/a but its behaviour is the generic phrase %q; name the exact refusal or absence", r.ID, generic)
 		}
 	}
 	return nil

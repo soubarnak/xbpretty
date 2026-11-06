@@ -22,11 +22,17 @@ const removePlanFixture = "wget-1.25.0_1 remove x86_64 https://repo-default.void
 // xbps 0.60.7 (see testdata/parser/README.md).
 const planFixture = "figlet-2.2.5_6 install x86_64 https://repo-default.voidlinux.org/current 672593 94372\n"
 
+// localPlanFixture is the same row on a filesystem repository. FR-036 excludes
+// it from the predownload set, so a built-binary test can run a real-looking
+// transaction with no network while still rendering a summary.
+const localPlanFixture = "figlet-2.2.5_6 install x86_64 /var/cache/xbps 672593 94372\n"
+
 // env is one test's world: a config file pointing at stub xbps binaries,
 // fixture variables for those stubs, and the command log.
 type env struct {
 	t       *testing.T
 	dir     string
+	stubDir string
 	logPath string
 	tty     bool
 	root    bool
@@ -43,18 +49,12 @@ func newEnv(t *testing.T) *env {
 	if err := os.MkdirAll(filepath.Join(cfgDir, "xbpretty"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := strings.Join([]string{
-		"xbps_install_path = \"" + filepath.Join(stubDir, "xbps-install") + "\"",
-		"xbps_remove_path = \"" + filepath.Join(stubDir, "xbps-remove") + "\"",
-		"xbps_query_path = \"" + filepath.Join(stubDir, "xbps-query") + "\"",
-		"color = \"never\"",
-	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(cfgDir, "xbpretty", "config.toml"), []byte(cfg), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	e := &env{t: t, dir: dir, stubDir: stubDir, logPath: filepath.Join(dir, "commands.log")}
+	e.writeConfig("")
 	t.Setenv("XDG_CONFIG_HOME", cfgDir)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
 	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm")
 	t.Setenv("XB_STUB_LOG", filepath.Join(dir, "commands.log"))
 	t.Setenv("XB_STUB_STDOUT", planFixture)
 	t.Setenv("XB_STUB_STDERR", "")
@@ -64,7 +64,16 @@ func newEnv(t *testing.T) *env {
 	t.Setenv("XB_STUB_REVDEPS", "")
 	t.Setenv("XB_STUB_QUERY", "figlet-2.2.5_6\n657KB\n")
 
-	e := &env{t: t, dir: dir, logPath: filepath.Join(dir, "commands.log")}
+	// The predownload pass must never reach the machine's real cache or the
+	// network from a unit test. A cache path that cannot be a directory makes
+	// the pass skip itself; predownload tests point cacheDirFn at a temp dir.
+	noCache := filepath.Join(dir, "no-cache")
+	if err := os.WriteFile(noCache, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	origCacheDir := cacheDirFn
+	cacheDirFn = func() string { return noCache }
+	t.Cleanup(func() { cacheDirFn = origCacheDir })
 
 	origTerminal, origEuid := isTerminalFn, euidFn
 	isTerminalFn = func(f *os.File) bool { return e.tty }
@@ -111,6 +120,13 @@ func (e *env) setAnswers(answers string) {
 // set writes a stub environment variable for the rest of the test.
 func (e *env) set(key, value string) { e.t.Setenv(key, value) }
 
+// disableAutoRemove pins [Nala] auto_remove = false for tests that predate
+// FR-016's implicit orphan transaction and assert only the primary argv.
+func (e *env) disableAutoRemove() {
+	e.t.Helper()
+	e.writeConfig("", "", "[Nala]", "auto_remove = false")
+}
+
 // run invokes Main and returns its exit code, stdout and stderr.
 func (e *env) run(argv ...string) (int, string, string) {
 	e.t.Helper()
@@ -135,8 +151,22 @@ func (e *env) run(argv ...string) (int, string, string) {
 	return code, string(out), string(errs)
 }
 
-// commands returns the argv of every stub xbps invocation.
+// commands returns the argv of every stub xbps invocation, without the
+// binary name the stubs now record.
 func (e *env) commands() []string {
+	e.t.Helper()
+	var out []string
+	for _, line := range e.commandsWithBinary() {
+		if _, args := splitStubLine(line); args != "" {
+			out = append(out, args)
+		}
+	}
+	return out
+}
+
+// commandsWithBinary returns each stub invocation as "<binary> <argv>" so a
+// test can prove which xbps program actually ran.
+func (e *env) commandsWithBinary() []string {
 	e.t.Helper()
 	raw, err := os.ReadFile(e.logPath)
 	if err != nil {
@@ -152,6 +182,12 @@ func (e *env) commands() []string {
 		}
 	}
 	return out
+}
+
+// splitStubLine splits one stub log line into its binary name and its argv.
+func splitStubLine(line string) (binary, args string) {
+	binary, args, _ = strings.Cut(line, " ")
+	return binary, args
 }
 
 func TestAC001NonRootSummaryHintAndExit(t *testing.T) {
@@ -194,7 +230,7 @@ func TestAC004PipedStdinHintsYes(t *testing.T) {
 func TestAC005DryRunExecutesNothing(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
-	code, out, errs := e.run("xbpretty", "install", "figlet", "-n")
+	code, out, errs := e.run("xbpretty", "install", "figlet", "--dry-run")
 	if code != 0 {
 		t.Errorf("exit = %d, want 0", code)
 	}
@@ -215,7 +251,7 @@ func TestAC005DryRunExecutesNothing(t *testing.T) {
 func TestAC011NothingToDo(t *testing.T) {
 	e := newEnv(t)
 	e.set("XB_STUB_STDOUT", "")
-	code, out, errs := e.run("xbpretty", "install", "figlet", "-n")
+	code, out, errs := e.run("xbpretty", "install", "figlet", "--dry-run")
 	if code != 0 {
 		t.Errorf("exit = %d, want 0", code)
 	}
@@ -233,13 +269,13 @@ func TestAC011NothingToDo(t *testing.T) {
 func TestAC007UnprivilegedUpgradePlanOmitsSyncAndWarns(t *testing.T) {
 	e := newEnv(t)
 	e.root = false
-	code, _, errs := e.run("xbpretty", "upgrade", "-n")
+	code, _, errs := e.run("xbpretty", "upgrade", "--dry-run")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
 	cmds := e.transactionCalls()
-	if len(cmds) != 1 || cmds[0] != "-un" {
-		t.Errorf("commands = %q, want one -un dry run", cmds)
+	if len(cmds) != 1 || cmds[0] != "-n -u" {
+		t.Errorf("commands = %q, want one -n -u dry run", cmds)
 	}
 	if !strings.Contains(errs, "stale") {
 		t.Errorf("missing the stale-index warning:\n%s", errs)
@@ -267,29 +303,29 @@ func rowLine(out, name string) string {
 	return ""
 }
 
-// TestAC009AutoremoveOrphansLandInRemoveGroup drives the captured
-// `xbps-remove -on` plan (testdata/parser/0607/autoremove.txt): the orphans
-// are the Remove group, each row carrying the bytes its removal frees.
-func TestAC009AutoremoveOrphansLandInRemoveGroup(t *testing.T) {
+// TestAC009AutoremoveOrphansLandInAutoRemoveGroup drives the captured
+// `xbps-remove -on` plan (testdata/parser/0607/autoremove.txt): the orphans are
+// nala's AutoRemove group, each row carrying the bytes its removal frees.
+func TestAC009AutoremoveOrphansLandInAutoRemoveGroup(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.set("XB_STUB_STDOUT", planCapture(t, "0607/autoremove.txt"))
-	code, out, errs := e.run("xbpretty", "autoremove", "-n")
+	code, out, errs := e.run("xbpretty", "autoremove", "--dry-run")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
-	if cmds := e.transactionCalls(); len(cmds) != 1 || cmds[0] != "-on" {
-		t.Errorf("commands = %q, want one -on dry run", cmds)
+	if cmds := e.transactionCalls(); len(cmds) != 1 || cmds[0] != "-n -o" {
+		t.Errorf("commands = %q, want one -n -o dry run", cmds)
 	}
-	if !strings.Contains(out, "Remove") {
-		t.Errorf("no Remove group:\n%s", out)
+	if !strings.Contains(out, "\n AutoRemove\n") {
+		t.Errorf("no AutoRemove group:\n%s", out)
 	}
 	for _, row := range []struct{ name, version, size string }{
-		{"cups", "2.4.19_1", "13.1 MiB"},
-		{"font-ibm-plex-ttf", "6.4.0_2", "58.3 MiB"},
-		{"lsof", "4.99.7_1", "333.4 KiB"},
-		{"steam-udev-rules", "1.0.0.61+20260625_1", "17.2 KiB"},
-		{"zenity", "4.0.5_1", "10.5 MiB"},
+		{"cups", "2.4.19_1", "13 MiB"},
+		{"font-ibm-plex-ttf", "6.4.0_2", "58 MiB"},
+		{"lsof", "4.99.7_1", "333 KiB"},
+		{"steam-udev-rules", "1.0.0.61+20260625_1", "17 KiB"},
+		{"zenity", "4.0.5_1", "11 MiB"},
 	} {
 		line := rowLine(out, row.name)
 		if line == "" {
@@ -300,10 +336,10 @@ func TestAC009AutoremoveOrphansLandInRemoveGroup(t *testing.T) {
 			t.Errorf("%s row = %q, want version %s and size %s", row.name, line, row.version, row.size)
 		}
 	}
-	if !strings.Contains(out, "5 remove") {
-		t.Errorf("footer is missing the remove count:\n%s", out)
+	if !strings.Contains(out, "AutoRemove 5") {
+		t.Errorf("footer is missing the AutoRemove count:\n%s", out)
 	}
-	if !strings.Contains(out, "-82.3 MiB disk") {
+	if !strings.Contains(out, "Disk space to free: 82 MiB") {
 		t.Errorf("footer is missing the freed disk total:\n%s", out)
 	}
 }
@@ -314,7 +350,7 @@ func TestAC015FailureGetsHint(t *testing.T) {
 	e.set("XB_STUB_STDOUT", "")
 	e.set("XB_STUB_STDERR", "ERROR: Package 'figlet' not found in repository pool.\n")
 	e.set("XB_STUB_PLAN_EXIT", "2")
-	code, _, errs := e.run("xbpretty", "install", "figlet", "-n")
+	code, _, errs := e.run("xbpretty", "install", "figlet", "--dry-run")
 	if code != 2 {
 		t.Errorf("exit = %d, want 2 (xbps's code)", code)
 	}
@@ -351,8 +387,8 @@ func TestFailureWrittenToStdoutGetsHint(t *testing.T) {
 		exit    string
 		want    string
 	}{
-		{"not installed", "0607/not-installed", []string{"remove", "this-package-does-not-exist-xyz", "-n"}, "2", "nothing to remove"},
-		{"outdated xbps text on stdout", "0591/xbps-unsigned-update-upgrade", []string{"upgrade", "-n"}, "16", "xbps-install -u xbps"},
+		{"not installed", "0607/not-installed", []string{"remove", "this-package-does-not-exist-xyz", "--dry-run"}, "2", "nothing to remove"},
+		{"outdated xbps text on stdout", "0591/xbps-unsigned-update-upgrade", []string{"upgrade", "--dry-run"}, "16", "xbps-install -u xbps"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -389,7 +425,7 @@ func TestInstallRefusedOnStderrGetsHint(t *testing.T) {
 	e.set("XB_STUB_STDOUT", "")
 	e.set("XB_STUB_STDERR", string(raw))
 	e.set("XB_STUB_PLAN_EXIT", "16")
-	code, _, errs := e.run("xbpretty", "install", "-n", "htop", "curl", "wget")
+	code, _, errs := e.run("xbpretty", "install", "--dry-run", "htop", "curl", "wget")
 	if code != 16 {
 		t.Errorf("exit = %d, want 16 (xbps's code)", code)
 	}
@@ -408,7 +444,7 @@ func TestStdoutMessageOnTheWrongCodeGetsNoHint(t *testing.T) {
 	e.root = true
 	e.set("XB_STUB_STDOUT", hintCapture(t, "0607/not-installed"))
 	e.set("XB_STUB_PLAN_EXIT", "1")
-	code, _, errs := e.run("xbpretty", "remove", "this-package-does-not-exist-xyz", "-n")
+	code, _, errs := e.run("xbpretty", "remove", "this-package-does-not-exist-xyz", "--dry-run")
 	if code != 1 {
 		t.Errorf("exit = %d, want 1", code)
 	}
@@ -423,7 +459,7 @@ func TestAC016UnmatchedFailureGetsNoHint(t *testing.T) {
 	e.set("XB_STUB_STDOUT", "")
 	e.set("XB_STUB_STDERR", "ERROR: something unprecedented happened.\n")
 	e.set("XB_STUB_PLAN_EXIT", "2")
-	code, _, errs := e.run("xbpretty", "install", "figlet", "-n")
+	code, _, errs := e.run("xbpretty", "install", "figlet", "--dry-run")
 	if code != 2 {
 		t.Errorf("exit = %d, want 2", code)
 	}
@@ -442,7 +478,7 @@ func TestAC017FailedRemoveListsDependents(t *testing.T) {
 	e.set("XB_STUB_STDOUT", removePlanFixture)
 	e.set("XB_STUB_REVDEPS", "bar-2.0_1\nbaz-3.0_1\n")
 	// The dry run succeeds and tells us which packages are targeted.
-	code, _, errs := e.run("xbpretty", "remove", "wget", "-n")
+	code, _, errs := e.run("xbpretty", "remove", "wget", "--dry-run")
 	if code != 0 {
 		t.Fatalf("dry-run exit = %d, want 0", code)
 	}
@@ -475,6 +511,29 @@ func ranRealCommand(e *env) bool {
 	return false
 }
 
+// writeConfig rewrites the default layer in the rev 6 schema. An empty
+// installPath keeps the shared stub; extra lines are appended after [Color].
+func (e *env) writeConfig(installPath string, extra ...string) {
+	e.t.Helper()
+	if installPath == "" {
+		installPath = filepath.Join(e.stubDir, "xbps-install")
+	}
+	lines := []string{
+		"[Xbps]",
+		`install_path = "` + installPath + `"`,
+		`remove_path = "` + filepath.Join(e.stubDir, "xbps-remove") + `"`,
+		`query_path = "` + filepath.Join(e.stubDir, "xbps-query") + `"`,
+		"",
+		"[Color]",
+		`mode = "Never"`,
+	}
+	lines = append(lines, extra...)
+	cfg := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(e.dir, "config", "xbpretty", "config.toml"), []byte(cfg), 0o644); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
 // TestAC019ConfigAssumeYesSkipsPrompt drives the config key, not a flag, at a
 // run that actually reaches the prompt: an empty plan returns at FR-015's
 // "Nothing to do." before the question is asked, so a test built on one can
@@ -488,7 +547,7 @@ func TestAC019ConfigAssumeYesSkipsPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfg, append(data, []byte("assume_yes = true\n")...), 0o644); err != nil {
+	if err := os.WriteFile(cfg, append(data, []byte("\n[Nala]\nassume_yes = true\n")...), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	code, out, errs := e.run("xbpretty", "install", "figlet")
@@ -528,15 +587,18 @@ func TestAC018MissingXBPSBinaryExitsOne(t *testing.T) {
 func TestAC020MalformedConfigExits2(t *testing.T) {
 	e := newEnv(t)
 	cfg := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
-	if err := os.WriteFile(cfg, []byte("color = \"blue\"\n"), 0o644); err != nil {
+	if err := os.WriteFile(cfg, []byte("[Color]\nmode = \"blue\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	code, _, errs := e.run("xbpretty", "install", "figlet")
 	if code != 2 {
 		t.Errorf("exit = %d, want 2", code)
 	}
-	if !strings.Contains(errs, "line 1") {
-		t.Errorf("missing the parse error line number:\n%s", errs)
+	if !strings.Contains(errs, "xbpretty: config ") || !strings.Contains(errs, ":2:") {
+		t.Errorf("missing the config path and line number:\n%s", errs)
+	}
+	if !strings.Contains(errs, "mode") {
+		t.Errorf("the error does not name the key:\n%s", errs)
 	}
 }
 
@@ -545,7 +607,7 @@ func TestAC021StdoutHoldsOnlyTheSummary(t *testing.T) {
 	e.root = true
 	e.tty = true
 	e.set("XB_STUB_STDOUT", planFixture)
-	_, out, errs := e.run("xbpretty", "install", "figlet", "-n")
+	_, out, errs := e.run("xbpretty", "install", "figlet", "--dry-run")
 	if strings.Contains(out, "\x1b[") {
 		t.Errorf("stdout carries ANSI escapes:\n%q", out)
 	}
@@ -565,20 +627,20 @@ func TestAC010RemovalFreesWithNoDownload(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.set("XB_STUB_STDOUT", removePlanFixture)
-	code, out, errs := e.run("xbpretty", "remove", "wget", "-n")
+	code, out, errs := e.run("xbpretty", "remove", "wget", "--dry-run")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
 	if strings.Contains(out, "805.3 KiB") {
 		t.Errorf("the removal is shown by its download size:\n%s", out)
 	}
-	if !strings.Contains(out, "wget  1.25.0_1  3.5 MiB") {
+	if line := rowLine(out, "wget"); !strings.Contains(line, "1.25.0_1") || !strings.Contains(line, "4 MiB") {
 		t.Errorf("the removal's freed bytes are missing:\n%s", out)
 	}
 	if strings.Contains(out, "download") {
 		t.Errorf("the footer reports a download for a removal:\n%s", out)
 	}
-	if !strings.Contains(out, "-3.5 MiB disk") {
+	if !strings.Contains(out, "Disk space to free: 4 MiB") {
 		t.Errorf("the footer is missing the freed disk delta:\n%s", out)
 	}
 }
@@ -594,7 +656,7 @@ func TestAC023PassthroughReachesBothRuns(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
-	if !strings.Contains(errs, "-Sn figlet -f figlet") {
+	if !strings.Contains(errs, "-n figlet -f figlet") {
 		t.Errorf("passthrough missing from the dry run:\n%s", errs)
 	}
 	if !strings.Contains(errs, "-y figlet -f figlet") {
@@ -605,8 +667,8 @@ func TestAC023PassthroughReachesBothRuns(t *testing.T) {
 func TestAC024VerbosePrintsEachCommand(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
-	_, _, errs := e.run("xbpretty", "install", "figlet", "-n", "-v")
-	if !strings.Contains(errs, "verbose:") || !strings.Contains(errs, " -Sn figlet") {
+	_, _, errs := e.run("xbpretty", "install", "figlet", "--dry-run", "-v")
+	if !strings.Contains(errs, "verbose:") || !strings.Contains(errs, " -n figlet") {
 		t.Errorf("dry-run command not printed:\n%s", errs)
 	}
 	if !strings.Contains(errs, "xbps-query") {
@@ -632,8 +694,9 @@ func TestAC022Argv0Dispatch(t *testing.T) {
 	}
 }
 
-func TestAC002EnterRunsDryRunThenRealWithoutSecondSync(t *testing.T) {
+func TestAC002InstallNeverSyncsInsideTheTransaction(t *testing.T) {
 	e := newEnv(t)
+	e.disableAutoRemove()
 	e.root = true
 	e.tty = true
 	e.setAnswers("\n")
@@ -654,14 +717,17 @@ func TestAC002EnterRunsDryRunThenRealWithoutSecondSync(t *testing.T) {
 			real = c
 		}
 	}
-	if !strings.Contains(plan, "-Sn") {
-		t.Errorf("dry run = %q, want -Sn (index synced as root)", plan)
+	// FR-007: install does not sync by default.
+	if plan != "-n figlet" {
+		t.Errorf("dry run = %q, want -n figlet", plan)
 	}
-	if !strings.Contains(real, "-y") {
-		t.Errorf("real run = %q, want -y", real)
+	if real != "-y figlet" {
+		t.Errorf("real run = %q, want -y figlet", real)
 	}
-	if strings.Contains(real, "-S") {
-		t.Errorf("real run = %q, must not sync a second time (FR-008)", real)
+	for _, c := range cmds {
+		if c == "-S" {
+			t.Errorf("install ran a sync step it never asked for: %q", c)
+		}
 	}
 }
 
@@ -671,9 +737,17 @@ func TestAC003PromptAnswers(t *testing.T) {
 		answers string
 		want    int
 		ranReal bool
+		wantErr string
 	}{
-		{"decline exits 0 without running", "n\n", 0, false},
-		{"anything else re-asks then accepts", "x\ny\n", 0, true},
+		{"enter proceeds", "\n", 0, true, ""},
+		{"y proceeds", "y\n", 0, true, ""},
+		{"Y proceeds", "Y\n", 0, true, ""},
+		{"yes proceeds", "yes\n", 0, true, ""},
+		{"n refuses", "n\n", 1, false, "xbpretty: user refused confirmation"},
+		{"N refuses", "N\n", 1, false, "xbpretty: user refused confirmation"},
+		{"no refuses", "no\n", 1, false, "xbpretty: user refused confirmation"},
+		{"EOF refuses", "", 1, false, "xbpretty: user refused confirmation"},
+		{"anything else is invalid", "x\n", 1, false, "xbpretty: 'x' is not a valid response"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -683,7 +757,16 @@ func TestAC003PromptAnswers(t *testing.T) {
 			e.setAnswers(tt.answers)
 			code, _, errs := e.run("xbpretty", "install", "figlet")
 			if code != tt.want {
-				t.Errorf("exit = %d, want %d", code, tt.want)
+				t.Errorf("exit = %d, want %d\n%s", code, tt.want, errs)
+			}
+			if !strings.Contains(errs, "Do you want to continue? [Y/n] ") {
+				t.Errorf("the exact prompt bytes are missing:\n%q", errs)
+			}
+			if tt.wantErr != "" && !strings.Contains(errs, tt.wantErr) {
+				t.Errorf("stderr is missing %q:\n%s", tt.wantErr, errs)
+			}
+			if tt.wantErr != "" && strings.Count(errs, "Do you want to continue? [Y/n] ") != 1 {
+				t.Errorf("the prompt was shown more than once:\n%s", errs)
 			}
 			ranReal := false
 			for _, c := range e.commands() {
@@ -693,11 +776,6 @@ func TestAC003PromptAnswers(t *testing.T) {
 			}
 			if ranReal != tt.ranReal {
 				t.Errorf("real run executed = %v, want %v (commands: %q)", ranReal, tt.ranReal, e.commands())
-			}
-			if tt.name == "anything else re-asks then accepts" {
-				if n := strings.Count(errs, "[Y/n]"); n != 2 {
-					t.Errorf("prompt shown %d times, want 2:\n%s", n, errs)
-				}
 			}
 		})
 	}
@@ -728,10 +806,10 @@ func TestAC006YesSkipsThePrompt(t *testing.T) {
 	}
 }
 
-func TestAC007UnprivilegedDryRunOmitsSyncAndWarns(t *testing.T) {
+func TestAC007UnprivilegedUpgradeDryRunOmitsSyncAndWarns(t *testing.T) {
 	e := newEnv(t)
 	e.root = false
-	code, out, errs := e.run("xbpretty", "install", "figlet", "-n")
+	code, out, errs := e.run("xbpretty", "upgrade", "--dry-run")
 	if code != 0 {
 		t.Errorf("exit = %d, want 0", code)
 	}
@@ -746,38 +824,33 @@ func TestAC007UnprivilegedDryRunOmitsSyncAndWarns(t *testing.T) {
 		t.Fatal("xbps was never called")
 	}
 	for _, c := range cmds {
-		if strings.Contains(c, "-S") {
+		if c == "-S" || strings.Contains(c, "-S") {
 			t.Errorf("unprivileged plan refreshed the index: %q", c)
 		}
 	}
 }
 
-func TestAC008UpdateStreamsWithoutSummaryOrPrompt(t *testing.T) {
+func TestAC009UpdateSyncsThenCountsWithoutSummaryOrPrompt(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
-	e.set("XB_STUB_STDOUT", "")
+	e.set("XB_STUB_STDOUT", planCapture(t, "0607/upgrade.txt"))
 	e.setAnswers("n\n")
 	code, out, errs := e.run("xbpretty", "update")
 	if code != 0 {
-		t.Errorf("exit = %d, want 0", code)
+		t.Errorf("exit = %d, want 0\n%s", code, errs)
 	}
-	if out != "" {
-		t.Errorf("update printed a summary to stdout:\n%q", out)
+	if !strings.Contains(out, "package(s) can be upgraded. Run 'xbp list --upgradable' to see them.") {
+		t.Errorf("update printed no count line:\n%q", out)
 	}
-	if strings.Contains(errs, "[Y/n]") {
+	if strings.Contains(out, "Upgrade\n") || strings.Contains(out, "Summary") {
+		t.Errorf("update printed a plan summary:\n%q", out)
+	}
+	if strings.Contains(errs, "Do you want to continue?") {
 		t.Errorf("update prompted:\n%s", errs)
 	}
-	var sawSync bool
-	for _, c := range e.commands() {
-		if strings.HasPrefix(c, "-S") || strings.Contains(c, " -S") {
-			sawSync = true
-		}
-		if strings.Contains(c, "-n") {
-			t.Errorf("update ran a dry run: %q", c)
-		}
-	}
-	if !sawSync {
-		t.Errorf("update did not sync: %q", e.commands())
+	cmds := e.transactionCalls()
+	if len(cmds) != 2 || cmds[0] != "-S" || cmds[1] != "-n -u" {
+		t.Errorf("commands = %q, want -S then -n -u", cmds)
 	}
 }
 
@@ -928,7 +1001,13 @@ func TestAC013RebootHint(t *testing.T) {
 			e.root = true
 			e.set("XB_STUB_STDOUT", tt.plan)
 			e.set("XB_STUB_OLD", tt.old)
-			code, out, errs := e.run("xbpretty", tt.cmd, "-y")
+			var code int
+			var out, errs string
+			if tt.cmd == "install" {
+				code, out, errs = e.run("xbpretty", tt.cmd, "figlet", "-y")
+			} else {
+				code, out, errs = e.run("xbpretty", tt.cmd, "-y")
+			}
 			if code != 0 {
 				t.Fatalf("exit = %d, want 0\n%s", code, errs)
 			}
@@ -968,8 +1047,8 @@ func TestParseArgsFlags(t *testing.T) {
 			name: "short cluster",
 			argv: []string{"install", "-nv", "foo"},
 			want: func(t *testing.T, o *options, rest []string) {
-				if !o.dryRun || !o.verbose {
-					t.Errorf("cluster flags not parsed: %+v", o)
+				if !o.assumeNo || !o.verbose || o.dryRun {
+					t.Errorf("cluster flags not parsed as -n/--assume-no + -v: %+v", o)
 				}
 				if len(o.args) != 1 || o.args[0] != "foo" {
 					t.Errorf("args = %v", o.args)
@@ -1005,7 +1084,7 @@ func TestParseArgsFlags(t *testing.T) {
 		},
 		{
 			name: "flags before command",
-			argv: []string{"-n", "install", "foo"},
+			argv: []string{"--dry-run", "install", "foo"},
 			want: func(t *testing.T, o *options, rest []string) {
 				if !o.dryRun || o.command != "install" {
 					t.Errorf("dryRun = %v command = %q", o.dryRun, o.command)
@@ -1052,13 +1131,15 @@ func upgradePlan(t *testing.T, e *env, argv ...string) string {
 	return cmds[0]
 }
 
-// transactionCalls returns the command log without the `xbps-query -H` hold
-// lookup every summary makes.
+// transactionCalls returns the command log without the xbps-query lookups
+// (hold state, old versions and installed guards) every transaction makes.
 func (e *env) transactionCalls() []string {
 	e.t.Helper()
 	var out []string
 	for _, c := range e.commands() {
-		if c == "-H" {
+		switch {
+		case c == "-H", c == "-l", c == "-m", c == "--list-repolock-pkgs",
+			strings.HasPrefix(c, "-p "), strings.HasPrefix(c, "-X "):
 			continue
 		}
 		out = append(out, c)
@@ -1070,29 +1151,42 @@ func (e *env) transactionCalls() []string {
 // the same -S rule as install, written as the single token the acceptance
 // criteria pin.
 func TestUpgradeHonoursTheSyncRules(t *testing.T) {
-	t.Run("root plan refreshes the index", func(t *testing.T) {
+	t.Run("root plan has a separate sync step and a -n -u transaction", func(t *testing.T) {
 		e := newEnv(t)
 		e.root = true
-		if got := upgradePlan(t, e, "xbpretty", "upgrade", "-n"); got != "-Sun" {
-			t.Errorf("plan = %q, want -Sun", got)
+		code, _, errs := e.run("xbpretty", "upgrade", "--dry-run")
+		if code != 0 {
+			t.Fatalf("exit = %d\n%s", code, errs)
+		}
+		if cmds := e.transactionCalls(); len(cmds) != 2 || cmds[0] != "-S" || cmds[1] != "-n -u" {
+			t.Errorf("commands = %q, want -S then -n -u", cmds)
 		}
 	})
-	t.Run("unprivileged plan drops it", func(t *testing.T) {
+	t.Run("unprivileged plan drops the sync", func(t *testing.T) {
 		e := newEnv(t)
 		e.root = false
-		if got := upgradePlan(t, e, "xbpretty", "upgrade", "-n"); got != "-un" {
-			t.Errorf("plan = %q, want -un (AC-007)", got)
+		code, _, errs := e.run("xbpretty", "upgrade", "--dry-run")
+		if code != 0 {
+			t.Fatalf("exit = %d\n%s", code, errs)
+		}
+		if cmds := e.transactionCalls(); len(cmds) != 1 || cmds[0] != "-n -u" {
+			t.Errorf("commands = %q, want one -n -u dry run", cmds)
 		}
 	})
 	t.Run("--no-sync drops it as root too", func(t *testing.T) {
 		e := newEnv(t)
 		e.root = true
-		if got := upgradePlan(t, e, "xbpretty", "upgrade", "-n", "--no-sync"); got != "-un" {
-			t.Errorf("plan = %q, want -un", got)
+		code, _, errs := e.run("xbpretty", "upgrade", "--dry-run", "--no-sync")
+		if code != 0 {
+			t.Fatalf("exit = %d\n%s", code, errs)
+		}
+		if cmds := e.transactionCalls(); len(cmds) != 1 || cmds[0] != "-n -u" {
+			t.Errorf("commands = %q, want one -n -u dry run", cmds)
 		}
 	})
-	t.Run("the real run does not sync a second time", func(t *testing.T) {
+	t.Run("the real run has no -S in its argv", func(t *testing.T) {
 		e := newEnv(t)
+		e.disableAutoRemove()
 		e.root = true
 		e.tty = true
 		e.setAnswers("\n")
@@ -1101,14 +1195,11 @@ func TestUpgradeHonoursTheSyncRules(t *testing.T) {
 			t.Fatalf("exit = %d, want 0\n%s", code, errs)
 		}
 		cmds := e.transactionCalls()
-		if len(cmds) != 2 {
-			t.Fatalf("commands = %q, want a dry run and a real run", cmds)
+		if len(cmds) != 3 {
+			t.Fatalf("commands = %q, want a sync, a dry run and a real run", cmds)
 		}
-		if cmds[0] != "-Sun" {
-			t.Errorf("plan = %q, want -Sun", cmds[0])
-		}
-		if cmds[1] != "-y -u" {
-			t.Errorf("real run = %q, want -y -u (FR-008: no second -S)", cmds[1])
+		if cmds[0] != "-S" || cmds[1] != "-n -u" || cmds[2] != "-y -u" {
+			t.Errorf("commands = %q, want -S, -n -u, -y -u", cmds)
 		}
 	})
 }
@@ -1119,12 +1210,12 @@ func TestAutoremoveNeverSyncs(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.set("XB_STUB_STDOUT", removePlanFixture)
-	code, _, errs := e.run("xbpretty", "autoremove", "-n")
+	code, _, errs := e.run("xbpretty", "autoremove", "--dry-run")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
-	if cmds := e.transactionCalls(); len(cmds) != 1 || cmds[0] != "-on" {
-		t.Errorf("commands = %q, want one -on dry run", cmds)
+	if cmds := e.transactionCalls(); len(cmds) != 1 || cmds[0] != "-n -o" {
+		t.Errorf("commands = %q, want one -n -o dry run", cmds)
 	}
 }
 
@@ -1143,20 +1234,21 @@ func TestPassthruKeepsTheArgv0Command(t *testing.T) {
 		t.Errorf("passthru = %v, want [-F figlet]", o.passthru)
 	}
 
-	// Without an argv[0] command the same form still means install.
+	// Without an argv[0] command the same form carries no command: the
+	// caller must not invent one, so Run returns a usage error.
 	o, err = parseArgs([]string{"--", "figlet"}, "")
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
 	}
-	if o.command != "install" || len(o.args) != 1 || o.args[0] != "figlet" {
-		t.Errorf("command = %q args = %v, want install [figlet]", o.command, o.args)
+	if o.command != "" || len(o.passthru) != 1 || o.passthru[0] != "figlet" {
+		t.Errorf("command = %q passthru = %v, want no command and [figlet]", o.command, o.passthru)
 	}
 
 	// Through the link name the pass-through reaches xbps-remove unchanged.
 	e := newEnv(t)
 	e.root = true
 	e.set("XB_STUB_STDOUT", removePlanFixture)
-	code, _, errs := e.run("xbp-remove", "-n", "--", "-F", "figlet")
+	code, _, errs := e.run("xbp-remove", "--dry-run", "--", "-F", "figlet")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
@@ -1202,7 +1294,7 @@ func TestStaleIndexOnASuccessfulPlanIsExplained(t *testing.T) {
 	e.set("XB_STUB_STDOUT", "")
 	e.set("XB_STUB_STDERR", "ERROR: failed to open repodata: /var/db/xbps/x86_64-repodata: "+
 		"Invalid or incomplete multibyte or wide character\n")
-	code, out, errs := e.run("xbpretty", "upgrade", "-n")
+	code, out, errs := e.run("xbpretty", "upgrade", "--dry-run")
 	if code != 0 {
 		t.Errorf("exit = %d, want 0 (xbps's own code)", code)
 	}
@@ -1217,22 +1309,25 @@ func TestStaleIndexOnASuccessfulPlanIsExplained(t *testing.T) {
 	}
 }
 
-// TestSuccessfulPlanWithUnmatchedStderrStaysQuiet is the other half of the
-// same rule: a successful dry run whose stderr matches nothing gets no
-// guessed hint, and nothing is echoed back at the user (FR-017, AC-016).
-func TestSuccessfulPlanWithUnmatchedStderrStaysQuiet(t *testing.T) {
+// TestSuccessfulPlanForwardsUnmatchedStderr is §3.2.3: a successful dry run
+// still forwards xbps's stderr to stderr, while an unmatched failure gets no
+// guessed hint (FR-017, AC-016).
+func TestSuccessfulPlanForwardsUnmatchedStderr(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.set("XB_STUB_STDERR", "WARNING: something harmless happened\n")
-	code, out, errs := e.run("xbpretty", "install", "figlet", "-n")
+	code, out, errs := e.run("xbpretty", "install", "figlet", "--dry-run")
 	if code != 0 {
 		t.Errorf("exit = %d, want 0", code)
 	}
 	if !strings.Contains(out, "Install") {
 		t.Errorf("summary missing:\n%s", out)
 	}
-	if errs != "" {
-		t.Errorf("stderr is not empty:\n%s", errs)
+	if !strings.Contains(errs, "WARNING: something harmless happened") {
+		t.Errorf("the successful plan's stderr was not forwarded:\n%s", errs)
+	}
+	if strings.Contains(errs, "hint:") {
+		t.Errorf("guessed a hint for unmatched stderr:\n%s", errs)
 	}
 }
 
@@ -1246,20 +1341,20 @@ func TestColorAutoChecksTheTerminalAndNoColor(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		config  string
+		config  config.ColorMode
 		argv    []string
 		tty     bool
 		noColor string
 		want    bool
 	}{
-		{"auto on a terminal", "auto", []string{"--color=auto"}, true, "", true},
-		{"auto off a terminal", "auto", []string{"--color=auto"}, false, "", false},
-		{"auto honours NO_COLOR", "auto", []string{"--color=auto"}, true, "1", false},
-		{"always overrides the terminal", "auto", []string{"--color=always"}, false, "1", true},
-		{"never overrides the terminal", "auto", []string{"--color=never"}, true, "", false},
-		{"the config key still decides", "always", nil, false, "1", true},
-		{"config never wins over the default", "never", nil, true, "", false},
-		{"config auto off a terminal", "auto", nil, false, "", false},
+		{"auto on a terminal", config.ColorAuto, []string{"--color=auto"}, true, "", true},
+		{"auto off a terminal", config.ColorAuto, []string{"--color=auto"}, false, "", false},
+		{"auto honours NO_COLOR", config.ColorAuto, []string{"--color=auto"}, true, "1", false},
+		{"always overrides the terminal", config.ColorAuto, []string{"--color=always"}, false, "1", true},
+		{"never overrides the terminal", config.ColorAuto, []string{"--color=never"}, true, "", false},
+		{"the config key still decides", config.ColorAlways, nil, false, "1", true},
+		{"config never wins over the default", config.ColorNever, nil, true, "", false},
+		{"config auto off a terminal", config.ColorAuto, nil, false, "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1270,8 +1365,77 @@ func TestColorAutoChecksTheTerminalAndNoColor(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseArgs: %v", err)
 			}
-			if got := wantColor(tt.config, opts); got != tt.want {
+			if got := wantColor(tt.config, opts, tt.tty); got != tt.want {
 				t.Errorf("wantColor(%q, %v) = %v, want %v", tt.config, tt.argv, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestColorAlwaysThemesPipedStderr pins FR-057/FR-061's per-stream rule: an
+// explicit always paints the stderr prefix even when stderr is a pipe, and the
+// hint/error prefixes use their Notice/Error roles.
+func TestColorAlwaysThemesPipedStderr(t *testing.T) {
+	e := newEnv(t)
+	e.root = false
+	e.tty = false
+	_, _, errs := e.run("xbpretty", "install", "figlet", "--color=always")
+	if !strings.Contains(errs, "\x1b[1;93mhint: \x1b[0m") {
+		t.Errorf("piped stderr hint is not Notice-themed:\n%q", errs)
+	}
+
+	_, _, errs = e.run("xbpretty", "download", "--color=always")
+	if !strings.Contains(errs, "\x1b[1;91mxbpretty: \x1b[0m") {
+		t.Errorf("piped stderr error is not Error-themed:\n%q", errs)
+	}
+
+	// A parse error happens before options exist; the prefix is still themed
+	// from an explicit --color in argv.
+	code, _, errs := e.run("xbpretty", "install", "--bogus", "--color=always")
+	if code != 2 {
+		t.Fatalf("parse error exit = %d, want 2", code)
+	}
+	if !strings.Contains(errs, "\x1b[1;91mxbpretty: \x1b[0munknown flag --bogus") {
+		t.Errorf("parse-error prefix is not Error-themed:\n%q", errs)
+	}
+}
+
+// TestAutoColorIsPerStream pins FR-057's Auto rule: each stream decides for
+// itself whether it is a TTY, so a TTY stdout with a piped stderr colours only
+// the summary, and the reverse colours only the diagnostic prefix.
+func TestAutoColorIsPerStream(t *testing.T) {
+	for _, only := range []string{"stdout", "stderr"} {
+		t.Run(only+" is the TTY", func(t *testing.T) {
+			e := newEnv(t)
+			e.root = false
+			e.tty = false
+			cfg := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
+			data, err := os.ReadFile(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			updated := strings.Replace(string(data), `mode = "Never"`, `mode = "Auto"`, 1)
+			if err := os.WriteFile(cfg, []byte(updated), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			isTerminalFn = func(f *os.File) bool {
+				if only == "stdout" {
+					return f == os.Stdout
+				}
+				return f == os.Stderr
+			}
+
+			code, out, errs := e.run("xbpretty", "install", "figlet")
+			if code != 1 {
+				t.Fatalf("exit = %d, want 1\n%s", code, errs)
+			}
+			stdoutColoured := strings.Contains(out, "\x1b[")
+			stderrColoured := strings.Contains(errs, "\x1b[")
+			if want := only == "stdout"; stdoutColoured != want {
+				t.Errorf("stdout coloured = %t, want %t:\n%q", stdoutColoured, want, out)
+			}
+			if want := only == "stderr"; stderrColoured != want {
+				t.Errorf("stderr coloured = %t, want %t:\n%q", stderrColoured, want, errs)
 			}
 		})
 	}
@@ -1356,23 +1520,11 @@ func writeSlowChild(t *testing.T, dir, logPath, pidPath string) string {
 	return path
 }
 
-// pointInstallAt rewrites the config so xbps_install_path names another
+// pointInstallAt rewrites the config so [Xbps] install_path names another
 // binary, keeping the other two on the shared stubs.
 func (e *env) pointInstallAt(path string) {
 	e.t.Helper()
-	stubDir, err := filepath.Abs("../../testdata/stub")
-	if err != nil {
-		e.t.Fatal(err)
-	}
-	cfg := strings.Join([]string{
-		"xbps_install_path = \"" + path + "\"",
-		"xbps_remove_path = \"" + filepath.Join(stubDir, "xbps-remove") + "\"",
-		"xbps_query_path = \"" + filepath.Join(stubDir, "xbps-query") + "\"",
-		"color = \"never\"",
-	}, "\n") + "\n"
-	if err := os.WriteFile(filepath.Join(e.dir, "config", "xbpretty", "config.toml"), []byte(cfg), 0o644); err != nil {
-		e.t.Fatal(err)
-	}
+	e.writeConfig(path)
 }
 
 // waitForPID blocks until the streamed child has written its pid.
@@ -1398,51 +1550,63 @@ func waitForPID(t *testing.T, path string) int {
 // TestAC014SignalledChildDecidesTheExitCode drives a real streamed child,
 // interrupts xbpretty, and checks the whole promise AC-014 makes: the child
 // receives the signal and xbpretty exits with the code a shell would report.
+// FR-074 promises both SIGINT and SIGTERM forwarding.
 func TestAC014SignalledChildDecidesTheExitCode(t *testing.T) {
-	e := newEnv(t)
-	e.root = true
-	pidPath := filepath.Join(e.dir, "child.pid")
-	e.pointInstallAt(writeSlowChild(t, e.dir, e.logPath, pidPath))
+	for _, tt := range []struct {
+		name string
+		sig  syscall.Signal
+		want int
+	}{
+		{"SIGINT", syscall.SIGINT, 130},
+		{"SIGTERM", syscall.SIGTERM, 143},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.root = true
+			pidPath := filepath.Join(e.dir, "child.pid")
+			e.pointInstallAt(writeSlowChild(t, e.dir, e.logPath, pidPath))
 
-	// Keep the test binary alive whatever the timing: stream arms its own
-	// handler only once the child has started.
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT)
-	defer signal.Stop(sigs)
+			// Keep the test binary alive whatever the timing: stream arms its
+			// own handler only once the child has started.
+			sigs := make(chan os.Signal, 1)
+			signal.Notify(sigs, tt.sig)
+			defer signal.Stop(sigs)
 
-	done := make(chan int, 1)
-	go func() {
-		code, _, _ := e.run("xbpretty", "update")
-		done <- code
-	}()
+			done := make(chan int, 1)
+			go func() {
+				code, _, _ := e.run("xbpretty", "update")
+				done <- code
+			}()
 
-	childPID := waitForPID(t, pidPath)
-	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+			childPID := waitForPID(t, pidPath)
+			t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
 
-	// Repeat the signal: a signal delivered before stream's handler is
-	// registered is not queued for it.
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		select {
-		case code := <-done:
-			if code != 130 {
-				t.Fatalf("exit = %d, want 130 (128 + SIGINT)", code)
-			}
-			if path, err := config.TransactionLog(); err == nil {
-				if _, err := os.Stat(path); err == nil {
-					t.Error("an interrupted run wrote to the transaction log")
+			// Repeat the signal: a signal delivered before stream's handler
+			// is registered is not queued for it.
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				select {
+				case code := <-done:
+					if code != tt.want {
+						t.Fatalf("exit = %d, want %d", code, tt.want)
+					}
+					if path, err := config.TransactionLogPath(); err == nil {
+						if _, err := os.Stat(path); err == nil {
+							t.Error("an interrupted run wrote to the transaction log")
+						}
+					}
+					return
+				default:
 				}
+				if time.Now().After(deadline) {
+					t.Fatalf("xbpretty did not exit after %s", tt.name)
+				}
+				if err := syscall.Kill(os.Getpid(), tt.sig); err != nil {
+					t.Fatalf("signalling the test process: %v", err)
+				}
+				time.Sleep(50 * time.Millisecond)
 			}
-			return
-		default:
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("xbpretty did not exit after SIGINT")
-		}
-		if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
-			t.Fatalf("signalling the test process: %v", err)
-		}
-		time.Sleep(50 * time.Millisecond)
+		})
 	}
 }
 
@@ -1648,32 +1812,42 @@ func TestStubClassifiesEveryArgvShape(t *testing.T) {
 	}
 }
 
-func TestNalaRoundedContainersInteractive(t *testing.T) {
+func TestNalaInlineSummaryInteractive(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.tty = true
 	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
 	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
-	code, out, errs := e.run("xbpretty", "upgrade", "-n", "--color=auto")
+	code, out, errs := e.run("xbpretty", "upgrade", "--dry-run", "--color=auto")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
 
 	plain := ansiEscape.ReplaceAllString(out, "")
-	if !strings.Contains(plain, "╭── Packages To Upgrade (1)") {
-		t.Errorf("interactive output missing rounded upgrade box:\n%s", out)
+	for _, want := range []string{
+		"================================================================================",
+		" Upgrade",
+		" Package:",
+		"Old Version:",
+		"New Version:",
+		" Summary",
+		" Upgrade 1",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("interactive output missing %q:\n%s", want, out)
+		}
 	}
-	if !strings.Contains(plain, "╭── Summary") {
-		t.Errorf("interactive output missing rounded summary card:\n%s", out)
+	if !strings.Contains(out, "\x1b[1;39mUpgrade\x1b[0m") {
+		t.Errorf("section label is not Highlight:\n%s", out)
 	}
-	if !strings.Contains(out, "\x1b[38;5;202m") {
-		t.Errorf("interactive output missing orange version diff:\n%s", out)
+	if !strings.Contains(out, "\x1b[1;94mxbps\x1b[0m") {
+		t.Errorf("upgrade name is not Secondary:\n%s", out)
 	}
-	if !strings.Contains(out, "\x1b[1;34m") {
-		t.Errorf("interactive output missing blue action color:\n%s", out)
+	if !strings.Contains(out, "\x1b[1;93m8_1\x1b[0m") {
+		t.Errorf("changed version tail is not Notice:\n%s", out)
 	}
-	if !strings.Contains(plain, "0.60.7_1 → 0.60.8_1") {
-		t.Errorf("interactive output missing version arrow delta:\n%s", out)
+	if strings.Contains(out, "\x1b[38;5;202m") || strings.Contains(out, "→") {
+		t.Errorf("retired arrow/ANSI-202 diff is still rendered:\n%s", out)
 	}
 }
 
@@ -1682,7 +1856,7 @@ func TestNalaPlaintextWhenPiped(t *testing.T) {
 	e.root = true
 	e.tty = false
 	e.set("XB_STUB_STDOUT", planCapture(t, "0607/upgrade.txt"))
-	code, out, errs := e.run("xbpretty", "upgrade", "-n")
+	code, out, errs := e.run("xbpretty", "upgrade", "--dry-run")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
@@ -1704,14 +1878,14 @@ func TestNalaPlaintextWhenNoColor(t *testing.T) {
 	e.tty = true
 	e.set("NO_COLOR", "1")
 	e.set("XB_STUB_STDOUT", planCapture(t, "0607/upgrade.txt"))
-	code, out, errs := e.run("xbpretty", "upgrade", "-n")
+	code, out, errs := e.run("xbpretty", "upgrade", "--dry-run")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
 
-	// Interactive with NO_COLOR renders uncolored box layout (Issue 4)
-	if !strings.Contains(out, "╭") || !strings.Contains(out, "╰") || !strings.Contains(out, "│") {
-		t.Errorf("NO_COLOR interactive output missing box border runes:\n%s", out)
+	// Interactive with NO_COLOR keeps the nala frame but emits no ANSI.
+	if !strings.Contains(out, "\n Upgrade\n") || !strings.Contains(out, "\n Summary\n") {
+		t.Errorf("NO_COLOR interactive output missing the nala summary frame:\n%s", out)
 	}
 	if strings.Contains(out, "\x1b[") {
 		t.Errorf("NO_COLOR output contains ANSI escape codes:\n%s", out)
@@ -1725,7 +1899,7 @@ func TestCLIRunDirectSeam(t *testing.T) {
 	e.set("XB_STUB_STDOUT", planCapture(t, "0607/upgrade.txt"))
 
 	var outBuf, errBuf strings.Builder
-	code := Run([]string{"xbpretty", "upgrade", "-n"}, strings.NewReader(""), &outBuf, &errBuf)
+	code := Run([]string{"xbpretty", "upgrade", "--dry-run"}, strings.NewReader(""), &outBuf, &errBuf)
 	if code != 0 {
 		t.Fatalf("Run exit = %d, want 0\n%s", code, errBuf.String())
 	}
@@ -1734,11 +1908,13 @@ func TestCLIRunDirectSeam(t *testing.T) {
 	}
 }
 
+// TestHybridPTYExecutionInteractiveVsNonInteractive pins the stream layout the
+// live surfaces depend on and FR-066's forwarding rule: child output goes to
+// stderr, never to xbpretty's stdout.
 func TestHybridPTYExecutionInteractiveVsNonInteractive(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 
-	// Custom stub script that checks whether stdout is a TTY and whether stderr is a TTY.
 	stubScript := filepath.Join(e.dir, "custom-xbps-install")
 	scriptContent := `#!/bin/sh
 case "${1:-}" in
@@ -1748,7 +1924,6 @@ case "${1:-}" in
     ;;
 esac
 
-# Check TTY status of stdout (fd 1) and stderr (fd 2)
 if [ -t 1 ] && ! [ -t 2 ]; then
   echo "HYBRID_PTY_PIPE_OK"
 elif ! [ -t 1 ] && ! [ -t 2 ]; then
@@ -1761,60 +1936,61 @@ exit 0
 	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	e.pointInstallAt(stubScript)
+	e.writeConfig(stubScript, "[Ui]", `mode = "Plain"`)
 
-	// Case 1: Interactive mode (tty = true, no verbose) -> should spawn PTY on stdout and Pipe on stderr
 	e.tty = true
-	code, out, errs := e.run("xbpretty", "install", "-y", "--no-progress", "figlet")
+	code, out, errs := e.run("xbpretty", "install", "-y", "figlet")
 	if code != 0 {
 		t.Fatalf("interactive run failed code %d: %s", code, errs)
 	}
-	if !strings.Contains(out, "HYBRID_PTY_PIPE_OK") {
+	if !strings.Contains(errs, "HYBRID_PTY_PIPE_OK") {
 		t.Errorf("expected interactive run to use PTY on stdout and pipe on stderr, got out:\n%s\nerr:\n%s", out, errs)
 	}
+	if strings.Contains(out, "HYBRID_PTY_PIPE_OK") {
+		t.Errorf("child output leaked to stdout:\n%s", out)
+	}
 
-	// Case 2: Non-interactive mode (tty = false) -> should fall back to direct pipes
 	e.tty = false
 	code, out, errs = e.run("xbpretty", "install", "-y", "figlet")
 	if code != 0 {
 		t.Fatalf("non-interactive run failed code %d: %s", code, errs)
 	}
-	if !strings.Contains(out, "DIRECT_PIPES_OK") {
+	if !strings.Contains(errs, "DIRECT_PIPES_OK") {
 		t.Errorf("expected non-interactive run to use direct pipes, got out:\n%s\nerr:\n%s", out, errs)
 	}
 
-	// Case 3: Verbose mode with tty = true -> should fall back to direct pipes
 	e.tty = true
 	code, out, errs = e.run("xbpretty", "install", "-v", "-y", "figlet")
 	if code != 0 {
 		t.Fatalf("verbose run failed code %d: %s", code, errs)
 	}
-	if !strings.Contains(out, "DIRECT_PIPES_OK") {
+	if !strings.Contains(errs, "DIRECT_PIPES_OK") {
 		t.Errorf("expected verbose run to use direct pipes, got out:\n%s\nerr:\n%s", out, errs)
 	}
 
-	// Case 4: Interactive mode with progress widget active (default, without --no-progress)
-	// -> child stdout should be consumed by the widget/parser and NOT leaked to stdout!
+	// With the widget active the child stdout is consumed by the parser and
+	// never reaches stdout. There is no completion line any more.
+	e.writeConfig(stubScript)
 	e.tty = true
 	code, out, errs = e.run("xbpretty", "install", "-y", "figlet")
 	if code != 0 {
 		t.Fatalf("interactive run with widget failed code %d: %s", code, errs)
 	}
 	if strings.Contains(out, "HYBRID_PTY_PIPE_OK") {
-		t.Errorf("expected child stdout to be suppressed from stdout when widget is active, got:\n%s", out)
+		t.Errorf("child stdout was not suppressed when the widget is active:\n%s", out)
 	}
-	if !strings.Contains(errs, "Transaction complete:") {
-		t.Errorf("expected completion message on stderr, got:\n%s", errs)
+	if !strings.Contains(errs, "Downloading Packages") {
+		t.Errorf("expected the widget on stderr, got:\n%s", errs)
+	}
+	if strings.Contains(errs, "Transaction complete") {
+		t.Errorf("the widget printed a completion line:\n%s", errs)
 	}
 }
-
 func TestHybridPTYLineBufferingDuringUnpack(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.tty = true
 
-	// Custom stub script that writes a line ending in \n, then sleeps.
-	// In a PTY, line-buffered output is flushed immediately on \n without waiting 4KB.
 	stubScript := filepath.Join(e.dir, "buffering-stub")
 	scriptContent := `#!/bin/sh
 case "${1:-}" in
@@ -1832,32 +2008,27 @@ exit 0
 	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	e.pointInstallAt(stubScript)
+	e.writeConfig(stubScript, "[Ui]", `mode = "Plain"`)
 
-	start := time.Now()
-	code, out, errs := e.run("xbpretty", "install", "-y", "--no-progress", "figlet")
-	duration := time.Since(start)
-
+	code, out, errs := e.run("xbpretty", "install", "-y", "figlet")
 	if code != 0 {
 		t.Fatalf("run failed code %d: %s", code, errs)
 	}
-	if duration < 350*time.Millisecond {
-		t.Logf("child ran in %v", duration)
+	if !strings.Contains(errs, "figlet-2.2.5_6: unpacking ...") {
+		t.Errorf("expected unpacking line on stderr, got:\n%s", errs)
 	}
-	if !strings.Contains(out, "figlet-2.2.5_6: unpacking ...") {
-		t.Errorf("expected unpacking line in stdout, got:\n%s", out)
+	if !strings.Contains(errs, "figlet-2.2.5_6: installed successfully.") {
+		t.Errorf("expected installed line on stderr, got:\n%s", errs)
 	}
-	if !strings.Contains(out, "figlet-2.2.5_6: installed successfully.") {
-		t.Errorf("expected installed line in stdout, got:\n%s", out)
+	if strings.Contains(out, "figlet-2.2.5_6: unpacking ...") {
+		t.Errorf("child stdout leaked to stdout:\n%s", out)
 	}
 }
-
 func TestHybridTelemetryStreamParsingWithStub(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.tty = true
 
-	// Stub simulates real xbps streaming stderr download ticks and stdout unpacking lines
 	stubScript := filepath.Join(e.dir, "telemetry-stub")
 	scriptContent := `#!/bin/sh
 case "${1:-}" in
@@ -1867,11 +2038,9 @@ case "${1:-}" in
     ;;
 esac
 
-# Simulate stderr download ticks (TTY format with \r)
 printf '[ 0%%] figlet-2.2.5_6.x86_64.xbps: [87KB 50%%] 12MB/s ETA: 00m01s\033[K\r' >&2
 printf 'figlet-2.2.5_6.x86_64.xbps: 87KB [avg rate: 12MB/s]\033[K\n' >&2
 
-# Simulate stdout phase and unpack/configure lines
 printf '[*] Unpacking packages\n'
 printf 'figlet-2.2.5_6: unpacking ...\n'
 printf '[*] Configuring unpacked packages\n'
@@ -1883,21 +2052,23 @@ exit 0
 	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	e.pointInstallAt(stubScript)
+	e.writeConfig(stubScript, "[Ui]", `mode = "Plain"`)
 
-	code, out, errs := e.run("xbpretty", "install", "-y", "--no-progress", "figlet")
+	code, out, errs := e.run("xbpretty", "install", "-y", "figlet")
 	if code != 0 {
 		t.Fatalf("run failed code %d: %s", code, errs)
 	}
-
-	if !strings.Contains(out, "figlet-2.2.5_6: unpacking ...") {
-		t.Errorf("expected unpack output in stdout, got:\n%s", out)
+	if !strings.Contains(errs, "figlet-2.2.5_6: unpacking ...") {
+		t.Errorf("expected unpack output on stderr, got:\n%s", errs)
 	}
-	if !strings.Contains(out, "figlet-2.2.5_6: configuring ...") {
-		t.Errorf("expected configure output in stdout, got:\n%s", out)
+	if !strings.Contains(errs, "figlet-2.2.5_6: configuring ...") {
+		t.Errorf("expected configure output on stderr, got:\n%s", errs)
 	}
 	if !strings.Contains(errs, "figlet-2.2.5_6.x86_64.xbps: 87KB [avg rate: 12MB/s]") {
 		t.Errorf("expected download completion line in stderr, got:\n%s", errs)
+	}
+	if strings.Contains(out, "figlet-2.2.5_6: unpacking ...") {
+		t.Errorf("child stdout leaked to stdout:\n%s", out)
 	}
 }
 
@@ -1937,105 +2108,16 @@ exit 2
 	}
 }
 
-func TestBoxStyleConfigClassic(t *testing.T) {
+func TestRetiredBoxStyleFlagIsUnknown(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
 	e.tty = true
-	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
-	content, _ := os.ReadFile(cfgPath)
-	_ = os.WriteFile(cfgPath, append(content, []byte("\nbox_style = \"classic\"\n")...), 0o644)
-	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
-	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
-
-	code, out, errs := e.run("xbpretty", "upgrade", "-n", "--color=auto")
-	if code != 0 {
-		t.Fatalf("exit = %d, want 0\n%s", code, errs)
-	}
-	plain := ansiEscape.ReplaceAllString(out, "")
-	if !strings.Contains(plain, "┌── Packages To Upgrade (1)") {
-		t.Errorf("classic output missing classic header:\n%s", out)
-	}
-	if !strings.Contains(plain, "┌── Summary") {
-		t.Errorf("classic output missing classic summary card:\n%s", out)
-	}
-	if strings.Contains(plain, "╭") || strings.Contains(plain, "╰") {
-		t.Errorf("classic output contains rounded box runes:\n%s", out)
-	}
-}
-
-func TestBoxStyleConfigASCII(t *testing.T) {
-	e := newEnv(t)
-	e.root = true
-	e.tty = true
-	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
-	content, _ := os.ReadFile(cfgPath)
-	_ = os.WriteFile(cfgPath, append(content, []byte("\nbox_style = \"ascii\"\n")...), 0o644)
-	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
-	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
-
-	code, out, errs := e.run("xbpretty", "upgrade", "-n", "--color=auto")
-	if code != 0 {
-		t.Fatalf("exit = %d, want 0\n%s", code, errs)
-	}
-	plain := ansiEscape.ReplaceAllString(out, "")
-	if !strings.Contains(plain, "+-- Packages To Upgrade (1)") {
-		t.Errorf("ascii output missing ascii header:\n%s", out)
-	}
-	if !strings.Contains(plain, "+-- Summary") {
-		t.Errorf("ascii output missing ascii summary card:\n%s", out)
-	}
-	if strings.Contains(plain, "╭") || strings.Contains(plain, "┌") {
-		t.Errorf("ascii output contains unicode box runes:\n%s", out)
-	}
-}
-
-func TestBoxStyleFlagOverridesConfig(t *testing.T) {
-	e := newEnv(t)
-	e.root = true
-	e.tty = true
-	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
-	content, _ := os.ReadFile(cfgPath)
-	_ = os.WriteFile(cfgPath, append(content, []byte("\nbox_style = \"rounded\"\n")...), 0o644)
-	e.set("XB_STUB_STDOUT", "xbps-0.60.8_1 update x86_64 https://repo-default.voidlinux.org/current 533481 121137\n")
-	e.set("XB_STUB_OLD", lookupRead(t, "0607/xbps.txt"))
-
-	code, out, errs := e.run("xbpretty", "upgrade", "-n", "--color=auto", "--box-style=classic")
-	if code != 0 {
-		t.Fatalf("exit = %d, want 0\n%s", code, errs)
-	}
-	plain := ansiEscape.ReplaceAllString(out, "")
-	if !strings.Contains(plain, "┌── Packages To Upgrade (1)") {
-		t.Errorf("flag override output missing classic header:\n%s", out)
-	}
-}
-
-func TestMalformedBoxStyleConfigExits2(t *testing.T) {
-	e := newEnv(t)
-	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
-	content, _ := os.ReadFile(cfgPath)
-	_ = os.WriteFile(cfgPath, append(content, []byte("\nbox_style = \"neon\"\n")...), 0o644)
-
-	code, _, errs := e.run("xbpretty", "upgrade", "-n")
+	code, _, errs := e.run("xbpretty", "upgrade", "--dry-run", "--box-style=classic")
 	if code != 2 {
-		t.Fatalf("exit = %d, want 2\n%s", code, errs)
+		t.Fatalf("exit = %d, want usage error 2\n%s", code, errs)
 	}
-	if !strings.Contains(errs, "box_style") {
-		t.Errorf("stderr does not name box_style:\n%s", errs)
-	}
-}
-
-func TestMalformedProgressBarConfigExits2(t *testing.T) {
-	e := newEnv(t)
-	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
-	content, _ := os.ReadFile(cfgPath)
-	_ = os.WriteFile(cfgPath, append(content, []byte("\nprogress_bar = \"maybe\"\n")...), 0o644)
-
-	code, _, errs := e.run("xbpretty", "upgrade", "-n")
-	if code != 2 {
-		t.Fatalf("exit = %d, want 2\n%s", code, errs)
-	}
-	if !strings.Contains(errs, "expected true or false") && !strings.Contains(errs, "progress_bar") {
-		t.Errorf("stderr does not name parse error:\n%s", errs)
+	if !strings.Contains(errs, "unknown flag --box-style") {
+		t.Errorf("stderr does not name the retired flag:\n%s", errs)
 	}
 }
 
@@ -2044,13 +2126,23 @@ func TestPrecedenceColorFlagAndNoColor(t *testing.T) {
 	e.root = true
 	e.tty = true
 	cfgPath := filepath.Join(e.dir, "config", "xbpretty", "config.toml")
-	content, _ := os.ReadFile(cfgPath)
-	_ = os.WriteFile(cfgPath, append(content, []byte("\ncolor = \"auto\"\n")...), 0o644)
+	setMode := func(mode string) {
+		t.Helper()
+		data, err := os.ReadFile(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		updated := strings.Replace(string(data), `mode = "Never"`, `mode = "`+mode+`"`, 1)
+		if err := os.WriteFile(cfgPath, []byte(updated), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	e.set("XB_STUB_STDOUT", planCapture(t, "0607/upgrade.txt"))
+	setMode("Auto")
 
-	// 1. With NO_COLOR set, color is disabled under default/auto config
+	// 1. With NO_COLOR set, color is disabled under Auto.
 	e.set("NO_COLOR", "1")
-	code, out, errs := e.run("xbpretty", "upgrade", "-n")
+	code, out, errs := e.run("xbpretty", "upgrade", "--dry-run")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
@@ -2058,8 +2150,8 @@ func TestPrecedenceColorFlagAndNoColor(t *testing.T) {
 		t.Errorf("NO_COLOR should disable color under auto config:\n%s", out)
 	}
 
-	// 2. Explicit --color=always overrides NO_COLOR and auto config
-	code, out, errs = e.run("xbpretty", "upgrade", "-n", "--color=always")
+	// 2. Explicit --color=always overrides NO_COLOR and Auto.
+	code, out, errs = e.run("xbpretty", "upgrade", "--dry-run", "--color=always")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
@@ -2067,9 +2159,9 @@ func TestPrecedenceColorFlagAndNoColor(t *testing.T) {
 		t.Errorf("--color=always should override NO_COLOR:\n%s", out)
 	}
 
-	// 3. Explicit --color=never disables color even if NO_COLOR is unset
+	// 3. Explicit --color=never disables color even if NO_COLOR is unset.
 	e.set("NO_COLOR", "")
-	code, out, errs = e.run("xbpretty", "upgrade", "-n", "--color=never")
+	code, out, errs = e.run("xbpretty", "upgrade", "--dry-run", "--color=never")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
@@ -2077,55 +2169,31 @@ func TestPrecedenceColorFlagAndNoColor(t *testing.T) {
 		t.Errorf("--color=never should disable color:\n%s", out)
 	}
 
-	// 4. Config color="never" overridden by explicit --color=always
-	_ = os.WriteFile(cfgPath, append(content, []byte("\ncolor = \"never\"\n")...), 0o644)
-	code, out, errs = e.run("xbpretty", "upgrade", "-n", "--color=always")
+	// 4. [Color] mode Never is overridden by explicit --color=always.
+	setMode("Never")
+	code, out, errs = e.run("xbpretty", "upgrade", "--dry-run", "--color=always")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
 	}
 	if !strings.Contains(out, "\x1b[") {
-		t.Errorf("--color=always should override config color=never:\n%s", out)
+		t.Errorf("--color=always should override [Color] mode Never:\n%s", out)
 	}
 }
 
-func TestProgressBarOptionsAndFlags(t *testing.T) {
-	// 1. parseArgs --no-progress
-	o, err := parseArgs([]string{"upgrade", "--no-progress"}, "")
-	if err != nil {
-		t.Fatalf("parseArgs: %v", err)
-	}
-	if o.progressBar == nil || *o.progressBar != false {
-		t.Errorf("--no-progress did not set progressBar to false: %+v", o)
-	}
-
-	// 2. parseArgs --no-progress-bar
-	o, err = parseArgs([]string{"upgrade", "--no-progress-bar"}, "")
-	if err != nil {
-		t.Fatalf("parseArgs: %v", err)
-	}
-	if o.progressBar == nil || *o.progressBar != false {
-		t.Errorf("--no-progress-bar did not set progressBar to false: %+v", o)
-	}
-
-	// 3. parseArgs --progress-bar=false
-	o, err = parseArgs([]string{"upgrade", "--progress-bar=false"}, "")
-	if err != nil {
-		t.Fatalf("parseArgs: %v", err)
-	}
-	if o.progressBar == nil || *o.progressBar != false {
-		t.Errorf("--progress-bar=false did not set progressBar to false: %+v", o)
-	}
-
-	// 4. parseArgs --progress-bar=true
-	o, err = parseArgs([]string{"upgrade", "--progress-bar=true"}, "")
-	if err != nil {
-		t.Fatalf("parseArgs: %v", err)
-	}
-	if o.progressBar == nil || *o.progressBar != true {
-		t.Errorf("--progress-bar=true did not set progressBar to true: %+v", o)
+func TestRetiredProgressFlagsAreUnknown(t *testing.T) {
+	for _, flag := range []string{"--no-progress", "--no-progress-bar", "--progress-bar", "--progress-bar=false"} {
+		t.Run(flag, func(t *testing.T) {
+			_, err := parseArgs([]string{"upgrade", flag}, "")
+			if err == nil || !strings.Contains(err.Error(), "unknown flag") {
+				t.Errorf("parseArgs(%q) error = %v, want unknown flag", flag, err)
+			}
+		})
 	}
 }
 
+// TestProgressWidgetEndToEndInteractiveSuccess drives AC-046 through a real
+// child: the Download view appears, the handover reaches the Install view,
+// and success tears the box down with no completion line.
 func TestProgressWidgetEndToEndInteractiveSuccess(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
@@ -2140,11 +2208,11 @@ case "${1:-}" in
     ;;
 esac
 
-# Simulate stderr download ticks
 printf '[ 50%%] figlet-2.2.5_6.x86_64.xbps: [45KB 50%%] 10MB/s ETA: 00m01s\033[K\r' >&2
 printf 'figlet-2.2.5_6.x86_64.xbps: 92KB [avg rate: 10MB/s]\033[K\n' >&2
 
-# Simulate stdout unpack / configure lines
+printf '[*] Verifying package integrity\n'
+printf 'figlet-2.2.5_6: verifying SHA256 hash...\n'
 printf '[*] Unpacking packages\n'
 printf 'figlet-2.2.5_6: unpacking ...\n'
 printf '[*] Configuring unpacked packages\n'
@@ -2163,44 +2231,31 @@ exit 0
 		t.Fatalf("run failed code %d: %s", code, errs)
 	}
 
-	// 1. Verify Download Phase container rendered in stderr
-	if !strings.Contains(errs, "Downloading...") {
-		t.Errorf("expected Download Phase container in stderr, got:\n%s", errs)
+	if !strings.Contains(errs, "Downloading Packages") {
+		t.Errorf("expected the Download view on stderr, got:\n%s", errs)
 	}
-	if !strings.Contains(errs, "Total Packages:") {
-		t.Errorf("expected Total Packages in stderr, got:\n%s", errs)
+	if !strings.Contains(errs, "Installing Packages") {
+		t.Errorf("expected the handover to the Install view, got:\n%s", errs)
 	}
-
-	// 2. Verify Unpack/Configure Phase container rendered in stderr
-	if !strings.Contains(errs, "Running xbps...") {
-		t.Errorf("expected Running xbps container in stderr, got:\n%s", errs)
+	if !strings.Contains(errs, " Progress ") {
+		t.Errorf("expected the centred Progress label, got:\n%s", errs)
 	}
-	if !strings.Contains(errs, "Current Target:") {
-		t.Errorf("expected Current Target in stderr, got:\n%s", errs)
+	if !strings.Contains(errs, "\x1b[") {
+		t.Errorf("expected in-place redraws on stderr, got:\n%s", errs)
 	}
-
-	// 3. Verify in-place cursor movement in stderr
-	if !strings.Contains(errs, "\x1b[5A\r") {
-		t.Errorf("expected cursor jumps in stderr, got:\n%s", errs)
+	if strings.Contains(errs, "Transaction complete") || strings.Contains(errs, "✔") {
+		t.Errorf("success printed a completion line:\n%s", errs)
 	}
-
-	// 4. Verify permanent completion line in stderr
-	if !strings.Contains(errs, "✔ Transaction complete:") {
-		t.Errorf("expected completion line in stderr, got:\n%s", errs)
+	if !strings.HasSuffix(errs, "\x1b[J") {
+		t.Errorf("teardown did not clear the box last: %q", errs)
 	}
-	if !strings.Contains(errs, "1 installed") {
-		t.Errorf("expected '1 installed' in summary, got:\n%s", errs)
+	if !strings.Contains(out, "Packages To Install") && !strings.Contains(out, "Install") {
+		t.Errorf("expected the plan summary on stdout, got:\n%s", out)
 	}
-
-	// 5. Verify stdout holds strictly the plan summary (ADR-0005)
-	if !strings.Contains(out, "Packages To Install") {
-		t.Errorf("expected plan summary in stdout, got:\n%s", out)
-	}
-	if strings.Contains(out, "Downloading...") || strings.Contains(out, "Running xbps...") {
-		t.Errorf("interactive widget lines leaked to stdout:\n%s", out)
+	if strings.Contains(out, "Downloading Packages") || strings.Contains(out, "Installing Packages") {
+		t.Errorf("widget lines leaked to stdout:\n%s", out)
 	}
 }
-
 func TestProgressWidgetEndToEndFailureClearsBoxAndPrintsStderr(t *testing.T) {
 	e := newEnv(t)
 	e.root = true
@@ -2228,127 +2283,79 @@ exit 1
 	if code != 1 {
 		t.Fatalf("expected code 1, got %d. out:\n%s\nerrs:\n%s", code, out, errs)
 	}
-
-	// Widget should clear 5 lines in stderr using atomic clear
-	if !strings.Contains(errs, "\x1b[5A\r\x1b[0J") {
-		t.Errorf("expected cursor jump clearing box on failure in stderr, got:\n%s", errs)
+	if !strings.Contains(errs, "Downloading Packages") {
+		t.Errorf("expected the widget before the failure, got:\n%s", errs)
 	}
-	// Completion banner should NOT be present
-	if strings.Contains(errs, "✔ Transaction complete:") || strings.Contains(out, "✔ Transaction complete:") {
-		t.Errorf("completion banner should not appear on failure:\n%s", errs)
+	if !strings.Contains(errs, "\x1b[J") {
+		t.Errorf("expected the box to clear on failure, got:\n%s", errs)
 	}
-	// Raw error must be in stderr
+	if strings.Contains(errs, "Transaction complete") || strings.Contains(out, "✔") {
+		t.Errorf("completion banner appeared on failure:\n%s", errs)
+	}
 	if !strings.Contains(errs, "ERROR: [trans] failed to download figlet") {
-		t.Errorf("stderr missing error message:\n%s", errs)
+		t.Errorf("stderr missing the captured child error:\n%s", errs)
 	}
 }
 
-func TestProgressWidgetSuppressedWhenNoProgressOrNonTTY(t *testing.T) {
-	e := newEnv(t)
-	e.root = true
-
-	stubScript := filepath.Join(e.dir, "widget-suppress-stub")
-	scriptContent := `#!/bin/sh
+// TestProgressSuppressionMatrix pins FR-065's suppression matrix: Plain mode,
+// TERM=dumb, -v and a non-TTY stderr all disable the live surface, and the
+// child output is forwarded verbatim on stderr instead.
+func TestProgressSuppressionMatrix(t *testing.T) {
+	stubScript := func(t *testing.T) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "suppress-stub")
+		script := `#!/bin/sh
 case "${1:-}" in
   -*n*)
     printf '%s' "${XB_STUB_STDOUT:-}"
     exit 0
     ;;
 esac
-
-printf 'figlet-2.2.5_6.x86_64.xbps: 92KB [avg rate: 10MB/s]\n' >&2
-printf '[*] Unpacking packages\n'
-printf 'figlet-2.2.5_6: unpacking ...\n'
+printf 'child stdout line\n'
+printf 'child stderr line\n' >&2
 exit 0
 `
-	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	e.pointInstallAt(stubScript)
-
-	// Case 1: --no-progress flag
-	e.tty = true
-	code, out, errs := e.run("xbpretty", "install", "-y", "--no-progress", "figlet")
-	if code != 0 {
-		t.Fatalf("code %d: %s", code, errs)
-	}
-	if strings.Contains(out, "\x1b[5A\r") {
-		t.Errorf("--no-progress should not emit cursor jumps:\n%s", out)
-	}
-	if strings.Contains(out, "╭── Downloading...") {
-		t.Errorf("--no-progress should not render container:\n%s", out)
-	}
-	if !strings.Contains(out, "figlet-2.2.5_6: unpacking ...") {
-		t.Errorf("--no-progress should stream raw lines directly:\n%s", out)
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
 	}
 
-	// Case 2: non-TTY stream (e.tty = false)
-	e.tty = false
-	code, out, errs = e.run("xbpretty", "install", "-y", "figlet")
-	if code != 0 {
-		t.Fatalf("code %d: %s", code, errs)
+	cases := []struct {
+		name   string
+		tty    bool
+		term   string
+		argv   []string
+		config []string
+	}{
+		{name: "TERM=dumb", tty: true, term: "dumb", argv: nil},
+		{name: "verbose", tty: true, term: "xterm", argv: []string{"-v"}},
+		{name: "non-TTY stderr", tty: false, term: "xterm", argv: nil},
+		{name: "Plain mode", tty: true, term: "xterm", argv: nil, config: []string{"[Ui]", `mode = "Plain"`}},
 	}
-	if strings.Contains(out, "\x1b[5A\r") {
-		t.Errorf("non-TTY should not emit cursor jumps:\n%s", out)
-	}
-	if strings.Contains(out, "╭── Downloading...") {
-		t.Errorf("non-TTY should not render container:\n%s", out)
-	}
-}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.root = true
+			e.tty = tc.tty
+			e.set("TERM", tc.term)
+			e.writeConfig(stubScript(t), tc.config...)
 
-func TestProgressWidgetBoxStylesEndToEnd(t *testing.T) {
-	e := newEnv(t)
-	e.root = true
-	e.tty = true
-
-	stubScript := filepath.Join(e.dir, "widget-style-stub")
-	scriptContent := `#!/bin/sh
-case "${1:-}" in
-  -*n*)
-    printf '%s' "${XB_STUB_STDOUT:-}"
-    exit 0
-    ;;
-esac
-
-printf '[ 50%%] figlet-2.2.5_6.x86_64.xbps: [45KB 50%%] 10MB/s ETA: 00m01s\033[K\r' >&2
-printf '[*] Unpacking packages\n'
-printf 'figlet-2.2.5_6: unpacking ...\n'
-exit 0
-`
-	if err := os.WriteFile(stubScript, []byte(scriptContent), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	e.pointInstallAt(stubScript)
-
-	// Test classic box style
-	code, out, errs := e.run("xbpretty", "install", "-y", "--box-style=classic", "figlet")
-	if code != 0 {
-		t.Fatalf("classic code %d: %s", code, errs)
-	}
-	if !strings.Contains(out, "Packages To Install") {
-		t.Errorf("stdout missing classic plan summary:\n%s", out)
-	}
-	plain := ansiEscape.ReplaceAllString(errs, "")
-	if !strings.Contains(plain, "┌── Downloading...") {
-		t.Errorf("classic style missing classic download header in stderr:\n%s", errs)
-	}
-	if !strings.Contains(plain, "┌── Running xbps...") {
-		t.Errorf("classic style missing classic running header in stderr:\n%s", errs)
-	}
-
-	// Test ascii box style
-	code, out, errs = e.run("xbpretty", "install", "-y", "--box-style=ascii", "figlet")
-	if code != 0 {
-		t.Fatalf("ascii code %d: %s", code, errs)
-	}
-	if !strings.Contains(out, "Packages To Install") {
-		t.Errorf("stdout missing ascii plan summary:\n%s", out)
-	}
-	plain = ansiEscape.ReplaceAllString(errs, "")
-	if !strings.Contains(plain, "+-- Downloading...") {
-		t.Errorf("ascii style missing ascii download header in stderr:\n%s", errs)
-	}
-	if !strings.Contains(plain, "+-- Running xbps...") {
-		t.Errorf("ascii style missing ascii running header in stderr:\n%s", errs)
+			argv := append([]string{"xbpretty", "install", "-y"}, tc.argv...)
+			argv = append(argv, "figlet")
+			code, out, errs := e.run(argv...)
+			if code != 0 {
+				t.Fatalf("exit = %d\n%s", code, errs)
+			}
+			if !strings.Contains(errs, "child stdout line") || !strings.Contains(errs, "child stderr line") {
+				t.Errorf("child output was not forwarded on stderr:\n%s", errs)
+			}
+			if strings.Contains(errs, "Downloading Packages") || strings.Contains(errs, "\r\x1b[2K") {
+				t.Errorf("a live surface drew under suppression:\n%q", errs)
+			}
+			if strings.Contains(out, "child stdout line") {
+				t.Errorf("child stdout leaked to stdout:\n%s", out)
+			}
+		})
 	}
 }

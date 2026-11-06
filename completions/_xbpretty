@@ -14,51 +14,151 @@ _xbpretty_available() {
   _describe 'available package' pkgs
 }
 
+_xbpretty_history_ids() {
+  local dir="${XBPRETTY_HISTORY_DIR:-/var/lib/xbpretty/history}"
+  local -a ids
+  if [[ -d "$dir" ]]; then
+    ids=(${(f)"$(cd "$dir" 2>/dev/null && printf '%s\n' *.json 2>/dev/null | sed 's/\.json$//')"})
+  fi
+  ids+=(last)
+  _describe 'history entry' ids
+}
+
 _xbpretty() {
   local -a cmds
   cmds=(
     'install:install packages from repositories'
     'remove:remove installed packages'
-    'upgrade:upgrade all packages'
+    'purge:remove packages and their configuration files'
     'autoremove:remove orphaned packages'
+    'autopurge:remove orphaned packages and their configuration files'
+    'upgrade:upgrade all installed packages'
+    'full-upgrade:upgrade all installed packages (same as upgrade)'
+    'safe-upgrade:upgrade all installed packages (same as upgrade)'
     'update:refresh the repository index'
+    'download:download package archives into the current directory'
+    'clean:clean the package cache'
+    'list:list packages matching the given globs'
+    'search:search package names and descriptions'
+    'show:show package details'
+    'policy:show repository precedence and pinned packages'
+    'history:list, inspect, undo, redo or clear transaction history'
+    'undo:revert a recorded transaction'
+    'redo:reapply a recorded transaction'
+    'fetch:rank Void mirrors and configure repositories'
     'completion:print a shell completion script'
-    'link:create xbp symlinks'
+    'link:create the six xbp symlinks in a directory'
     'log:print the transaction log'
   )
 
-  if (( CURRENT == 2 )); then
+  local -a globalflags
+  globalflags=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui)
+  local -a f_install
+  f_install=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --reinstall --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --no-log)
+  local -a f_remove
+  f_remove=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --no-log)
+  local -a f_purge
+  f_purge=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --no-log)
+  local -a f_autoremove
+  f_autoremove=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --no-log)
+  local -a f_autopurge
+  f_autopurge=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --no-log)
+  local -a f_upgrade
+  f_upgrade=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --print-uris --no-log)
+  local -a f_full_upgrade
+  f_full_upgrade=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --print-uris --no-log)
+  local -a f_safe_upgrade
+  f_safe_upgrade=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --dry-run -y --yes --assume-yes -n --assume-no -d --download-only --simple --update --no-update --no-sync --purge --auto-remove --autoremove --no-auto-remove --no-autoremove --full --no-full --safe --print-uris --no-log)
+  local -a f_update
+  f_update=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --no-log)
+  local -a f_download
+  f_download=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui)
+  local -a f_clean
+  f_clean=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --lists --fetch)
+  local -a f_list
+  f_list=(-h --help --version -v --verbose --debug --config --color --no-color --tui --no-tui -V --virtual -a --all-versions -i --installed -u --upgradable --description --summary -m --machine)
+  local -a f_search
+  f_search=(-h --help --version -v --verbose --debug --config --color --no-color --tui --no-tui -V --virtual -a --all-versions -i --installed -u --upgradable --description --summary -m --machine -n --names --names-only)
+  local -a f_show
+  f_show=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui -a --all-versions -m --machine)
+  local -a f_policy
+  f_policy=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui -m --machine)
+  local -a f_history
+  f_history=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --all)
+  local -a f_undo
+  f_undo=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui -y --yes --assume-yes -n --assume-no --no-log)
+  local -a f_redo
+  f_redo=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui -y --yes --assume-yes -n --assume-no --no-log)
+  local -a f_fetch
+  f_fetch=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui -c --country --dry-run --auto --https-only --non-free)
+  local -a f_completion
+  f_completion=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui)
+  local -a f_link
+  f_link=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui)
+  local -a f_log
+  f_log=(-h --help -V --version -v --verbose --debug --config --color --no-color --tui --no-tui --limit)
+
+  local prog="${words[1]##*/}"
+  local sub="" i
+  case "$prog" in
+    xbp-install) sub=install ;;
+    xbp-remove) sub=remove ;;
+    xbp-upgrade) sub=upgrade ;;
+    xbp-autoremove) sub=autoremove ;;
+    xbp-update) sub=update ;;
+  esac
+  if [[ -z "$sub" ]]; then
+    for (( i=2; i < CURRENT; i++ )); do
+      case "${words[i]}" in
+        install|remove|purge|autoremove|autopurge|upgrade|full-upgrade|safe-upgrade|update|download|clean|list|search|show|policy|history|undo|redo|fetch|completion|link|log)
+          sub="${words[i]}"; break ;;
+        uninstall)
+          sub=remove; break ;;
+        dist-upgrade)
+          sub=full-upgrade; break ;;
+        info)
+          sub=show; break ;;
+        up)
+          sub=upgrade; break ;;
+        dist-up)
+          sub=upgrade; break ;;
+        --)
+          break ;;
+      esac
+    done
+  fi
+
+  if [[ -z "$sub" ]]; then
     _describe -t commands 'xbpretty command' cmds
-    _arguments '*::flag:(-n --dry-run -y --yes -v --verbose --no-sync --no-log --color --version)'
+    _describe 'option' globalflags
     return
   fi
 
+  local key="$sub"
+  if [[ "$key" == "full-upgrade" ]]; then key="full_upgrade"; fi
+  if [[ "$key" == "safe-upgrade" ]]; then key="safe_upgrade"; fi
+
   # --limit takes a count: offer nothing and query nothing for it.
   [[ "${words[CURRENT-1]}" == --limit ]] && return
+  case "${words[CURRENT-1]}" in
+    --color)
+      _values 'colour mode' auto always never; return ;;
+    --config|--history-dir|--country|-c|--auto)
+      return ;;
+  esac
 
-  case "${words[2]}" in
-    install) _xbpretty_available "${words[CURRENT]}" ;;
-    remove) _xbpretty_installed ;;
-    log)
-      if [[ "${words[CURRENT]}" == -* ]]; then
-        local -a logopts
-        logopts=(--limit)
-        _describe 'option' logopts
-      else
-        _xbpretty_installed
-      fi
-      ;;
+  if [[ "${words[CURRENT]}" == -* ]]; then
+    local -a subflags
+    eval "subflags=(\${f_${key}})"
+    _describe 'option' subflags
+    return
+  fi
+
+  case "$sub" in
+    install|download|list|search|show) _xbpretty_available "${words[CURRENT]}" ;;
+    remove|purge|policy|log) _xbpretty_installed ;;
+    history|undo|redo) _xbpretty_history_ids ;;
     completion) _values 'shell' bash zsh fish ;;
-    *)
-      _arguments \
-        '(-n --dry-run)'{-n,--dry-run}'[dry run]' \
-        '(-y --yes)'{-y,--yes}'[assume yes]' \
-        '(-v --verbose)'{-v,--verbose}'[verbose]' \
-        '--no-sync[skip index sync]' \
-        '--no-log[skip transaction log]' \
-        '--color=[colour output]:mode:(auto always never)' \
-        '--version[print version]'
-      ;;
   esac
 }
 _xbpretty "$@"

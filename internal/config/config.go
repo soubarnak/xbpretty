@@ -2,7 +2,6 @@
 package config
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -11,7 +10,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -20,73 +18,83 @@ const (
 	ExitParseError = 2
 )
 
-// Config holds the resolved settings for one run.
-type Config struct {
-	AssumeYes   bool
-	Color       string
-	Verbose     bool
-	Sync        bool
-	Log         bool
-	BoxStyle    string
-	ProgressBar bool
-	XBPSInstall string
-	XBPSRemove  string
-	XBPSQuery   string
+// Error is a configuration rejection. It carries the file and, for a value
+// or table error, the line. Line zero means the error is about the file as a
+// whole (BOM, invalid UTF-8, unreadable file, size).
+type Error struct {
+	Path    string
+	Line    int
+	Message string
 }
 
-// Defaults returns the built-in settings used when neither the config file
-// nor the command line says otherwise.
-func Defaults() Config {
-	return Config{
-		AssumeYes:   false,
-		Color:       "auto",
-		Verbose:     false,
-		Sync:        true,
-		Log:         true,
-		BoxStyle:    "rounded",
-		ProgressBar: true,
-		XBPSInstall: "xbps-install",
-		XBPSRemove:  "xbps-remove",
-		XBPSQuery:   "xbps-query",
+func (e *Error) Error() string {
+	if e.Line > 0 {
+		return fmt.Sprintf("config %s:%d: %s", e.Path, e.Line, e.Message)
 	}
+	return fmt.Sprintf("config %s: %s", e.Path, e.Message)
 }
 
-// ParseError is a malformed config file, carrying the line it was found on.
-type ParseError struct {
-	Line int
-	Text string
+func fileError(path, message string) *Error {
+	return &Error{Path: path, Message: message}
 }
 
-func (e *ParseError) Error() string {
-	return fmt.Sprintf("config line %d: %s", e.Line, e.Text)
-}
-
-// Load reads the config file for the current user and merges it over the
-// built-in defaults. A missing file is not an error.
+// Load reads the default layers (system, then user) and resolves them over the
+// built-in defaults. Missing default layers are silent; an existing invalid
+// layer is a hard error (FR-053, FR-054).
 func Load() (Config, error) {
-	cfg := Defaults()
-	path, err := Path()
+	res, err := LoadSelected("")
 	if err != nil {
-		return cfg, err
+		return Defaults(), err
 	}
-	f, err := os.Open(path)
+	return res.Config, nil
+}
+
+// LoadFile reads one explicit configuration file. Unlike a default layer a
+// missing or unreadable file is a hard error: this is the seam --config uses.
+func LoadFile(path string) (Config, error) {
+	res, err := LoadSelected(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, nil
+		return Defaults(), err
+	}
+	return res.Config, nil
+}
+
+// Parse reads one TOML-subset configuration document and resolves it over the
+// built-in defaults. The ten rev-5 keys are understood, but their warnings are
+// discarded here: Parse is a single-document seam, not a layered run.
+func Parse(path string, r io.Reader) (Config, error) {
+	data, err := readConfigBytes(path, r)
+	if err != nil {
+		return Defaults(), err
+	}
+	doc, err := parseDocument(path, data)
+	if err != nil {
+		return Defaults(), err
+	}
+	partial, _, err := buildPartial(doc)
+	if err != nil {
+		if cfgErr, ok := err.(*Error); ok {
+			cfgErr.Path = path
 		}
-		return cfg, fmt.Errorf("reading config: %w", err)
+		return Defaults(), err
 	}
-	defer f.Close()
-	loaded, err := Parse(f)
-	if err != nil {
-		return cfg, err
-	}
-	merge(&cfg, loaded)
+	cfg := Defaults()
+	partial.mergeInto(&cfg)
 	return cfg, nil
 }
 
-// Path resolves the config file location, honouring XDG_CONFIG_HOME and the
-// sudo/doas calling-user lookup.
+// readConfigBytes reads at most one mebibyte plus one byte so the parser can still
+// name an oversized file.
+func readConfigBytes(path string, r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxConfigBytes+1))
+	if err != nil {
+		return nil, fileError(path, fmt.Sprintf("cannot read configuration file: %v", err))
+	}
+	return data, nil
+}
+
+// Path resolves the default user config file location, honouring the absolute
+// XDG_CONFIG_HOME rule and the sudo/doas calling-user lookup (FR-054).
 func Path() (string, error) {
 	base, err := configHome()
 	if err != nil {
@@ -95,28 +103,62 @@ func Path() (string, error) {
 	return filepath.Join(base, "xbpretty", "config.toml"), nil
 }
 
+// configHome is the user layer's base directory. When an invoking sudo/doas
+// user is present that user's passwd home wins and XDG_CONFIG_HOME is ignored.
 func configHome() (string, error) {
-	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+	home, invoking, err := invokingUser()
+	if err != nil {
+		return "", err
+	}
+	if invoking {
+		return filepath.Join(home, ".config"), nil
+	}
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" && filepath.IsAbs(dir) {
 		return dir, nil
 	}
-	home, err := userHome()
+	home, err = os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(home, ".config"), nil
 }
 
-// userHome returns the home directory whose config applies to this run. When
-// xbpretty runs as root through sudo or doas, the calling user's config wins.
-func userHome() (string, error) {
+// invokerHomeOverride is empty in production. The build-tagged test hook sets
+// it so the sudo/doas home rule is testable without a second account.
+var invokerHomeOverride string
+
+// invokingUser returns the passwd home of the user behind sudo/doas when
+// xbpretty runs as root. ok is false for an ordinary run or plain root.
+func invokingUser() (home string, ok bool, err error) {
 	if euid() != 0 {
-		return os.UserHomeDir()
+		return "", false, nil
 	}
-	if name := os.Getenv("SUDO_USER"); name != "" {
-		return homeOfUser(name)
+	name := os.Getenv("SUDO_USER")
+	if name == "" {
+		name = os.Getenv("DOAS_USER")
 	}
-	if name := os.Getenv("DOAS_USER"); name != "" {
-		return homeOfUser(name)
+	if name == "" {
+		return "", false, nil
+	}
+	if invokerHomeOverride != "" {
+		return invokerHomeOverride, true, nil
+	}
+	dir, err := homeOfUser(name)
+	if err != nil {
+		return "", false, err
+	}
+	return dir, true, nil
+}
+
+// userHome returns the home directory whose config applies to this run. When
+// xbpretty runs as root through sudo or doas, the calling user's home wins.
+func userHome() (string, error) {
+	home, invoking, err := invokingUser()
+	if err != nil {
+		return "", err
+	}
+	if invoking {
+		return home, nil
 	}
 	return os.UserHomeDir()
 }
@@ -170,133 +212,35 @@ func Invoker() (uid, gid int, ok bool) {
 	return uidNum, gidNum, true
 }
 
-// Parse reads TOML-shaped key/value pairs. Only the keys xbpretty understands
-// are read; anything else is an error, so a typo is never silently ignored.
-func Parse(r io.Reader) (Config, error) {
-	cfg := Defaults()
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 4096), 1024*1024)
-	for lineNo := 1; scanner.Scan(); lineNo++ {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			return cfg, &ParseError{Line: lineNo, Text: "expected key = value"}
-		}
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		if err := apply(&cfg, key, value); err != nil {
-			return cfg, &ParseError{Line: lineNo, Text: err.Error()}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return cfg, fmt.Errorf("reading config: %w", err)
-	}
-	return cfg, nil
-}
-
-func apply(cfg *Config, key, value string) error {
-	switch key {
-	case "assume_yes":
-		b, err := parseBool(value)
-		if err != nil {
-			return err
-		}
-		cfg.AssumeYes = b
-	case "color":
-		v := unquote(value)
-		if !validColor(v) {
-			return fmt.Errorf("color must be one of auto, always, never, got %q", v)
-		}
-		cfg.Color = v
-	case "verbose":
-		b, err := parseBool(value)
-		if err != nil {
-			return err
-		}
-		cfg.Verbose = b
-	case "sync":
-		b, err := parseBool(value)
-		if err != nil {
-			return err
-		}
-		cfg.Sync = b
-	case "log":
-		b, err := parseBool(value)
-		if err != nil {
-			return err
-		}
-		cfg.Log = b
-	case "box_style":
-		v := unquote(value)
-		if !validBoxStyle(v) {
-			return fmt.Errorf("box_style must be one of rounded, classic, ascii, got %q", v)
-		}
-		cfg.BoxStyle = v
-	case "progress_bar":
-		b, err := parseBool(value)
-		if err != nil {
-			return err
-		}
-		cfg.ProgressBar = b
-	case "xbps_install_path":
-		cfg.XBPSInstall = unquote(value)
-	case "xbps_remove_path":
-		cfg.XBPSRemove = unquote(value)
-	case "xbps_query_path":
-		cfg.XBPSQuery = unquote(value)
-	default:
-		return fmt.Errorf("unknown key %q", key)
-	}
-	return nil
-}
-
-func parseBool(value string) (bool, error) {
-	switch v := unquote(value); v {
-	case "true":
-		return true, nil
-	case "false":
-		return false, nil
-	}
-	return false, fmt.Errorf("expected true or false, got %q", value)
-}
-
-func validColor(value string) bool {
-	switch value {
-	case "auto", "always", "never":
-		return true
-	}
-	return false
-}
-
-func validBoxStyle(value string) bool {
-	switch value {
-	case "rounded", "classic", "ascii":
-		return true
-	}
-	return false
-}
-
-func unquote(value string) string {
-	if len(value) >= 2 {
-		if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
-			return value[1 : len(value)-1]
-		}
-	}
-	return value
-}
-
-func merge(dst *Config, src Config) { *dst = src }
-
 // ErrNotInstalled is reported when a configured xbps binary cannot be found.
 var ErrNotInstalled = errors.New("xbps binary not found")
 
-// Resolve checks that every configured xbps binary exists and is executable,
-// returning a per-command error naming what is missing.
-func (c Config) Resolve() error {
-	for _, path := range []string{c.XBPSInstall, c.XBPSRemove, c.XBPSQuery} {
+// ResolveFor checks that only the configured binaries the selected command
+// uses exist and are executable (FR-053). The command table in internal/spec
+// names the programs; this method maps those names to the configured paths.
+// A duplicate is checked once, and an unknown name is ignored.
+func (c Config) ResolveFor(names ...string) error {
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		var path string
+		switch name {
+		case "install":
+			path = c.Xbps.InstallPath
+		case "remove":
+			path = c.Xbps.RemovePath
+		case "query":
+			path = c.Xbps.QueryPath
+		case "rindex":
+			path = c.Xbps.RindexPath
+		case "pkgdb":
+			path = c.Xbps.PkgdbPath
+		default:
+			continue
+		}
 		if _, err := exec.LookPath(path); err != nil {
 			return fmt.Errorf("%w: %s", ErrNotInstalled, path)
 		}
@@ -323,15 +267,22 @@ const transactionLogName = "transactions.log"
 
 // stateDirPath is where the state directory is, without creating it.
 func stateDirPath() (string, error) {
-	base := os.Getenv("XDG_STATE_HOME")
-	if base == "" {
-		home, err := userHome()
-		if err != nil {
-			return "", err
-		}
-		base = filepath.Join(home, ".local", "state")
+	home, invoking, err := invokingUser()
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(base, "xbpretty"), nil
+	if invoking {
+		return filepath.Join(home, ".local", "state", "xbpretty"), nil
+	}
+	base := os.Getenv("XDG_STATE_HOME")
+	if base != "" && filepath.IsAbs(base) {
+		return filepath.Join(base, "xbpretty"), nil
+	}
+	home, err = os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "state", "xbpretty"), nil
 }
 
 // TransactionLogPath is the path TransactionLog returns, for readers: it

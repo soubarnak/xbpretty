@@ -3,12 +3,14 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/soubarnak/xbpretty/internal/hints"
@@ -73,7 +75,10 @@ func (r *runner) isInteractive() bool {
 	if r.verbose {
 		return false
 	}
-	return isTTY(r.stdoutWriter())
+	// A live view needs the child on a PTY even when stdout is redirected:
+	// xbps then writes its download telemetry to stderr in the shape the
+	// parser expects instead of block-buffering it on a pipe.
+	return isTTY(r.stdoutWriter()) || r.live
 }
 
 // stream runs a command with its output streamed live, and forwards
@@ -84,13 +89,50 @@ func (r *runner) isInteractive() bool {
 // to capture live download telemetry ticks and errors without block buffering.
 // In non-interactive mode or when -v/--verbose is passed, it falls back to direct pipes.
 func (r *runner) stream(name string, args ...string) (int, error) {
-	if r.isInteractive() {
-		return r.streamHybrid(name, args...)
+	return r.streamWithSignals(nil, name, args...)
+}
+
+// streamWithSignals runs a command with SIGINT/SIGTERM forwarded to it. A nil
+// channel makes the call own the signal registration; a caller that has
+// already armed one passes it in, which closes the window where the inline
+// viewport has changed the terminal but no child exists to forward to. The
+// caller keeps ownership of a supplied channel and closes it after the run.
+func (r *runner) streamWithSignals(sigs chan os.Signal, name string, args ...string) (int, error) {
+	if sigs == nil {
+		sigs, release := streamSignals(nil)
+		defer release()
+		if r.isInteractive() {
+			return r.streamHybridWithSignals(sigs, name, args...)
+		}
+		return r.streamDirectWithSignals(sigs, name, args...)
 	}
-	return r.streamDirect(name, args...)
+	if r.isInteractive() {
+		return r.streamHybridWithSignals(sigs, name, args...)
+	}
+	return r.streamDirectWithSignals(sigs, name, args...)
+}
+
+// streamSignals uses a supplied channel as-is (the caller owns it) or arms and
+// owns a fresh SIGINT/SIGTERM registration.
+func streamSignals(sigs chan os.Signal) (chan os.Signal, func()) {
+	if sigs != nil {
+		return sigs, func() {}
+	}
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	return ch, func() {
+		signal.Stop(ch)
+		close(ch)
+	}
 }
 
 func (r *runner) streamHybrid(name string, args ...string) (int, error) {
+	return r.streamHybridWithSignals(nil, name, args...)
+}
+
+func (r *runner) streamHybridWithSignals(sigs chan os.Signal, name string, args ...string) (int, error) {
+	sigs, release := streamSignals(sigs)
+	defer release()
 	r.echo(name, args)
 	if r.parser == nil {
 		r.parser = NewStreamParser(0, 0)
@@ -98,7 +140,7 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 
 	master, slave, err := openPty()
 	if err != nil {
-		return r.streamDirect(name, args...)
+		return r.streamDirectWithSignals(sigs, name, args...)
 	}
 	defer master.Close()
 
@@ -121,7 +163,10 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
-	defer signal.Stop(winch)
+	defer func() {
+		signal.Stop(winch)
+		close(winch)
+	}()
 	if f, ok := r.stdinReader().(*os.File); ok {
 		_ = inheritPtySize(f, master)
 	}
@@ -130,19 +175,16 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 			if f, ok := r.stdinReader().(*os.File); ok {
 				_ = inheritPtySize(f, master)
 			}
-			if r.widget != nil {
+			if r.liveProgress != nil {
 				if f, ok := r.stderrWriter().(*os.File); ok {
 					if tw := terminalWidth(f); tw > 0 {
-						r.widget.SetWidth(tw)
+						r.liveProgress.SetWidth(tw)
 					}
 				}
 			}
 		}
 	}()
 
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigs)
 	go func() {
 		for s := range sigs {
 			if cmd.Process != nil {
@@ -151,6 +193,13 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 		}
 	}()
 
+	// stdout and stderr are forwarded by two goroutines; with no live view
+	// both display through one serialized writer so a non-*os.File sink never
+	// sees concurrent writes.
+	var display *serializedWriter
+	if !r.live {
+		display = &serializedWriter{w: r.stderrWriter()}
+	}
 	var rawStdout bytes.Buffer
 	stdoutDone := make(chan struct{})
 	go func() {
@@ -163,10 +212,15 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 			if r.parser != nil {
 				r.parser.FeedStdout(line)
 			}
-			if r.widget == nil {
-				if out := r.stdoutWriter(); out != nil {
-					fmt.Fprintln(out, line)
-				}
+			// FR-072: a child that owns an alternate screen hides the box and
+			// gives termios back; the matching leave redraws it.
+			if r.liveProgress != nil {
+				r.liveProgress.ObserveChildOutput(line)
+			}
+			// FR-066: child stdout is never copied to xbpretty's stdout.
+			// With no live view it is forwarded verbatim on stderr.
+			if !r.live {
+				fmt.Fprintln(display, line)
 			}
 		}
 	}()
@@ -176,11 +230,9 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 	go func() {
 		defer close(stderrDone)
 		pr, pw := io.Pipe()
-		var mw io.Writer
-		if r.widget == nil {
-			mw = io.MultiWriter(&rawStderr, r.stderrWriter(), pw)
-		} else {
-			mw = io.MultiWriter(&rawStderr, pw)
+		mw := io.MultiWriter(&rawStderr, pw)
+		if !r.live {
+			mw = io.MultiWriter(&rawStderr, display, pw)
 		}
 		parserDone := make(chan struct{})
 		go func() {
@@ -190,6 +242,9 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 			for s.Scan() {
 				if r.parser != nil {
 					r.parser.FeedStderr(s.Text())
+				}
+				if r.liveProgress != nil {
+					r.liveProgress.ObserveChildOutput(s.Text())
 				}
 			}
 		}()
@@ -205,32 +260,39 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 	err = cmd.Wait()
 	r.lastStdout = rawStdout.String()
 	r.lastStderr = rawStderr.String()
-	if err == nil {
-		return 0, nil
-	}
-	code, ok := exitCode(err)
-	if !ok {
-		return 1, fmt.Errorf("waiting for %s: %w", name, err)
-	}
-	return code, nil
+	return waitCode(cmd, err, name)
 }
 
 func (r *runner) streamDirect(name string, args ...string) (int, error) {
+	return r.streamDirectWithSignals(nil, name, args...)
+}
+
+func (r *runner) streamDirectWithSignals(sigs chan os.Signal, name string, args ...string) (int, error) {
+	sigs, release := streamSignals(sigs)
+	defer release()
 	r.echo(name, args)
 	cmd := exec.Command(name, args...)
 	cmd.Env = r.env()
 	cmd.Stdin = r.stdinReader()
-	cmd.Stdout = r.stdoutWriter()
 
-	tee := &teeWriter{w: r.stderrWriter()}
+	// FR-065: with no live view the child output is forwarded verbatim on
+	// stderr. A live plain line consumes it instead and keeps it for the
+	// failure path.
+	var rawStdout bytes.Buffer
+	var tee *teeWriter
+	if r.live {
+		cmd.Stdout = &rawStdout
+		tee = &teeWriter{w: io.Discard}
+	} else {
+		display := &serializedWriter{w: r.stderrWriter()}
+		cmd.Stdout = display
+		tee = &teeWriter{w: display}
+	}
 	cmd.Stderr = tee
 	if err := cmd.Start(); err != nil {
 		return 1, fmt.Errorf("starting %s: %w", name, err)
 	}
 
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigs)
 	go func() {
 		for s := range sigs {
 			if cmd.Process != nil {
@@ -240,15 +302,87 @@ func (r *runner) streamDirect(name string, args ...string) (int, error) {
 	}()
 
 	err := cmd.Wait()
+	r.lastStdout = rawStdout.String()
 	r.lastStderr = tee.String()
+	return waitCode(cmd, err, name)
+}
+
+// streamStderr runs a diagnostic xbps step with both streams displayed on
+// stderr, forwards SIGINT/SIGTERM to the child, and returns its exit code plus
+// the two captured streams separately for the hint table. The index sync uses
+// it so its output is never durable stdout and an interrupt still reaches the
+// child (FR-013, FR-074). ADR-0006 needs the streams kept apart even though
+// both are displayed on stderr.
+func (r *runner) streamStderr(name string, args ...string) (int, hints.Output, error) {
+	r.echo(name, args)
+	cmd := exec.Command(name, args...)
+	cmd.Env = r.env()
+	cmd.Stdin = r.stdinReader()
+	// stdout and stderr are copied by two goroutines; display them through
+	// one serialized writer so a non-*os.File sink (a test buffer, for
+	// example) never sees concurrent writes.
+	display := &serializedWriter{w: r.stderrWriter()}
+	outTee := &teeWriter{w: display}
+	errTee := &teeWriter{w: display}
+	cmd.Stdout = outTee
+	cmd.Stderr = errTee
+	if err := cmd.Start(); err != nil {
+		return 1, hints.Output{}, fmt.Errorf("starting %s: %w", name, err)
+	}
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	defer func() {
+		signal.Stop(sigs)
+		close(sigs)
+	}()
+	go func() {
+		for s := range sigs {
+			if cmd.Process != nil {
+				_ = cmd.Process.Signal(s)
+			}
+		}
+	}()
+	err := cmd.Wait()
+	output := hints.Output{Stdout: outTee.String(), Stderr: errTee.String()}
+	code, waitErr := waitCode(cmd, err, name)
+	if waitErr != nil {
+		return 1, output, waitErr
+	}
+	return code, output, nil
+}
+
+// waitCode turns exec.Cmd.Wait's error into the code a shell would see. A
+// copy goroutine that fails with EPIPE (because stdout or stderr is a closed
+// pipe) must not hide the child's real status: FR-074 keeps the run's code.
+func waitCode(cmd *exec.Cmd, err error, name string) (int, error) {
 	if err == nil {
 		return 0, nil
 	}
-	code, ok := exitCode(err)
-	if !ok {
-		return 1, fmt.Errorf("waiting for %s: %w", name, err)
+	if code, ok := exitCode(err); ok {
+		return code, nil
 	}
-	return code, nil
+	if isBrokenPipe(err) || errors.Is(err, io.ErrClosedPipe) {
+		if code, ok := processExitCode(cmd.ProcessState); ok {
+			return code, nil
+		}
+	}
+	return 1, fmt.Errorf("waiting for %s: %w", name, err)
+}
+
+// processExitCode reads the child's own status when Wait returned a copy
+// error rather than an *exec.ExitError.
+func processExitCode(ps *os.ProcessState) (int, bool) {
+	if ps == nil {
+		return 0, false
+	}
+	if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return 128 + int(ws.Signal()), true
+	}
+	code := ps.ExitCode()
+	if code < 0 {
+		return 0, false
+	}
+	return code, true
 }
 
 // runner executes xbps commands, honouring the verbose flag and the
@@ -268,6 +402,8 @@ func (r *runner) echo(name string, args []string) {
 	if len(args) > 0 {
 		line += " " + strings.Join(args, " ")
 	}
+	r.verboseMu.Lock()
+	defer r.verboseMu.Unlock()
 	fmt.Fprintln(r.out, "verbose: "+line)
 }
 
@@ -282,6 +418,18 @@ func exitCode(err error) (int, bool) {
 		return 128 + int(ws.Signal()), true
 	}
 	return ee.ExitCode(), true
+}
+
+// serializedWriter makes a single writer safe for two copy goroutines.
+type serializedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *serializedWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 // teeWriter writes to the underlying writer and remembers everything it saw.

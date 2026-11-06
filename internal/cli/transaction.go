@@ -4,141 +4,792 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"unsafe"
 
 	"github.com/soubarnak/xbpretty/internal/hints"
+	"github.com/soubarnak/xbpretty/internal/spec"
 	"github.com/soubarnak/xbpretty/internal/summary"
 	"github.com/soubarnak/xbpretty/internal/xbps"
 )
 
 // binaryFor picks the xbps binary a command wraps (FR-002 .. FR-006).
 func (st *state) binaryFor(cmd string) string {
-	if cmd == "remove" || cmd == "autoremove" {
-		return st.r.cfg.XBPSRemove
-	}
-	return st.r.cfg.XBPSInstall
-}
-
-// planCommand builds the dry run as one flag cluster followed by the package
-// arguments: `-Sn`/`-n` for install and remove, `-Sun`/`-un` for upgrade, `-on`
-// for autoremove. `-S` is only usable as root, so an unprivileged plan runs
-// against the cached index and says so (FR-007).
-func (st *state) planCommand(cmd string, opts *options) []string {
-	wantsSync := st.sync && !opts.noSync && cmdUsesSync(cmd)
-	if wantsSync && euidFn() != 0 {
-		fmt.Fprintln(st.stderr, "warning: not running as root, so the repository index was not refreshed; it may be stale")
-		wantsSync = false
-	}
-	args := []string{planFlags(cmd, wantsSync)}
-	args = append(args, opts.args...)
-	args = append(args, opts.passthru...)
-	return args
-}
-
-// planFlags writes the dry run's flags as one token, the form xbps documents
-// and the acceptance criteria pin: -Sn, -un, -Sun, -on.
-func planFlags(cmd string, syncing bool) string {
-	flags := "-"
-	if syncing {
-		flags += "S"
-	}
-	return flags + actionLetters(cmd) + "n"
-}
-
-// actionLetters are the command's own action flags, without the leading dash:
-// upgrade updates every package, autoremove removes orphans.
-func actionLetters(cmd string) string {
 	switch cmd {
-	case "upgrade":
-		return "u"
-	case "autoremove":
-		return "o"
+	case "remove", "purge", "autoremove", "autopurge", "clean":
+		return st.r.cfg.Xbps.RemovePath
 	}
-	return ""
+	return st.r.cfg.Xbps.InstallPath
 }
 
-// xbpsAction returns the action arguments for a command. The index refresh is
-// not one of them: FR-007 and FR-008 add and drop `-S` on the dry run and the
-// real run.
-func xbpsAction(cmd string) []string {
+// isUpgradeCommand reports whether cmd belongs to FR-011's upgrade family.
+func isUpgradeCommand(cmd string) bool {
 	switch cmd {
-	case "upgrade":
-		return []string{"-u"}
-	case "autoremove":
-		return []string{"-o"}
-	case "update":
-		return []string{"-S"}
-	}
-	return nil
-}
-
-// cmdUsesSync reports whether a command's xbps binary understands `-S`.
-// xbps-remove takes no such flag, so remove and autoremove never carry it
-// (FR-005).
-func cmdUsesSync(cmd string) bool {
-	switch cmd {
-	case "install", "upgrade", "update":
+	case "upgrade", "full-upgrade", "safe-upgrade":
 		return true
 	}
 	return false
 }
 
-// realCommand builds the execution command, dropping `-S` when the plan
-// already refreshed the index (FR-008).
-func (st *state) realCommand(cmd string, opts *options, planSynced bool) []string {
-	args := []string{}
-	if st.sync && !opts.noSync && cmdUsesSync(cmd) && !planSynced {
-		args = append(args, "-S")
+// commandUsesSync reports whether a command may run the separate `xbps-install
+// -S` step (FR-013). Every transaction verb can: the step is its own
+// xbps-install call, never a flag on the transaction's own binary.
+func commandUsesSync(cmd string) bool {
+	return spec.IsTransaction(cmd)
+}
+
+// purgeRequested reports whether the command's transaction uses `-f` to delete
+// modified files (FR-009). --purge is an accepted no-op on install/upgrade.
+func purgeRequested(cmd string, opts *options) bool {
+	if cmd == "purge" || cmd == "autopurge" {
+		return true
 	}
-	args = append(args, "-y")
-	args = append(args, xbpsAction(cmd)...)
-	args = append(args, opts.args...)
-	args = append(args, opts.passthru...)
+	if cmd == "remove" || cmd == "autoremove" {
+		return opts.purge
+	}
+	return false
+}
+
+// actionFlags are the xbps flags that select the command's action, in the
+// order §3.2's argv table writes them. The index refresh is never one of them:
+// `-S` is a separate step, and the dry run's `-n` is prepended by the caller.
+func actionFlags(cmd string, opts *options) []string {
+	var args []string
+	switch {
+	case isUpgradeCommand(cmd):
+		args = append(args, "-u")
+	case cmd == "autoremove" || cmd == "autopurge":
+		args = append(args, "-o")
+	}
+	if purgeRequested(cmd, opts) {
+		args = append(args, "-f")
+	}
+	if cmd == "install" && opts.reinstall {
+		args = append(args, "-f")
+	}
 	return args
 }
 
-// plan runs the dry run and returns the parsed rows, or a non-negative exit
-// code when the run should stop. wantSync reports whether the plan actually
-// refreshed the index, so the real run can skip it (FR-008).
-func (st *state) plan(cmd string, opts *options, wantSync *bool) ([]xbps.Row, int) {
-	install := st.binaryFor(cmd)
-	if st.sync && !opts.noSync && cmdUsesSync(cmd) && euidFn() == 0 {
-		*wantSync = true
+// dryRunArgv builds the spec's dry-run argv: `-n`, then action flags, then the
+// package arguments and the `--` passthrough. `-S` is never in it.
+func dryRunArgv(cmd string, opts *options, args []string) []string {
+	argv := []string{"-n"}
+	argv = append(argv, actionFlags(cmd, opts)...)
+	argv = append(argv, args...)
+	argv = append(argv, opts.passthru...)
+	return argv
+}
+
+// realArgv builds the spec's real argv: `-y`, then action flags, then the
+// package arguments and the `--` passthrough. `-S` is never in it.
+func realArgv(cmd string, opts *options, args []string) []string {
+	argv := []string{"-y"}
+	argv = append(argv, actionFlags(cmd, opts)...)
+	argv = append(argv, args...)
+	argv = append(argv, opts.passthru...)
+	return argv
+}
+
+// wantsSync decides the separate index step (FR-013): the upgrade family
+// syncs by default under [Nala] auto_update, the other commands only when
+// --update asks; --no-update/--no-sync always suppress it.
+func (st *state) wantsSync(cmd string, opts *options) bool {
+	if !commandUsesSync(cmd) {
+		return false
 	}
-	args := st.planCommand(cmd, opts)
-	res, err := st.r.run(install, args...)
+	if opts.noUpdate {
+		return false
+	}
+	if opts.update {
+		return true
+	}
+	return isUpgradeCommand(cmd) && st.autoUpdate
+}
+
+// syncStep runs `xbps-install -S` as its own step, with its output on stderr
+// and never inside the transaction argv. #63 owns the sync internals
+// (repository configuration and mirror behaviour); this is the seam it
+// replaces. A non-zero code aborts the run with
+// xbps's own code and a hint; xbps exits 0 when every fetch fails, so an exit
+// of 0 continues to the dry run (FR-013). It returns -1 when the policy allows
+// the caller to continue.
+func (st *state) syncStep() (int, hints.Output, error) {
+	// The update command owns the inline Updating Package Lists view
+	// (FR-064, FR-071); every other sync call leaves it off. The caller is
+	// responsible for tearing a live view down before printing the captured
+	// streams and the hint.
+	if st.r.live && st.r.liveProgress != nil {
+		code, err := st.r.stream(st.r.cfg.Xbps.InstallPath, "-S")
+		output := hints.Output{Stdout: st.r.lastStdout, Stderr: st.r.lastStderr}
+		if err != nil {
+			return exitRuntime, output, err
+		}
+		if code != 0 {
+			return code, output, nil
+		}
+		return -1, output, nil
+	}
+	code, output, err := st.r.streamStderr(st.r.cfg.Xbps.InstallPath, "-S")
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: %v\n", err)
+		return exitRuntime, output, err
+	}
+	if code != 0 {
+		return code, output, nil
+	}
+	return -1, output, nil
+}
+
+// runTransaction drives one command from the plan through the prompt to the
+// real execution, and returns xbpretty's exit code. FR-014 fixes the order:
+// parse/N/A/conflict checks already ran, then config and binary resolution,
+// the sync step, the dry run, the implicit-autoremove check, Nothing to do,
+// the summary, the dry-run stop, the download-only stop, the prompt/root/
+// non-TTY checks, the real transaction, and finally hints and logging.
+func (st *state) runTransaction(cmd string, opts *options) int {
+	if cmd == "update" {
+		return st.runUpdate(opts)
+	}
+
+	// FR-013: the index step is separate and root-only. It uses
+	// xbps-install even for the remove family, so that binary joins the
+	// per-command existence check when the step is requested.
+	syncWanted := st.wantsSync(cmd, opts)
+	binaries := commandBinaries(cmd)
+	if syncWanted && euidFn() == 0 {
+		binaries = append(binaries, "install")
+	}
+	// FR-053: check only the binaries this command actually uses, at runtime.
+	if err := st.r.cfg.ResolveFor(binaries...); err != nil {
+		st.errorf("%v\n", err)
+		return exitRuntime
+	}
+
+	// FR-028: --print-uris stops before the sync step, any summary, prompt or
+	// download. It only needs the config and the plan, and never needs root.
+	if opts.printURIs {
+		return st.runPrintURIs(cmd, opts)
+	}
+
+	// The invocation-level guards below deliberately run before the index
+	// step. A command that is already going to refuse (a missing --reinstall
+	// target, or a remove whose every target is absent) must not refresh the
+	// index first: the refusal would be obscured by network work and by a
+	// stale-index warning that changes nothing. FR-014 puts the sync step
+	// before the dry run, not before these checks, and the dry run still
+	// starts only after the sync.
+
+	// FR-007: --reinstall is guarded before the dry run.
+	if cmd == "install" && opts.reinstall {
+		if code := st.reinstallGuard(opts); code >= 0 {
+			return code
+		}
+	}
+
+	// FR-008: not-installed remove targets are reported and filtered before
+	// the dry run. Purge and the orphan commands use the same binary but do
+	// not filter their named targets.
+	//
+	// The all-filtered case keeps FR-008's early Nothing to do. and does not
+	// check orphans: the command has no target rather than an empty plan, and
+	// FR-008 places its Nothing to do. before the dry run (and so before
+	// FR-016's implicit-autoremove check).
+	args := opts.args
+	if cmd == "remove" {
+		var code int
+		args, code = st.filterRemoveTargets(args)
+		if code >= 0 {
+			return code
+		}
+	}
+
+	// FR-013: a non-root sync request prints the stale-index warning and
+	// continues against the cached index.
+	if syncWanted {
+		if euidFn() != 0 {
+			fmt.Fprintln(st.stderr, "warning: not running as root, so the repository index was not refreshed; it may be stale")
+		} else {
+			code, output, err := st.syncStep()
+			if err != nil {
+				st.errorf("%v\n", err)
+				return exitRuntime
+			}
+			if code >= 0 {
+				if h := hints.Lookup(code, output); h != nil {
+					st.hintf("%s\n", h.Text)
+				}
+				return code
+			}
+		}
+	}
+
+	rows, code := st.planTransaction(cmd, opts, args)
+	if code >= 0 {
+		return code
+	}
+
+	if len(rows) == 0 {
+		// FR-014/FR-016: the orphan check still runs before Nothing to do,
+		// and its plan drives the normal summary, prompt and execution path.
+		orphans, orphanCode := st.planImplicitAutoremove(cmd, opts)
+		if len(orphans) > 0 {
+			return st.runOrphanOnly(cmd, opts, orphans)
+		}
+		if orphanCode >= 0 {
+			return orphanCode
+		}
+		// FR-017: nothing to do is not an error, and it prints only when
+		// both the primary and the orphan plan are empty.
+		fmt.Fprintln(st.stdout, "Nothing to do.")
+		return exitNothingToDo
+	}
+
+	summaryCmd := summaryCommand(cmd, opts)
+	// FR-067: Tui mode may replace this transaction's stdout with the S1
+	// full-screen summary. A refusal or a signal ends the run here; an
+	// unavailable screen leaves the normal text path untouched.
+	confirmedByScreen := false
+	switch outcome, code := st.maybeRunSummaryScreen(opts, summaryCmd, rows); outcome {
+	case screenConfirmed:
+		confirmedByScreen = true
+	case screenRefused:
+		return st.refuse()
+	case screenExited:
+		return code
+	}
+	if !confirmedByScreen {
+		if code := st.renderSummary(summaryCmd, rows); code >= 0 {
+			return code
+		}
+	}
+
+	// FR-017: a hold-only plan is read-only. Its summary prints, but there is
+	// no prompt and no execution.
+	if allHeld(rows) {
+		return exitOK
+	}
+
+	if opts.dryRun {
+		// FR-015: the plan is the whole run.
+		return exitOK
+	}
+
+	// FR-015: -n takes the refusal path with no prompt, before any of the
+	// checks a real transaction would need.
+	if opts.assumeNo {
+		return st.refuse()
+	}
+	autoAccept := st.assumeYes || confirmedByScreen
+	// FR-073: the non-root check is unconditional and comes before the
+	// non-TTY check, so a non-root run always gets the summary and the
+	// elevation hint.
+	if euidFn() != 0 {
+		st.privHint(cmd, opts)
+		return exitRuntime
+	}
+	if !autoAccept && !isTTY(st.stdin) {
+		// FR-015: never block on a pipe.
+		st.errorf("%s\n", "stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed")
+		return exitRuntime
+	}
+	if !autoAccept {
+		result := st.prompt()
+		if !result.proceed {
+			return result.code
+		}
+	}
+
+	// FR-040: the download-only stop runs after its prompt/root/non-TTY
+	// checks and never falls through to a real transaction.
+	if opts.downloadOnly {
+		return st.downloadOnlyStop(rows)
+	}
+
+	// FR-036/FR-038: fill the cache after every check and before the child. A
+	// failure warns once and leaves the work to xbps, whose exit code stands.
+	if code := st.predownload(rows, false); code >= 0 {
+		return code
+	}
+
+	// FR-030/FR-031: the before snapshot is taken after the prompt and
+	// before the real child. executePhases commits the entry once the whole
+	// command (every phase for a replay) exited 0, before the line log, the
+	// reboot hint and any implicit autoremove.
+	st.beginHistory(cmd, opts, rows)
+	code = st.executePhases(cmd, realArgv(cmd, opts, args), rows,
+		xbpsPhase{bin: st.binaryFor(cmd), args: realArgv(cmd, opts, args), rows: rows})
+	if code == 0 {
+		// FR-016: a successful real transaction runs the implicit orphan
+		// transaction. Its failure replaces the primary result.
+		if orphanCode := st.runImplicitAutoremoveAfterSuccess(cmd, opts); orphanCode >= 0 {
+			return orphanCode
+		}
+	}
+	return code
+}
+
+// commandBinaries returns the configured program names a command uses. The
+// command table owns the list.
+func commandBinaries(cmd string) []string {
+	c, ok := spec.CommandByName(cmd)
+	if !ok {
+		return nil
+	}
+	return append([]string(nil), c.Binaries...)
+}
+
+// renderSummary draws the read-only summary for a non-empty plan. The
+// command, not the rows, supplies FR-062's operation label: an implicit
+// orphan transaction must render as AutoRemove/AutoPurge even though it
+// follows an install or purge.
+func (st *state) renderSummary(cmd string, rows []xbps.Row) int {
+	sum := st.planToSummary(cmd, rows)
+	stdoutTTY := isTTY(st.stdout)
+	// FR-062: the rule width is the stdout terminal width, else a positive
+	// COLUMNS, else 80, and it is used even when piped. Table expansion is a
+	// separate decision: full width on a TTY, natural widths when piped.
+	width := 0
+	if stdoutTTY {
+		width = terminalWidth(st.stdout)
+	}
+	if width <= 0 {
+		width = columnsFromEnv()
+	}
+	if width <= 0 {
+		width = 80
+	}
+	if err := (summary.Renderer{
+		Color:  st.color,
+		Simple: st.simple,
+		Width:  width,
+		Piped:  !stdoutTTY,
+		Unit:   st.unit,
+		Theme:  st.theme,
+	}).Render(st.stdout, sum); err != nil {
+		st.errorf("%v\n", err)
+		return exitRuntime
+	}
+	return -1
+}
+
+// columnsFromEnv reads COLUMNS, ignoring missing or malformed values.
+func columnsFromEnv() int {
+	n, err := strconv.Atoi(os.Getenv("COLUMNS"))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// allHeld reports whether every row of the plan is a hold row.
+func allHeld(rows []xbps.Row) bool {
+	if len(rows) == 0 {
+		return false
+	}
+	for _, row := range rows {
+		if row.Action != xbps.ActionHold {
+			return false
+		}
+	}
+	return true
+}
+
+// planTransaction runs the dry run and returns the parsed rows, or a
+// non-negative exit code when the run should stop.
+func (st *state) planTransaction(cmd string, opts *options, args []string) ([]xbps.Row, int) {
+	return st.planWith(st.binaryFor(cmd), dryRunArgv(cmd, opts, args)...)
+}
+
+// planWith runs one dry-run argv and parses its plan, forwarding xbps's
+// stderr and any matching hint before the summary (§3.2.3, FR-073).
+func (st *state) planWith(bin string, argv ...string) ([]xbps.Row, int) {
+	res, err := st.r.run(bin, argv...)
+	if err != nil {
+		st.errorf("%v\n", err)
 		return nil, exitRuntime
 	}
 	if res.exitCode != 0 {
 		fmt.Fprint(st.stderr, res.stderr)
 		fmt.Fprint(st.stdout, res.stdout)
 		if h := hints.Lookup(res.exitCode, res.output()); h != nil {
-			fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
+			st.hintf("%s\n", h.Text)
 		}
 		return nil, res.exitCode
 	}
 
-	// FR-017 and ADR-002 #1: a truncated index fails an install with exit 2
-	// but leaves an upgrade with an exit code of 0, an empty plan and the
-	// error still on stderr. A successful dry run is therefore checked too,
-	// so the breakage is never reported as a plain "Nothing to do."; the
-	// exit code stays xbps's own.
+	// §3.2.3: a successful plan still forwards xbps's stderr before the
+	// summary, so an already-installed or stale-index message is never
+	// silent. Hints print after the forwarded stderr.
+	fmt.Fprint(st.stderr, res.stderr)
 	if h := hints.Lookup(res.exitCode, res.output()); h != nil {
-		fmt.Fprint(st.stderr, res.stderr)
-		fmt.Fprintf(st.stderr, "hint: %s\n", h.Text)
+		st.hintf("%s\n", h.Text)
 	}
 
 	rows, err := xbps.ParsePlan(strings.NewReader(res.stdout))
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: cannot read the xbps plan: %v\n", err)
-		return nil, exitUsage
+		st.errorf("cannot read the xbps plan: %v\n", err)
+		return nil, exitRuntime
 	}
 	return rows, -1
+}
+
+// isInstalled reports whether a package name is in the local pkgdb. The
+// lookup uses `xbps-query -p pkgver`, which reads the installed database
+// only, so a repository package with the same name is not mistaken for one.
+func (st *state) isInstalled(name string) bool {
+	res, err := st.r.run(st.r.cfg.Xbps.QueryPath, "-p", "pkgver", name)
+	if err != nil || res.exitCode != 0 {
+		return false
+	}
+	return strings.TrimSpace(res.stdout) != ""
+}
+
+// reinstallGuard applies FR-007 before the dry run: every named package must
+// be installed. It returns -1 when the run may continue.
+func (st *state) reinstallGuard(opts *options) int {
+	for _, name := range opts.args {
+		if st.isInstalled(name) {
+			continue
+		}
+		st.errorf("%s is not installed, so it cannot be reinstalled\n", name)
+		return exitRuntime
+	}
+	return -1
+}
+
+// filterRemoveTargets applies FR-008: report every named package that is not
+// installed on stderr and drop it. When nothing remains, print Nothing to do.
+// on stdout and stop with exit 0.
+func (st *state) filterRemoveTargets(args []string) ([]string, int) {
+	if len(args) == 0 {
+		return args, -1
+	}
+	kept := make([]string, 0, len(args))
+	for _, name := range args {
+		if st.isInstalled(name) {
+			kept = append(kept, name)
+			continue
+		}
+		st.errorf("%s is not installed\n", name)
+	}
+	if len(kept) == 0 {
+		fmt.Fprintln(st.stdout, "Nothing to do.")
+		return nil, exitNothingToDo
+	}
+	return kept, -1
+}
+
+// runUpdate implements FR-012: root, its own `-S` step, then `-n -u` only to
+// count upgradable rows. No summary and no prompt; the count line (or one
+// line per package) is the durable output.
+func (st *state) runUpdate(opts *options) int {
+	if err := st.r.cfg.ResolveFor(commandBinariesForUpdate(st.showPkgs)...); err != nil {
+		st.errorf("%v\n", err)
+		return exitRuntime
+	}
+	if euidFn() != 0 {
+		st.privHint("update", opts)
+		return exitRuntime
+	}
+	// update never nests a sync: this is its one index step, whatever the
+	// --update/--no-update flags say.
+	live := st.beginUpdateLive()
+	if live != nil {
+		defer st.endLive(live)
+	}
+	code, output, syncErr := st.syncStep()
+	// Clear the live surface before any captured output or hint is printed;
+	// otherwise the teardown would erase the diagnostic.
+	st.endLive(live)
+	if syncErr != nil {
+		if live != nil {
+			fmt.Fprint(st.stderr, st.r.lastStdout)
+			fmt.Fprint(st.stderr, st.r.lastStderr)
+		}
+		st.errorf("%v\n", syncErr)
+		return exitRuntime
+	}
+	if code >= 0 {
+		if live != nil {
+			fmt.Fprint(st.stderr, st.r.lastStdout)
+			fmt.Fprint(st.stderr, st.r.lastStderr)
+		}
+		if h := hints.Lookup(code, output); h != nil {
+			st.hintf("%s\n", h.Text)
+		}
+		return code
+	}
+	rows, planCode := st.planUpdate()
+	if planCode >= 0 {
+		return planCode
+	}
+	upgradable := make([]xbps.Row, 0, len(rows))
+	for _, row := range rows {
+		if row.Action != xbps.ActionHold {
+			upgradable = append(upgradable, row)
+		}
+	}
+	if len(upgradable) > 0 {
+		if st.showPkgs {
+			st.printUpgradable(upgradable)
+		} else {
+			fmt.Fprintf(st.stdout, "%d package(s) can be upgraded. Run 'xbp list --upgradable' to see them.\n", len(upgradable))
+		}
+	}
+	if st.log {
+		st.writeLog("update", nil, nil)
+	}
+	return exitOK
+}
+
+// planUpdate runs FR-012's count-only dry run. Its argv is exactly
+// `xbps-install -n -u`: update takes no positionals, and validateInvocation
+// has already rejected a `--` passthrough, so none can be appended.
+func (st *state) planUpdate() ([]xbps.Row, int) {
+	return st.planTransaction("upgrade", &options{}, nil)
+}
+
+// commandBinariesForUpdate keeps update's binary rule in the command table
+// and adds the query binary only when update_show_packages needs it.
+func commandBinariesForUpdate(showPackages bool) []string {
+	c, ok := spec.CommandByName("update")
+	if !ok {
+		return nil
+	}
+	names := append([]string(nil), c.Binaries...)
+	if showPackages {
+		names = append(names, "query")
+	}
+	return names
+}
+
+// printUpgradable prints one `<name> <installed> -> <candidate>` line per
+// package (FR-012 with update_show_packages = true).
+func (st *state) printUpgradable(rows []xbps.Row) {
+	names := make([]string, 0, len(rows))
+	for _, row := range rows {
+		names = append(names, row.Name)
+	}
+	old := st.lookupOld(names)
+	for _, row := range rows {
+		installed := "?"
+		if o, ok := old[row.Name]; ok && o.Version != "" {
+			installed = o.Version
+		}
+		fmt.Fprintf(st.stdout, "%s %s -> %s\n", row.Name, installed, row.Version)
+	}
+}
+
+// downloadOnlyStop implements FR-040: the plan's download set is filled after
+// the same checks a real transaction makes, then the run stops with no xbps
+// child, no pkgdb write, no implicit autoremove, no log, no history and no
+// completion line. An empty or all-cached set is a verified no-op.
+func (st *state) downloadOnlyStop(rows []xbps.Row) int {
+	if code := st.predownload(rows, true); code >= 0 {
+		return code
+	}
+	return exitOK
+}
+
+// implicitAutoremoveEligible reports whether the implicit orphan transaction
+// may run for cmd (FR-016). Only a successful real install, remove, purge or
+// upgrade-family run applies, never replay, update, clean, download or fetch.
+// [Nala] auto_remove must be on, and with -y/assume_yes the run is skipped
+// unless --auto-remove was explicit.
+func (st *state) implicitAutoremoveEligible(cmd string, opts *options) bool {
+	switch cmd {
+	case "install", "remove", "purge", "upgrade":
+	default:
+		return false
+	}
+	if !st.autoRemove {
+		return false
+	}
+	if st.assumeYes && !opts.autoRemovePos {
+		return false
+	}
+	return true
+}
+
+// summaryCommand is FR-062's operation label for the command that produced a
+// plan. A remove-family command carrying -f renders as its purge form, so the
+// label follows the argv rather than the command spelling alone.
+func summaryCommand(cmd string, opts *options) string {
+	if !purgeRequested(cmd, opts) {
+		return cmd
+	}
+	switch cmd {
+	case "remove":
+		return "purge"
+	case "autoremove":
+		return "autopurge"
+	}
+	return cmd
+}
+
+// orphanActionFlags is the orphan transaction's action set: -o, plus -f when
+// the primary command purged (FR-009, §3.2's argv table).
+func orphanActionFlags(cmd string, opts *options) []string {
+	flags := []string{"-o"}
+	if purgeRequested(cmd, opts) {
+		flags = append(flags, "-f")
+	}
+	return flags
+}
+
+// orphanDryArgv is `xbps-remove -n -o [-f]`.
+func orphanDryArgv(cmd string, opts *options) []string {
+	return append([]string{"-n"}, orphanActionFlags(cmd, opts)...)
+}
+
+// orphanRealArgv is `xbps-remove -y -o [-f]`.
+func orphanRealArgv(cmd string, opts *options) []string {
+	return append([]string{"-y"}, orphanActionFlags(cmd, opts)...)
+}
+
+// orphanCommand names the orphan transaction for its log and history entry:
+// autopurge when it carries -f, autoremove otherwise.
+func orphanCommand(cmd string, opts *options) string {
+	if purgeRequested(cmd, opts) {
+		return "autopurge"
+	}
+	return "autoremove"
+}
+
+// planImplicitAutoremove plans the second `xbps-remove -n -o [-f]`
+// transaction when FR-016 applies. It returns the parsed rows and -1 to
+// continue, or a non-negative exit code when the check itself failed.
+func (st *state) planImplicitAutoremove(cmd string, opts *options) ([]xbps.Row, int) {
+	if !st.implicitAutoremoveEligible(cmd, opts) {
+		return nil, -1
+	}
+	if err := st.r.cfg.ResolveFor("remove"); err != nil {
+		st.errorf("%v\n", err)
+		return nil, exitRuntime
+	}
+	return st.planWith(st.r.cfg.Xbps.RemovePath, orphanDryArgv(cmd, opts)...)
+}
+
+// runOrphanOnly runs the orphan transaction when the primary plan was empty:
+// the orphan plan is the whole run, so its refusal is the normal exit-1
+// refusal and Nothing to do was never printed.
+func (st *state) runOrphanOnly(cmd string, opts *options, rows []xbps.Row) int {
+	summaryCmd := orphanCommand(cmd, opts)
+	confirmedByScreen := false
+	switch outcome, code := st.maybeRunSummaryScreen(opts, summaryCmd, rows); outcome {
+	case screenConfirmed:
+		confirmedByScreen = true
+	case screenRefused:
+		return st.refuse()
+	case screenExited:
+		return code
+	}
+	if !confirmedByScreen {
+		if code := st.renderSummary(summaryCmd, rows); code >= 0 {
+			return code
+		}
+	}
+	if allHeld(rows) {
+		return exitOK
+	}
+	if opts.dryRun {
+		return exitOK
+	}
+	if opts.assumeNo {
+		return st.refuse()
+	}
+	autoAccept := st.assumeYes || confirmedByScreen
+	if euidFn() != 0 {
+		st.privHint(cmd, opts)
+		return exitRuntime
+	}
+	if !autoAccept && !isTTY(st.stdin) {
+		st.errorf("%s\n", "stdin is not a terminal, so xbpretty will not prompt; pass -y to proceed")
+		return exitRuntime
+	}
+	if !autoAccept {
+		result := st.prompt()
+		if !result.proceed {
+			return result.code
+		}
+	}
+	if opts.downloadOnly {
+		// FR-016: --download-only never runs the orphan transaction. Its
+		// rows are removals, so the stop is a verified no-op with no
+		// download set and no child.
+		return st.downloadOnlyStop(rows)
+	}
+	return st.executeOrphan(cmd, opts, rows)
+}
+
+// runImplicitAutoremoveAfterSuccess is FR-016's second real transaction. It
+// returns -1 when it did not run, so the caller keeps the primary result; a
+// declined prompt also returns -1 (the primary result stands), while a failed
+// orphan transaction returns its own code.
+func (st *state) runImplicitAutoremoveAfterSuccess(cmd string, opts *options) int {
+	rows, code := st.planImplicitAutoremove(cmd, opts)
+	if code >= 0 {
+		return code
+	}
+	if len(rows) == 0 {
+		return -1
+	}
+	summaryCmd := orphanCommand(cmd, opts)
+	confirmedByScreen := false
+	switch outcome, code := st.maybeRunSummaryScreen(opts, summaryCmd, rows); outcome {
+	case screenConfirmed:
+		confirmedByScreen = true
+	case screenRefused:
+		// FR-016: declining the implicit transaction leaves the primary
+		// result untouched, including its success exit code.
+		return -1
+	case screenExited:
+		return code
+	}
+	if !confirmedByScreen {
+		if code := st.renderSummary(summaryCmd, rows); code >= 0 {
+			return code
+		}
+	}
+	// A hold-only orphan plan changes nothing: the summary is read-only.
+	if allHeld(rows) {
+		return -1
+	}
+	if !st.assumeYes && !confirmedByScreen {
+		result := st.prompt()
+		if !result.proceed {
+			if result.invalid {
+				// An invalid answer is FR-015's error, not a decline.
+				return result.code
+			}
+			// Declining the orphan prompt leaves the primary result and
+			// exits 0; the primary transaction already committed.
+			return -1
+		}
+	}
+	return st.executeOrphan(cmd, opts, rows)
+}
+
+// executeOrphan runs the confirmed orphan transaction. Its history entry is
+// begun before the child starts with implicit true; executePhases publishes
+// the pending entry from finishHistory once the orphan committed, before its
+// line log and reboot hint.
+func (st *state) executeOrphan(cmd string, opts *options, rows []xbps.Row) int {
+	orphan := orphanCommand(cmd, opts)
+	argv := orphanRealArgv(cmd, opts)
+	st.beginImplicitAutoremoveHistory(orphan, opts, rows)
+	return st.executePhases(orphan, argv, rows,
+		xbpsPhase{bin: st.r.cfg.Xbps.RemovePath, args: argv, rows: rows})
+}
+
+// beginImplicitAutoremoveHistory begins FR-030's entry for the implicit
+// orphan transaction. It is called BEFORE the child runs, so #69's
+// finishHistory inside executePhases can publish it after a successful
+// commit.
+func (st *state) beginImplicitAutoremoveHistory(cmd string, opts *options, rows []xbps.Row) {
+	st.beginHistoryEntry(cmd, opts, rows, st.commandLine,
+		requestedTargets(cmd, opts), true, nil, "")
 }
 
 // lookupOld fills in the pre-upgrade version and installed size the summary
@@ -163,7 +814,7 @@ func (st *state) lookupOld(names []string) map[string]summary.Old {
 	for i := 0; i < workers; i++ {
 		go func() {
 			for j := range jobs {
-				res, err := st.r.run(st.r.cfg.XBPSQuery, "-p", "pkgver,installed_size", j.name)
+				res, err := st.r.run(st.r.cfg.Xbps.QueryPath, "-p", "pkgver,installed_size", j.name)
 				old := summary.Old{}
 				if err == nil && res.exitCode == 0 {
 					old = parseOld(res.stdout)
@@ -216,7 +867,7 @@ func parseOld(stdout string) summary.Old {
 // heldPackages lists the packages on hold (FR-011's Hold group).
 func (st *state) heldPackages() map[string]bool {
 	held := map[string]bool{}
-	res, err := st.r.run(st.r.cfg.XBPSQuery, "-H")
+	res, err := st.r.run(st.r.cfg.Xbps.QueryPath, "-H")
 	if err != nil || res.exitCode != 0 {
 		return held
 	}
@@ -300,39 +951,63 @@ func isTerminal(f *os.File) bool {
 	return errno == 0
 }
 
-// prompt asks the FR-009 [Y/n] question until the answer is clear. It
-// returns false only when the user declines.
-func (st *state) prompt() bool {
-	scanner := bufio.NewScanner(st.stdin)
-	for {
-		fmt.Fprint(st.stderr, "Proceed with this transaction? [Y/n] ")
-		if !scanner.Scan() {
-			fmt.Fprintln(st.stderr)
-			return false
-		}
-		switch strings.ToLower(strings.TrimSpace(scanner.Text())) {
-		case "", "y":
-			return true
-		case "n":
-			return false
-		}
+// promptResult is one answer to FR-015's question. proceed is false when the
+// run stops; invalid separates a malformed answer (an error) from a refusal
+// (a decision), which the implicit orphan prompt treats differently.
+type promptResult struct {
+	proceed bool
+	code    int
+	invalid bool
+}
+
+// prompt asks FR-015's question once. An invalid answer is never re-prompted.
+func (st *state) prompt() promptResult {
+	if st.promptScanner == nil {
+		st.promptScanner = bufio.NewScanner(st.stdin)
+	}
+	scanner := st.promptScanner
+	fmt.Fprint(st.stderr, "Do you want to continue? [Y/n] ")
+	if !scanner.Scan() {
+		return promptResult{code: st.refuse()}
+	}
+	answer := strings.TrimSpace(scanner.Text())
+	switch strings.ToLower(answer) {
+	case "", "y", "yes":
+		return promptResult{proceed: true, code: exitOK}
+	case "n", "no":
+		return promptResult{code: st.refuse()}
+	default:
+		st.errorf("'%s' is not a valid response\n", answer)
+		return promptResult{code: exitRuntime, invalid: true}
 	}
 }
 
-// privHint prints the doas/sudo advice for FR-016.
+// refuse is FR-015's refusal path. A refusal is exit 1, never 0.
+func (st *state) refuse() int {
+	st.errorf("%s\n", "user refused confirmation")
+	return exitRuntime
+}
+
+// privHint prints the doas/sudo advice for a non-root real execution (FR-073).
 func (st *state) privHint(cmd string, opts *options) {
 	elevate := "sudo"
 	if _, err := os.Stat("/usr/bin/doas"); err == nil {
 		elevate = "doas"
 	}
-	line := "xbpretty " + cmd
+	line := "xbp " + cmd
 	if len(opts.args) > 0 {
 		line += " " + strings.Join(opts.args, " ")
 	}
-	fmt.Fprintf(st.stderr, "hint: rerun as root: %s %s\n", elevate, line)
+	// The hint has to reproduce the invocation that was refused, stop flags
+	// included: telling a --download-only user to run a full install would
+	// do more than they asked for.
+	if opts.downloadOnly {
+		line += " --download-only"
+	}
+	st.hintf("rerun as root: %s %s\n", elevate, line)
 }
 
-// rebootHint reports packages whose update needs a reboot (FR-015a).
+// rebootHint reports packages whose update needs a reboot (FR-075).
 func rebootHint(rows []xbps.Row) string {
 	for _, row := range rows {
 		if row.Action != "update" && row.Action != "install" {
@@ -347,10 +1022,12 @@ func rebootHint(rows []xbps.Row) string {
 }
 
 // planToSummary converts parsed rows into a summary, looking up the old
-// versions and hold state the summary needs.
-func (st *state) planToSummary(rows []xbps.Row) *summary.Summary {
+// versions and hold state the summary needs, and carrying the command that
+// labels the Remove family section.
+func (st *state) planToSummary(cmd string, rows []xbps.Row) *summary.Summary {
+	held := st.heldPackages()
 	srows := make([]summary.Row, 0, len(rows))
-	var upgradeNames []string
+	var oldNames []string
 	for _, row := range rows {
 		srows = append(srows, summary.Row{
 			Name: row.Name, Version: row.Version, Action: row.Action,
@@ -358,25 +1035,85 @@ func (st *state) planToSummary(rows []xbps.Row) *summary.Summary {
 			DownloadSize: row.DownloadSize, HasInstalled: row.HasInstalled,
 			HasDownload: row.HasDownload,
 		})
-		if row.Action == "update" || row.Action == "reinstall" {
-			upgradeNames = append(upgradeNames, row.Name)
+		// The version diff applies to upgrades, reinstalls and held rows
+		// whose installed version differs (FR-063).
+		if needsOldVersion(row, held) {
+			oldNames = append(oldNames, row.Name)
 		}
 	}
-	old := st.lookupOld(upgradeNames)
-	held := st.heldPackages()
-	return summary.Build(srows, held, old)
+	old := st.lookupOld(oldNames)
+	sum := summary.Build(srows, held, old)
+	sum.Command = cmd
+	return sum
 }
 
-// isTTY reports whether v is attached to a terminal.
+// needsOldVersion reports whether a plan row needs the installed-version
+// lookup for FR-063's version diff: an update, reinstall or hold, or any row
+// whose package is held.
+func needsOldVersion(row xbps.Row, held map[string]bool) bool {
+	switch row.Action {
+	case "update", "reinstall", "hold":
+		return true
+	}
+	return held[row.Name]
+}
+
+// isTTY reports whether v is attached to a terminal. A resilient writer wraps
+// the real stream, so it is unwrapped first.
 func isTTY(v any) bool {
-	f, ok := v.(*os.File)
+	f, ok := asFile(v)
 	if !ok {
 		return false
 	}
 	return isTerminalFn(f)
 }
 
-// relativeDir is the directory used when resolving a link target.
-func relativeDir(path string) string {
-	return filepath.Dir(path)
+// asFile unwraps the writers xbpretty puts around a stream to the underlying
+// *os.File, or reports that there is none.
+func asFile(v any) (*os.File, bool) {
+	switch w := v.(type) {
+	case *os.File:
+		return w, true
+	case *resilientWriter:
+		return asFile(w.w)
+	}
+	return nil, false
+}
+
+// beginUpdateLive starts the adapted Updating Package Lists view when the
+// suppression matrix allows a live surface.
+//
+// Scope note for #79: the S4 inline viewport (scrollback insertion, cbreak,
+// the width watcher and the ?1049 latch) is wired to the post-S1 transaction
+// phases only — the predownload fill and the commit child. Update's repository
+// sync and the fetch picker's MirrorScore view keep the #66 in-place renderer:
+// they are childless or single-shot surfaces with no completed package lines
+// to insert, and neither is entered from S1. See ADR-0017 §4.
+func (st *state) beginUpdateLive() *liveProgress {
+	mode := st.liveMode()
+	if mode == liveOff {
+		return nil
+	}
+	model := newProgressModel("update", nil, nil)
+	model.setRepositoryTotal(repositoryCount())
+	live := newLiveProgress(st.stderr, st.colorErr, terminalWidth(st.stderr), mode, model, st.theme)
+	parser := NewStreamParser(0, 0)
+	parser.OnRepoUpdate = func(url string) {
+		live.Apply(true, func(m *progressModel) { m.repository(url) })
+	}
+	st.r.parser = parser
+	st.r.live = true
+	st.r.liveProgress = live
+	live.Request(true)
+	return live
+}
+
+// endLive tears a live surface down and restores the forwarding state.
+func (st *state) endLive(live *liveProgress) {
+	if live == nil {
+		return
+	}
+	live.Finish()
+	st.r.live = false
+	st.r.liveProgress = nil
 }

@@ -15,27 +15,27 @@ var (
 
 	// Stderr download regexes:
 	// TTY tick: [ 0%] libxcrypt-compat-4.4.38_1.x86_64.xbps.sig2: [512B 100%] 54MB/s ETA: 00m00s\x1b[K\r
-	downloadTickTTYRegex = regexp.MustCompile(`^\[\s*(\d+)%\]\s+([\w\.\-]+):\s+\[([\d\.]+[A-Za-z]+)\s+(\d+)%\]\s+(.+?)\s+ETA:\s+(\S+)`)
+	downloadTickTTYRegex = regexp.MustCompile(`^\[\s*(\d+)%\]\s+([\w.+~\-]+):\s+\[([\d\.]+[A-Za-z]+)\s+(\d+)%\]\s+(.+?)\s+ETA:\s+(\S+)`)
 	// Piped tick: glibc-2.41_1.x86_64.xbps: [8956KB 82%] 5628KB/s ETA: 00m06s\n
-	downloadTickPipedRegex = regexp.MustCompile(`^([\w\.\-]+):\s+\[([\d\.]+[A-Za-z]+)\s+(\d+)%\]\s+(.+?)\s+ETA:\s+(\S+)`)
+	downloadTickPipedRegex = regexp.MustCompile(`^([\w.+~\-]+):\s+\[([\d\.]+[A-Za-z]+)\s+(\d+)%\]\s+(.+?)\s+ETA:\s+(\S+)`)
 	// Complete line: libxcrypt-compat-4.4.38_1.x86_64.xbps: 87KB [avg rate: 2848MB/s]\x1b[K\n
-	downloadCompleteRegex = regexp.MustCompile(`^([\w\.\-]+):\s+([\d\.]+[A-Za-z]+)\s+\[avg rate:\s+(\S+)\]`)
+	downloadCompleteRegex = regexp.MustCompile(`^([\w.+~\-]+):\s+([\d\.]+[A-Za-z]+)\s+\[avg rate:\s+(\S+)\]`)
 
 	// Stdout phase header regexes:
 	repoSyncRegex  = regexp.MustCompile(`^\[\*\] Updating repository ['"\x60]([^'"\x60]+)['"\x60] \.\.\.$`)
 	phaseHeadRegex = regexp.MustCompile(`^\[\*\] (Downloading packages|Verifying package integrity|Collecting package files|Unpacking packages|Configuring unpacked packages)$`)
 
 	// Stdout per-package action regexes:
-	verifyRegex    = regexp.MustCompile(`^([\w\.\-]+):\s+verifying (RSA signature|SHA256 hash)\.\.\.$`)
-	collectRegex   = regexp.MustCompile(`^([\w\.\-]+):\s+collecting files\.\.\.$`)
-	unpackRegex    = regexp.MustCompile(`^([\w\.\-]+):\s+unpacking \.\.\.$`)
-	configureRegex = regexp.MustCompile(`^([\w\.\-]+):\s+configuring \.\.\.$`)
-	installOkRegex = regexp.MustCompile(`^([\w\.\-]+):\s+installed successfully\.$`)
-	updateRunRegex = regexp.MustCompile(`^([\w\.\-]+):\s+updating to ([\w\.\-]+) \.\.\.$`)
-	updateOkRegex  = regexp.MustCompile(`^([\w\.\-]+):\s+updated successfully\.$`)
-	configOkRegex  = regexp.MustCompile(`^([\w\.\-]+):\s+configured successfully\.$`)
-	removeRunRegex = regexp.MustCompile(`^Removing ['"\x60]([\w\.\-]+)['"\x60] \.\.\.$`)
-	removeOkRegex  = regexp.MustCompile(`^Removed ['"\x60]([\w\.\-]+)['"\x60] successfully\.$`)
+	verifyRegex    = regexp.MustCompile(`^([\w.+~\-]+):\s+verifying (RSA signature|SHA256 hash)\.\.\.$`)
+	collectRegex   = regexp.MustCompile(`^([\w.+~\-]+):\s+collecting files\.\.\.$`)
+	unpackRegex    = regexp.MustCompile(`^([\w.+~\-]+):\s+unpacking \.\.\.$`)
+	configureRegex = regexp.MustCompile(`^([\w.+~\-]+):\s+configuring \.\.\.$`)
+	installOkRegex = regexp.MustCompile(`^([\w.+~\-]+):\s+installed successfully\.$`)
+	updateRunRegex = regexp.MustCompile(`^([\w.+~\-]+):\s+updating to ([\w.+~\-]+) \.\.\.$`)
+	updateOkRegex  = regexp.MustCompile(`^([\w.+~\-]+):\s+updated successfully\.$`)
+	configOkRegex  = regexp.MustCompile(`^([\w.+~\-]+):\s+configured successfully\.$`)
+	removeRunRegex = regexp.MustCompile(`^Removing ['"\x60]([\w.+~\-]+)['"\x60] \.\.\.$`)
+	removeOkRegex  = regexp.MustCompile(`^Removed ['"\x60]([\w.+~\-]+)['"\x60] successfully\.$`)
 
 	// Transaction summary regex:
 	summaryRegex = regexp.MustCompile(`^(\d+)\s+downloaded,\s+(\d+)\s+installed,\s+(\d+)\s+updated,\s+(\d+)\s+configured,\s+(\d+)\s+removed,\s+(\d+)\s+on hold\.$`)
@@ -102,14 +102,31 @@ func cleanLine(s string) string {
 	return strings.TrimSpace(strings.TrimRight(s, "\r\n"))
 }
 
-// packageNameFromFilename extracts the clean package name from a .xbps archive filename.
+// archiveArches lists every architecture suffix the release builds and the
+// noarch transaction can put in an archive filename. The plan model matches
+// exact pkgver.arch.xbps stems first, so an unknown future arch still works;
+// this list keeps the telemetry helpers useful on their own.
+var archiveArches = map[string]bool{
+	"x86_64":       true,
+	"x86_64-musl":  true,
+	"i686":         true,
+	"i686-musl":    true,
+	"aarch64":      true,
+	"aarch64-musl": true,
+	"armv7l":       true,
+	"armv7l-musl":  true,
+	"armv6l":       true,
+	"armv6l-musl":  true,
+	"noarch":       true,
+}
+
+// packageNameFromFilename extracts the pkgver from a .xbps archive filename,
+// stripping .sig2 and the architecture suffix.
 func packageNameFromFilename(fn string) string {
 	fn = strings.TrimSuffix(fn, ".sig2")
 	fn = strings.TrimSuffix(fn, ".xbps")
 	if idx := strings.LastIndex(fn, "."); idx != -1 {
-		arch := fn[idx+1:]
-		switch arch {
-		case "x86_64", "i686", "armv7l", "armv6l", "aarch64", "noarch":
+		if archiveArches[fn[idx+1:]] {
 			fn = fn[:idx]
 		}
 	}
@@ -318,6 +335,7 @@ type StreamParser struct {
 	OnDownloadComplete func(comp DownloadComplete)
 	OnPhaseChange      func(phase string)
 	OnPackageEvent     func(event PackageEvent)
+	OnRepoUpdate       func(url string)
 	OnSummary          func(sum TransactionSummary)
 }
 
@@ -403,6 +421,20 @@ func (p *StreamParser) FeedStderr(line string) {
 func (p *StreamParser) FeedStdout(line string) {
 	p.mu.Lock()
 
+	if m := repoSyncRegex.FindStringSubmatch(cleanLine(line)); len(m) >= 2 {
+		p.state.Phase = "RepoSync"
+		phaseCB := p.OnPhaseChange
+		repoCB := p.OnRepoUpdate
+		p.mu.Unlock()
+		if phaseCB != nil {
+			phaseCB("RepoSync")
+		}
+		if repoCB != nil {
+			repoCB(m[1])
+		}
+		return
+	}
+
 	if phase, ok := ParsePhaseHeader(line); ok {
 		p.state.Phase = phase
 		cb := p.OnPhaseChange
@@ -441,6 +473,23 @@ func (p *StreamParser) FeedStdout(line string) {
 		return
 	}
 	p.mu.Unlock()
+}
+
+// SeedDownloaded records one predownload completion so the child's own
+// fallback ticks continue from the same counters (FR-041). `.sig2` names are
+// never passed here: the sink filters them.
+func (p *StreamParser) SeedDownloaded(filename string, size int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.completedFiles == nil {
+		p.completedFiles = make(map[string]int64)
+	}
+	p.completedFiles[filename] = size
+	var completedSum int64
+	for _, sz := range p.completedFiles {
+		completedSum += sz
+	}
+	p.state.DownloadedBytes = completedSum
 }
 
 // State returns a copy of the current telemetry state.

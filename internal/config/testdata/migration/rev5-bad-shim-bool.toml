@@ -1,0 +1,2 @@
+# Rev 5 accepted exactly true/false, with no padding or case folding.
+assume_yes = " TRUE "

@@ -2,16 +2,105 @@
 # Stub xbps-query: records how it was called and answers from the fixture
 # variables. Queries succeed on their own terms - the transaction's exit
 # code never applies to them, matching real xbps.
-printf '%s\n' "$*" >> "${XB_STUB_LOG:-/dev/null}"
+printf '%s %s\n' "${0##*/}" "$*" >> "${XB_STUB_LOG:-/dev/null}"
+# A history snapshot flips to the after fixtures once a real transaction has
+# set the marker. Reads with no marker keep the before fixtures.
+after_state() {
+  [ -n "${XB_STUB_AFTER_MARK:-}" ] && [ -e "$XB_STUB_AFTER_MARK" ]
+}
+if [ -n "${XB_STUB_ENV_LOG:-}" ]; then
+  printf 'LC_ALL=%s\n' "${LC_ALL:-}" >> "$XB_STUB_ENV_LOG"
+fi
 case "$*" in
+  "-R -p pkgver "*)
+    # A replay preflights its exact recorded version: the cache is checked
+    # first, then this repository lookup. XB_STUB_REPO_MISSING names the
+    # pkgvers no configured repository serves.
+    pkgver="${4}"
+    case " ${XB_STUB_REPO_MISSING:-} " in
+      *" $pkgver "*) exit 2 ;;
+    esac
+    if [ -n "${XB_STUB_REPO_PKGVER:-}" ]; then
+      printf '%s\n' "$XB_STUB_REPO_PKGVER"
+    else
+      printf '%s\n' "$pkgver"
+    fi
+    exit "${XB_STUB_REPO_EXIT:-0}" ;;
+  *"--list-repolock-pkgs"*)
+    if after_state; then printf '%s' "${XB_STUB_REPOLOCK_AFTER-${XB_STUB_REPOLOCK:-}}"; else printf '%s' "${XB_STUB_REPOLOCK:-}"; fi
+    exit 0 ;;
+  *"-L -v"*)
+    printf '%s' "${XB_STUB_REPOS_VERBOSE:-}"
+    exit 0 ;;
+  *"-L"*)
+    printf '%s' "${XB_STUB_REPOS:-}"
+    exit 0 ;;
   *"-H"*)
-    printf '%s' "${XB_STUB_HOLD:-}"
+    if after_state; then printf '%s' "${XB_STUB_HOLD_AFTER-${XB_STUB_HOLD:-}}"; else printf '%s' "${XB_STUB_HOLD:-}"; fi
     exit 0 ;;
   *"-X"*)
     printf '%s' "${XB_STUB_REVDEPS:-}"
     exit 0 ;;
+  *"-R -s  -p filename-sha256"*)
+    printf '%s' "${XB_STUB_HASHES:-}"
+    exit "${XB_STUB_HASH_EXIT:-0}" ;;
+  *"-R -s  -p architecture"*)
+    printf '%s' "${XB_STUB_ARCH:-}"
+    exit 0 ;;
+  *"-R -s  -p long_desc"*)
+    printf '%s' "${XB_STUB_LONG_DESC:-}"
+    exit 0 ;;
+  *"-R -s  -p provides"*)
+    printf '%s' "${XB_STUB_PROVIDES:-}"
+    exit 0 ;;
+  "-R -s "*)
+    printf '%s' "${XB_STUB_REPO:-}"
+    exit 0 ;;
+  "-s  -p long_desc")
+    printf '%s' "${XB_STUB_LONG_DESC_INSTALLED:-}"
+    exit 0 ;;
+  "-l")
+    if after_state; then printf '%s' "${XB_STUB_LIST_AFTER-${XB_STUB_LIST:-}}"; else printf '%s' "${XB_STUB_LIST:-}"; fi
+    exit 0 ;;
+  "-m")
+    if after_state; then printf '%s' "${XB_STUB_MANUAL_AFTER-${XB_STUB_MANUAL:-}}"; else printf '%s' "${XB_STUB_MANUAL:-}"; fi
+    exit 0 ;;
+  "-O")
+    printf '%s' "${XB_STUB_ORPHANS:-}"
+    exit 0 ;;
+  *"--repository"*"-S "*)
+    printf '%s' "${XB_STUB_SHOW_REPO:-}"
+    exit "${XB_STUB_SHOW_REPO_EXIT:-0}" ;;
+  *"-R -S "*"-p pkgver,repository,architecture,filename-sha256"*)
+    # FR-037's per-name resolution: the name is $3; XB_STUB_MISSING lists the
+    # names no repository knows.
+    case " ${XB_STUB_MISSING:-} " in
+      *" $3 "*) exit 2 ;;
+    esac
+    # A per-name fixture (XB_STUB_RESOLVE_FIGLET) overrides the shared one.
+    safe=$(printf '%s' "$3" | tr 'a-z' 'A-Z' | tr -c 'A-Z0-9' '_')
+    per_name=$(printenv "XB_STUB_RESOLVE_$safe" 2>/dev/null || true)
+    printf '%s' "${per_name:-${XB_STUB_RESOLVE:-}}"
+    printf '%s' "${XB_STUB_RESOLVE_STDERR:-}" >&2
+    exit "${XB_STUB_RESOLVE_EXIT:-0}" ;;
+  *"-R -S "*)
+    printf '%s' "${XB_STUB_SHOW_REPO:-}"
+    exit "${XB_STUB_SHOW_REPO_EXIT:-0}" ;;
+  *"-S "*)
+    printf '%s' "${XB_STUB_SHOW:-}"
+    exit "${XB_STUB_SHOW_EXIT:-0}" ;;
   *installed_size*)
     printf '%s' "${XB_STUB_OLD:-}"
+    exit 0 ;;
+  "-p pkgver "*)
+    # The installed-database check FR-007/FR-008 make before a transaction.
+    # Every package is installed unless the test names it in
+    # XB_STUB_NOT_INSTALLED (space-separated).
+    name="${3}"
+    case " ${XB_STUB_NOT_INSTALLED:-} " in
+      *" $name "*) exit 2 ;;
+    esac
+    printf '%s\n' "${name}-1.0_1"
     exit 0 ;;
   *)
     printf '%s' "${XB_STUB_QUERY:-}"

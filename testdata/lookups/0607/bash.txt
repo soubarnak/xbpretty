@@ -1,0 +1,33 @@
+alternatives:
+  sh:
+  	sh:/usr/bin/bash
+  	sh.1:/usr/share/man/man1/bash.1
+architecture: x86_64
+automatic-install: yes
+conflicts:
+	chroot-bash>=0
+filename-sha256: 183daa83e5d31b93796d3dcd56722ef6f28edd2bcc87b474f2c587e185500458
+filename-size: 1735KB
+homepage: https://www.gnu.org/software/bash/bash.html
+install-date: 2026-09-28 22:58 IST
+install-script: 1156B
+installed_size: 7809KB
+license: GPL-3.0-or-later
+maintainer: Enno Boland <gottox@voidlinux.org>
+metafile-sha256: 74ecb85bdf911f1a166cf88c21ab9004a34e7e003e01b9b7833b20014fb4a5cb
+pkgname: bash
+pkgver: bash-5.3_2
+provides:
+	cmd:bash-5.3_2
+	cmd:bashbug-5.3_2
+	cmd:sh-0_1
+remove-script: 1152B
+repository: https://repo-default.voidlinux.org/current
+run_depends:
+	glibc>=2.41_1
+shlib-requires:
+	libc.so.6
+short_desc: GNU Bourne Again Shell
+source-revisions: bash:7a00a4ef168
+sourcepkg: bash
+state: installed

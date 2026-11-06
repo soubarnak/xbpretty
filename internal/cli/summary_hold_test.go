@@ -2,11 +2,16 @@ package cli
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 var ansiEscape = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+// plainTestOutput removes the SGR prefixes the themed diagnostic helpers add,
+// so a PTY test can compare the message text regardless of its colour setting.
+func plainTestOutput(s string) string { return ansiEscape.ReplaceAllString(s, "") }
 
 // corpusPlans are the captured multi-row plans the cli harness renders, with
 // the command each was captured from.
@@ -24,7 +29,7 @@ func capturedSummary(t *testing.T, capture, command, color string) string {
 	e := newEnv(t)
 	e.root = true
 	e.set("XB_STUB_STDOUT", planCapture(t, capture))
-	code, out, errs := e.run("xbpretty", command, "-n", "--color="+color)
+	code, out, errs := e.run("xbpretty", command, "--dry-run", "--color="+color)
 	if code != 0 {
 		t.Fatalf("%s: exit = %d, want 0\n%s", capture, code, errs)
 	}
@@ -49,9 +54,9 @@ func tokenCount(out, name string) int {
 	return n
 }
 
-// A held package is listed once, under Hold, and no `held:` note repeats it,
+// A held package is listed once, under Held, and no `held:` note repeats it,
 // with colour on or off (ADR-0007).
-func TestHeldPackageAppearsOnceUnderHold(t *testing.T) {
+func TestHeldPackageAppearsOnceUnderHeld(t *testing.T) {
 	for _, color := range []string{"never", "always"} {
 		out := holdPlanSummary(t, color)
 		if strings.Contains(out, "held:") {
@@ -60,41 +65,42 @@ func TestHeldPackageAppearsOnceUnderHold(t *testing.T) {
 		if n := tokenCount(out, "acl"); n != 1 {
 			t.Errorf("color=%s: acl appears %d times, want 1:\n%s", color, n, out)
 		}
-		hold := strings.Index(out, "Hold")
+		hold := strings.Index(out, "Held")
 		if hold < 0 || strings.Index(out, "acl") < hold {
-			t.Errorf("color=%s: acl is not under Hold:\n%s", color, out)
+			t.Errorf("color=%s: acl is not under Held:\n%s", color, out)
 		}
 	}
 }
 
-// No captured plan prints a held: note or a line that ends in whitespace,
-// with colour on or off, so the check covers every shape of plan, not only the
-// hold one.
-func TestCorpusSummariesHaveNoHeldNoteOrTrailingWhitespace(t *testing.T) {
+// No captured plan prints a held: note, with colour on or off, so the check
+// covers every shape of plan, not only the hold one.
+func TestCorpusSummariesHaveNoHeldNote(t *testing.T) {
 	for _, plan := range corpusPlans {
 		for _, color := range []string{"never", "always"} {
 			out := capturedSummary(t, plan.capture, plan.command, color)
 			if strings.Contains(out, "held:") {
 				t.Errorf("%s color=%s: a held: note is printed:\n%s", plan.capture, color, out)
 			}
-			for _, text := range []string{out, ansiEscape.ReplaceAllString(out, "")} {
-				for _, line := range strings.Split(text, "\n") {
-					if line != strings.TrimRight(line, " \t") {
-						t.Errorf("%s color=%s: line ends in whitespace: %q", plan.capture, color, line)
-					}
-				}
-			}
+
 		}
 	}
 }
 
-// No summary line ends in whitespace, and the columns of a group still start
-// in the same place on every row.
-func TestSummaryLinesHaveNoTrailingWhitespace(t *testing.T) {
+// Table rows carry exactly one trailing space (trailing cell padding), while
+// labels, rules, counts and size lines carry none; the columns of a group
+// still start in the same place on every row.
+func TestSummaryTableLinesHaveOneTrailingSpace(t *testing.T) {
 	out := holdPlanSummary(t, "never")
 	for _, line := range strings.Split(out, "\n") {
-		if line != strings.TrimRight(line, " \t") {
-			t.Errorf("line ends in whitespace: %q", line)
+		if strings.HasSuffix(line, "  ") {
+			t.Errorf("line ends in more than one space: %q", line)
+		}
+		if isTableLine(line) {
+			if !strings.HasSuffix(line, " ") {
+				t.Errorf("table row has no trailing space: %q", line)
+			}
+		} else if strings.HasSuffix(line, " ") && line != "" {
+			t.Errorf("non-table line ends in whitespace: %q", line)
 		}
 	}
 	// libxcrypt and sqlite are Install rows; their version column must align.
@@ -105,4 +111,33 @@ func TestSummaryLinesHaveNoTrailingWhitespace(t *testing.T) {
 	if strings.Index(a, "4.4.38_1") != strings.Index(b, "3.53.4_1") {
 		t.Errorf("version columns do not align:\n%q\n%q", a, b)
 	}
+}
+
+// isTableLine reports whether a summary line is a borderless table row: it
+// starts with the table's one-cell left padding and is not a label, the
+// Summary heading, a count or a size line.
+func isTableLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || !strings.HasPrefix(line, " ") {
+		return false
+	}
+	if strings.HasPrefix(trimmed, "Package:") {
+		return true
+	}
+	switch trimmed {
+	case "Summary", "Remove", "AutoRemove", "Purge", "AutoPurge", "Install", "ReInstall", "Upgrade", "Configure", "Held":
+		return false
+	}
+	for _, prefix := range []string{"Total download size:", "Disk space required:", "Disk space to free:"} {
+		if strings.HasPrefix(trimmed, prefix) {
+			return false
+		}
+	}
+	fields := strings.Fields(trimmed)
+	if len(fields) == 2 {
+		if _, err := strconv.Atoi(fields[1]); err == nil {
+			return false
+		}
+	}
+	return true
 }

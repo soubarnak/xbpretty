@@ -1,0 +1,12 @@
+#!/bin/sh
+# Stub xbps-rindex: records how it was called. The replay repository recipe
+# needs it to index the cache-only archives; XB_STUB_RINDEX_EXIT exercises the
+# failure path and XB_STUB_RINDEX_FAIL_ONCE_MARK makes the first attempt fail
+# so the -f retry path is observable.
+printf '%s %s\n' "${0##*/}" "$*" >> "${XB_STUB_LOG:-/dev/null}"
+if [ -n "${XB_STUB_RINDEX_FAIL_ONCE_MARK:-}" ] && [ ! -e "$XB_STUB_RINDEX_FAIL_ONCE_MARK" ]; then
+  : > "$XB_STUB_RINDEX_FAIL_ONCE_MARK"
+  printf '%s\n' "${XB_STUB_RINDEX_STDERR:-rindex: first attempt failed}" >&2
+  exit 1
+fi
+exit "${XB_STUB_RINDEX_EXIT:-0}"

@@ -1,0 +1,247 @@
+.Dd November 5, 2026
+.Dt XBPRETTY.CONF 5
+.Os
+.Sh NAME
+.Nm xbpretty.conf
+.Nd configuration file for xbpretty
+.Sh SYNOPSIS
+.Pa /etc/xbpretty/config.toml
+.Pa ~/.config/xbpretty/config.toml
+.Pa $XDG_CONFIG_HOME/xbpretty/config.toml
+.Pa FILE
+.Sh DESCRIPTION
+.Nm
+is an optional TOML configuration file for
+xbpretty(8).
+It uses nala's schema: the [Nala], [Ui], [Color] and [Color.theme] tables plus
+the xbps-only [Xbps] table.
+Table names accept the lowercase aliases [nala], [ui], [color], [color.theme]
+and [xbps].
+Every key is optional.
+Missing files and missing keys resolve to the built-in defaults, and
+command-line flags override configuration values.
+.Pp
+A rev 6 run never writes, rewrites, converts or backs up a configuration file.
+It writes no marker and no cache.
+Configuration warnings never change the command's exit status.
+.Sh LAYERS
+Layers are read in this order; later layers win per key, and theme styles
+merge role by role.
+.Bl -tag -width Ds
+.It system layer
+/etc/xbpretty/config.toml, optional and absent by default.
+The package never creates this file or its directory.
+.It user layer
+$XDG_CONFIG_HOME/xbpretty/config.toml when XDG_CONFIG_HOME is absolute, else
+~/.config/xbpretty/config.toml.
+Under sudo or doas the invoking user's passwd home is used and XDG_CONFIG_HOME
+is ignored.
+.It Cm --config Ar FILE
+A long-only global option that replaces both default layers for the run.
+It is accepted before or after the subcommand.
+The short form -c is fetch's --country and is a usage error on every other
+command.
+.El
+Each existing layer is parsed and validated independently.
+A missing default layer is silent; an existing unreadable or invalid layer is
+a hard error and exits 2.
+A missing explicit --config file is also a hard error.
+XBPRETTY_CONFIG is not supported.
+.Sh KEYS
+.Ss Nala
+.Bl -tag -width Ds
+.It Cm auto_remove
+Plan and offer the implicit orphan removal after a successful transaction.
+Default: true.
+.It Cm auto_update
+Refresh the repository index before the upgrade family.
+Default: true.
+.It Cm update_show_packages
+With update, list each upgradable package instead of only the count.
+Default: false.
+.It Cm full_upgrade
+Accepted compatibility switch; xbps -u never removes packages.
+Default: false.
+.It Cm simple
+Use the one-line-per-operation simple summary.
+Default: false.
+.It Cm assume_yes
+Skip the confirmation prompt, as -y does.
+Default: false.
+.El
+.Ss Ui
+.Bl -tag -width Ds
+.It Cm mode
+Interface mode.
+Values: Auto, Plain, Tui.
+Default: "Auto".
+.It Cm unit
+Size unit.
+Values: Binary, Decimal.
+Default: "Binary".
+.El
+.Ss Color
+.Bl -tag -width Ds
+.It Cm mode
+Colour mode.
+Values: Auto, Always, Never.
+Default: "Auto".
+.El
+.Ss Color.theme
+Each theme role is an inline table of the form { fg = "BrightGreen" },
+optionally with bg and modifier.
+An omitted modifier means bold; an empty modifier means none.
+The nine roles are:
+.Bl -tag -width Ds
+.It Cm Primary
+Section rules, labels and headings.
+Default: { fg = "BrightGreen" }.
+.It Cm Secondary
+Secondary labels.
+Default: { fg = "BrightBlue" }.
+.It Cm Highlight
+Package names and highlighted values.
+Default: { fg = "Reset" }.
+.It Cm Regular
+Regular body text.
+Default: { fg = "Reset", modifier = "" }.
+.It Cm ProgressFilled
+Filled part of the progress bar.
+Default: { fg = "BrightGreen" }.
+.It Cm ProgressUnfilled
+Unfilled part of the progress bar.
+Default: { fg = "BrightRed" }.
+.It Cm Notice
+Notices and version highlights.
+Default: { fg = "BrightYellow" }.
+.It Cm Warning
+Warnings.
+Default: { fg = "BrightYellow" }.
+.It Cm Error
+Errors.
+Default: { fg = "BrightRed" }.
+.El
+.Ss Xbps
+.Bl -tag -width Ds
+.It Cm install_path
+Path to xbps-install; privileged and trust-gated under root.
+Default: "xbps-install".
+.It Cm remove_path
+Path to xbps-remove; privileged and trust-gated under root.
+Default: "xbps-remove".
+.It Cm query_path
+Path to xbps-query; privileged and trust-gated under root.
+Default: "xbps-query".
+.It Cm rindex_path
+Path to xbps-rindex; privileged and trust-gated under root.
+Default: "xbps-rindex".
+.It Cm uhelper_path
+Path to xbps-uhelper; privileged and trust-gated under root.
+Default: "xbps-uhelper".
+.It Cm pkgdb_path
+Path to xbps-pkgdb; privileged and trust-gated under root.
+Default: "xbps-pkgdb".
+.It Cm transaction_log
+Append a line to the transaction log after a successful run.
+Default: true.
+.El
+.Sh VALUES
+.Ss Colours
+A colour is a named ANSI colour, a hexadecimal colour, an indexed colour, or
+an RGB triplet.
+Named colours are case-insensitive and ignore spaces, underscores and hyphens:
+Reset, Black, Red, Green, Yellow, Blue, Magenta (Purple), Cyan, Gray (Grey,
+LightGray, LightGrey), DarkGray (DarkGrey, BrightBlack), LightRed (BrightRed),
+LightGreen (BrightGreen), LightYellow (BrightYellow), LightBlue (BrightBlue),
+LightMagenta (BrightMagenta, LightPurple, BrightPurple), LightCyan
+(BrightCyan) and White (BrightWhite, LightWhite).
+A hexadecimal colour is #rrggbb.
+An integer from 0 to 255, or its quoted form, is an indexed colour.
+The explicit indexed form is { Indexed = N }.
+The RGB form is { Rgb = [r, g, b] } with each component from 0 to 255.
+.Ss Modifiers
+Modifiers are case-insensitive and ignore spaces, underscores and hyphens.
+The accepted values are bold, dim, italic, underlined, slow_blink,
+rapid_blink, reversed, hidden and crossed_out (also strikethrough or strike).
+A string separates tokens with a pipe; an array supplies one token per
+element.
+.Ss Enumerations
+Enumeration values are case-sensitive.
+[Ui] mode is Auto, Plain, Tui.
+[Ui] unit is Binary, Decimal.
+[Color] mode is Auto, Always, Never.
+.Sh LEGACY KEYS
+Rev 6 accepts ten rev-5 top-level flat keys before the first table header.
+They are mapped where possible and never rewritten.
+Alias keys warn once per key; the three retired keys warn and are ignored.
+All legacy keys are removed in rev 7, where they become unknown keys and exit
+2.
+.Bl -tag -width Ds
+.It Cm assume_yes
+Rename to [Nala] assume_yes.
+.It Cm sync
+Rename to [Nala] auto_update.
+.It Cm log
+Rename to [Xbps] transaction_log.
+.It Cm xbps_install_path
+Rename to [Xbps] install_path.
+.It Cm xbps_remove_path
+Rename to [Xbps] remove_path.
+.It Cm xbps_query_path
+Rename to [Xbps] query_path.
+.It Cm color
+Rename to [Color] mode and map auto/always/never to Auto/Always/Never.
+.It Cm verbose
+Retired; pass -v on the command line.
+.It Cm box_style
+Retired; the summary has no box.
+.It Cm progress_bar
+Retired; use [Ui] mode = "Plain".
+.El
+Within a file the canonical key wins.
+Across layers the later layer wins regardless of spelling.
+Rev 6 also accepts rev-5 value forms for the ten legacy keys only: quoted
+booleans and bare strings at top level.
+Everything else remains strict TOML, and duplicate keys are an error.
+.Pp
+When any legacy key is seen, one aggregate warning is printed once per run.
+--debug adds one line per legacy key and a summary.
+Warnings never change the exit code.
+.Sh TRUST
+When effective UID is 0, a [Xbps] path key is honoured only if the supplying
+layer is a regular file owned by UID 0 with no group or world write
+permission.
+The check reads owner, mode and regular-file status from the same opened
+descriptor that supplies the contents, so a path swap cannot defeat it.
+Symlinks are followed and judged on the target inode.
+.Pp
+An untrusted path key is ignored, never executed, and produces one warning
+naming the path, the key and the observed owner and mode.
+Non-privileged keys from the same layer still apply.
+The system layer is not automatically trusted.
+A legacy xbps_*_path key is gated identically after alias resolution.
+Non-root runs honour every layer.
+.Sh EXIT STATUS
+.Bl -tag -width Ds
+.It Cm 0
+The configuration parsed and the command ran successfully.
+.It Cm 2
+An existing layer is unreadable, invalid TOML, contains an unknown key,
+contains an out-of-range value, or an explicit --config file is missing.
+.El
+An xbps child's exit status is passed through unchanged.
+.Sh SECURITY
+The package installs no file under /etc, creates no /etc/xbpretty directory,
+and has no conf_files entry.
+The system layer is optional and administrator-created.
+Do not make a privileged configuration layer group- or world-writable: its
+[Xbps] binary paths are ignored under root.
+.Pp
+The file is parsed as a strict TOML subset.
+It cannot execute code, include another file, or fetch remote content.
+xbpretty never writes the file, so a successful run leaves the administrator's
+or user's contents byte-identical.
+.Sh SEE ALSO
+xbpretty(8)
+.Pp
+https://github.com/soubarnak/xbpretty

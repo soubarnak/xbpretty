@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/soubarnak/xbpretty/internal/spec"
 )
 
 func TestScriptShells(t *testing.T) {
@@ -19,12 +21,12 @@ func TestScriptShells(t *testing.T) {
 			if s == "" {
 				t.Fatal("empty script")
 			}
-			for _, cmd := range Subcommands {
-				if !strings.Contains(s, cmd) {
-					t.Errorf("script is missing subcommand %q", cmd)
+			for _, cmd := range spec.VisibleCommands() {
+				if !strings.Contains(s, cmd.Name) {
+					t.Errorf("script is missing subcommand %q", cmd.Name)
 				}
 			}
-			for _, flag := range Flags {
+			for _, flag := range allAdvertisedSpellings() {
 				if fishFlag(s, shell, flag) {
 					continue
 				}
@@ -52,6 +54,19 @@ func fishFlag(script, shell, flag string) bool {
 	default:
 		return strings.Contains(script, "-s "+name)
 	}
+}
+
+// allAdvertisedSpellings mirrors the completion generator's filter: every
+// visible flag spelling, excluding hidden, refused and N/A (NoOp) flags.
+func allAdvertisedSpellings() []string {
+	var out []string
+	for _, f := range spec.Flags {
+		if f.Hidden || f.Refusal != "" || f.NoOp {
+			continue
+		}
+		out = append(out, spec.FlagSpellings(f)...)
+	}
+	return out
 }
 
 // TestAC025BashCompletionOffersInstalledNames runs the generated bash script
@@ -175,10 +190,10 @@ func TestShippedScriptsAreCurrent(t *testing.T) {
 		}
 		got, err := os.ReadFile(filepath.Join("..", "..", "completions", name))
 		if err != nil {
-			t.Fatalf("read shipped %s script: %v (run `make completions`)", shell, err)
+			t.Fatalf("completion scripts are stale: run make completions")
 		}
 		if string(got) != want {
-			t.Errorf("completions/%s is stale (run `make completions`)", name)
+			t.Errorf("completion scripts are stale: run make completions")
 		}
 	}
 }
@@ -374,6 +389,219 @@ func TestCompletionQueryRules(t *testing.T) {
 					if !offers(p, name) {
 						t.Errorf("%s not offered: %q", name, p.offered)
 					}
+				}
+			})
+		})
+	}
+}
+
+// TestRev6CompletionSurface pins FR-005's rev 6 content: the six aliases,
+// every visible command, per-command flags, the colour values, history ids
+// plus last, the dual -V, and no N/A flag anywhere.
+func TestRev6CompletionSurface(t *testing.T) {
+	naFlags := []string{
+		"--allow-unauthenticated", "--fix-broken", "--target-release",
+		"--install-recommends", "--install-suggests", "--remove-essential",
+		"--remove-config", "--exclude", "--sources", "--debian", "--ubuntu",
+		"--devuan", "--no-fix-broken", "--no-install-recommends", "--no-install-suggests",
+	}
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		t.Run(shell, func(t *testing.T) {
+			script, err := Script(shell)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, alias := range []string{"xbp", "xbp-install", "xbp-remove", "xbp-upgrade", "xbp-autoremove", "xbp-update"} {
+				if !strings.Contains(script, alias) {
+					t.Errorf("%s script does not complete the alias %q", shell, alias)
+				}
+			}
+			for _, cmd := range spec.VisibleCommands() {
+				if !strings.Contains(script, cmd.Name) {
+					t.Errorf("%s script is missing command %q", shell, cmd.Name)
+				}
+			}
+			for _, want := range []string{"color", "auto always never", "last", ".json"} {
+				if !strings.Contains(script, want) {
+					t.Errorf("%s script is missing %q", shell, want)
+				}
+			}
+			for _, flag := range []string{"--version", "--virtual"} {
+				if !fishFlag(script, shell, flag) && !strings.Contains(script, flag) {
+					t.Errorf("%s script is missing %q", shell, flag)
+				}
+			}
+			for _, banned := range naFlags {
+				if strings.Contains(script, banned) {
+					t.Errorf("%s script offers the N/A flag %q", shell, banned)
+				}
+			}
+			if strings.Contains(script, "moo") {
+				t.Errorf("%s script advertises the hidden moo command", shell)
+			}
+			if shell == "fish" {
+				if !strings.Contains(script, "for __xbpretty_cmd in xbpretty xbp ") {
+					t.Errorf("fish does not register the primary xbpretty name")
+				}
+			} else {
+				want := "complete -F _xbpretty xbpretty"
+				if shell == "zsh" {
+					want = "#compdef xbpretty"
+				}
+				if !strings.Contains(script, want) {
+					t.Errorf("%s does not bind the primary xbpretty name", shell)
+				}
+			}
+		})
+	}
+}
+
+// TestEveryCommandOffersItsOwnFlags iterates the shared command table and asks
+// each shell for one command-specific flag per command. A command added to the
+// table without joining the generated scan list fails here.
+func TestEveryCommandOffersItsOwnFlags(t *testing.T) {
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		t.Run(shell, func(t *testing.T) {
+			if _, err := exec.LookPath(shell); err != nil {
+				t.Skipf("%s is not installed", shell)
+			}
+			for _, command := range spec.VisibleCommands() {
+				var flag string
+				for _, candidate := range spec.FlagsFor(command.Name) {
+					if candidate.Global || candidate.Hidden || candidate.Refusal != "" {
+						continue
+					}
+					flag = candidate.Long
+					break
+				}
+				if flag == "" {
+					continue
+				}
+				p := probeCompletion(t, shell, "xbp", command.Name, "-")
+				if !offers(p, "--"+flag) {
+					t.Errorf("%s after %s did not offer --%s: %q", shell, command.Name, flag, p.offered)
+				}
+			}
+		})
+	}
+}
+
+// TestCompletionScriptsPassShellSyntax is AC-003's bash -n/zsh -n/fish -n gate.
+func TestCompletionScriptsPassShellSyntax(t *testing.T) {
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		t.Run(shell, func(t *testing.T) {
+			if _, err := exec.LookPath(shell); err != nil {
+				t.Skipf("%s is not installed", shell)
+			}
+			script, err := Script(shell)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "script")
+			if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := exec.Command(shell, "-n", path).CombinedOutput(); err != nil {
+				t.Fatalf("%s -n: %v\n%s", shell, err, out)
+			}
+		})
+	}
+}
+
+// TestCompletionPerCommandFlagsAndHistory pins the table-driven per-command
+// flags and the history selector completion in every shell that is installed.
+func TestCompletionPerCommandFlagsAndHistory(t *testing.T) {
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		t.Run(shell, func(t *testing.T) {
+			if _, err := exec.LookPath(shell); err != nil {
+				t.Skipf("%s is not installed", shell)
+			}
+			t.Run("list offers --virtual", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "list", "-")
+				if !offers(p, "--virtual") {
+					t.Errorf("--virtual not offered after list: %q", p.offered)
+				}
+				if !offers(p, "-V") {
+					t.Errorf("-V not offered after list: %q", p.offered)
+				}
+			})
+			t.Run("search offers --virtual", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "search", "-")
+				if !offers(p, "--virtual") {
+					t.Errorf("--virtual not offered after search: %q", p.offered)
+				}
+			})
+			t.Run("root offers --version", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "-")
+				if !offers(p, "--version") {
+					t.Errorf("--version not offered at the root: %q", p.offered)
+				}
+			})
+			t.Run("log offers --limit", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "log", "-")
+				if !offers(p, "--limit") {
+					t.Errorf("--limit not offered after log: %q", p.offered)
+				}
+			})
+			t.Run("history offers last", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "history", "")
+				if !offers(p, "last") {
+					t.Errorf("last not offered after history: %q", p.offered)
+				}
+			})
+			t.Run("undo offers last", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "undo", "")
+				if !offers(p, "last") {
+					t.Errorf("last not offered after undo: %q", p.offered)
+				}
+			})
+			t.Run("install never offers an N/A flag", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "install", "-")
+				for _, banned := range []string{"--fix-broken", "--install-recommends", "--allow-unauthenticated"} {
+					if offers(p, banned) {
+						t.Errorf("install offered N/A flag %q: %q", banned, p.offered)
+					}
+				}
+			})
+		})
+	}
+}
+
+// TestCompletionPrimaryNameAndAliasDispatch pins the review fixes: xbpretty
+// itself is registered, and an alias token resolves to its canonical command.
+func TestCompletionPrimaryNameAndAliasDispatch(t *testing.T) {
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		t.Run(shell, func(t *testing.T) {
+			if _, err := exec.LookPath(shell); err != nil {
+				t.Skipf("%s is not installed", shell)
+			}
+			t.Run("uninstall offers installed names", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "uninstall", "")
+				for _, name := range []string{"figlet", "htop"} {
+					if !offers(p, name) {
+						t.Errorf("uninstall did not resolve to remove: %q", p.offered)
+					}
+				}
+			})
+			t.Run("info searches available names", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "info", "fig")
+				if !offers(p, "figlet") {
+					t.Errorf("info did not resolve to show: %q", p.offered)
+				}
+			})
+			t.Run("dist-upgrade is the upgrade family", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp", "dist-upgrade", "-")
+				if !offers(p, "--print-uris") {
+					t.Errorf("dist-upgrade did not resolve to full-upgrade: %q", p.offered)
+				}
+			})
+			t.Run("fixed-verb alias completes packages without command words", func(t *testing.T) {
+				p := probeCompletion(t, shell, "xbp-install", "fig")
+				if !offers(p, "figlet") {
+					t.Errorf("xbp-install did not complete an available name: %q", p.offered)
+				}
+				if offers(p, "install") || offers(p, "log") {
+					t.Errorf("xbp-install offered command words: %q", p.offered)
 				}
 			})
 		})

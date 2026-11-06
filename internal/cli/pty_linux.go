@@ -60,18 +60,16 @@ func inheritPtySize(src, dst *os.File) error {
 }
 
 // terminalWidth returns the terminal column width of w using ioctl TIOCGWINSZ.
-// If w is not an *os.File, is not a TTY, or the ioctl fails, it falls back to 80.
+// It returns 0 when w is not an *os.File, the ioctl fails, or the terminal
+// reports no columns; callers then fall back to COLUMNS and finally 80.
 func terminalWidth(w io.Writer) int {
-	f, ok := w.(*os.File)
+	f, ok := asFile(w)
 	if !ok {
-		return 80
+		return 0
 	}
 	var ws winsize
 	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), syscall.TIOCGWINSZ, uintptr(unsafe.Pointer(&ws))); errno != 0 {
-		return 80
-	}
-	if ws.ws_col == 0 {
-		return 80
+		return 0
 	}
 	return int(ws.ws_col)
 }

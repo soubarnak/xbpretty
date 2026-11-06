@@ -34,7 +34,7 @@ func (st *state) runLog(opts *options) int {
 
 	path, err := config.TransactionLogPath()
 	if err != nil {
-		fmt.Fprintf(st.stderr, "xbpretty: cannot locate the transaction log: %v\n", err)
+		st.errorf("cannot locate the transaction log: %v\n", err)
 		return exitRuntime
 	}
 	f, err := os.Open(path)
@@ -42,7 +42,7 @@ func (st *state) runLog(opts *options) int {
 		if errors.Is(err, fs.ErrNotExist) {
 			return st.nothingLogged()
 		}
-		fmt.Fprintf(st.stderr, "xbpretty: cannot read the transaction log: %v\n", err)
+		st.errorf("cannot read the transaction log: %v\n", err)
 		return exitRuntime
 	}
 	defer f.Close()
@@ -58,7 +58,7 @@ func (st *state) runLog(opts *options) int {
 		}
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
-				fmt.Fprintf(st.stderr, "xbpretty: cannot read the transaction log: %v\n", err)
+				st.errorf("cannot read the transaction log: %v\n", err)
 				return exitRuntime
 			}
 			break
@@ -83,12 +83,12 @@ func (st *state) runLog(opts *options) int {
 }
 
 func (st *state) logUsage(msg string) int {
-	fmt.Fprintf(st.stderr, "xbpretty: %s\nusage: xbp log [--limit N] [package...]\n", msg)
+	st.errorf("%s\nusage: xbp log [--limit N] [package...]\n", msg)
 	return exitUsage
 }
 
 func (st *state) nothingLogged() int {
-	fmt.Fprintln(st.stderr, "xbpretty: nothing has been logged yet")
+	st.errorf("%s\n", "nothing has been logged yet")
 	return exitOK
 }
 

@@ -1,0 +1,24 @@
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  xbpretty History  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ utoRemove Purge AutoPurge Install Reinstall Upgrade Downgrade Configure Held ┃
+┃                                                                         ━━━━ ┃
+┃ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┏━┓ ┃
+┃ ┃    Package:     Old Version:     New Version:     Reason:      Size:  ┃┃█┃ ┃
+┃ ┃❯   held-pkg        2.0_1            2.1_1        ManualHold    2 MiB  ┃┃ ┃ ┃
+┃ ┃                                                                       ┃┃ ┃ ┃
+┃ ┃                                                                       ┃┃ ┃ ┃
+┃ ┃                                                                       ┃┃ ┃ ┃
+┃ ┃                                                                       ┃┃ ┃ ┃
+┃ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━┛ ┃
+┃ Remove:    1 Pkgs                (↑) move up | (↓) move down                 ┃
+┃ AutoRemove:1 Pkgs              (→) next tab | (←) previous tab               ┃
+┃ Purge:     1 Pkgs                (s) package info | (q) quit                 ┃
+┃ AutoPurge: 1 Pkgs                                                            ┃
+┃ Install:   1 Pkgs                                                            ┃
+┃ Reinstall: 1 Pkgs                                                            ┃
+┃ Upgrade:   1 Pkgs                                                            ┃
+┃ Downgrade: 1 Pkgs                                                            ┃
+┃ Configure: 1 Pkgs                                                            ┃
+┃ Held:      1 Pkgs                                                            ┃
+┃                                                                              ┃
+┃                                                                              ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
