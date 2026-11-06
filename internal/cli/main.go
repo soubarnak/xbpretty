@@ -114,29 +114,34 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 	if err == nil {
 		err = os.Stderr
 	}
+	// BF-07: stderr is the diagnostic stream, so every write error stops the
+	// display and none reaches the child as SIGPIPE or EIO (FR-074). Every
+	// writer in the run shares this one wrapper. asFile unwraps it wherever a
+	// terminal check needs the *os.File.
+	errW := newLossyWriter(err)
 
 	knownCmd, args := splitArgv(argv)
 
 	opts, parseErr := parseArgs(args, knownCmd)
 	if parseErr != nil {
-		printUsageError(err, parseErr, args)
+		printUsageError(errW, parseErr, args)
 		return exitUsage
 	}
 	// FR-019: an N/A flag is accepted by the parser and refused before config
 	// resolution, any child, and any summary.
 	if len(opts.refusals) > 0 {
 		for _, tail := range opts.refusals {
-			fmt.Fprintf(err, "xbpretty: %s\n", tail)
+			fmt.Fprintf(errW, "xbpretty: %s\n", tail)
 		}
 		return exitUsage
 	}
-	st := &state{stdout: newResilientWriter(out), stderr: err, stdin: in}
+	st := &state{stdout: newResilientWriter(out), stderr: errW, stdin: in}
 	// FR-057: before config resolution a usage error still has the default
 	// palette and any explicit colour flag, so its prefix is themed too.
 	defaults := config.Defaults()
 	st.theme = summaryTheme(defaults.Color.Theme)
 	st.color = wantColor(defaults.Color.Mode, opts, isTTY(out))
-	st.colorErr = wantColor(defaults.Color.Mode, opts, isTTY(err))
+	st.colorErr = wantColor(defaults.Color.Mode, opts, isTTY(errW))
 	// FR-030: the entry's command is the invocation without the program name.
 	// A link invocation (xbp-install ...) prepends its canonical verb.
 	if knownCmd != "" {
@@ -154,15 +159,15 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 		return exitOK
 	}
 	if opts.version {
-		printVersion(out, err)
+		printVersion(out, errW)
 		return exitOK
 	}
 	if opts.command == "" {
 		usage(out)
 		if len(opts.passthru) > 0 || len(opts.args) > 0 {
-			fmt.Fprintln(err, "xbpretty: no command given; name the command before the arguments (for example 'xbpretty install -- <xbps args>')")
+			fmt.Fprintln(errW, "xbpretty: no command given; name the command before the arguments (for example 'xbpretty install -- <xbps args>')")
 		} else {
-			fmt.Fprintln(err, "xbpretty: no command given; run 'xbpretty --help' for usage")
+			fmt.Fprintln(errW, "xbpretty: no command given; run 'xbpretty --help' for usage")
 		}
 		return exitUsage
 	}
@@ -189,7 +194,7 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 	}
 	cfg := res.Config
 	resolved := resolveSettings(cfg, opts)
-	reportConfig(err, opts, res, resolved)
+	reportConfig(errW, opts, res, resolved)
 
 	st.opts = opts
 	st.mode = resolved.mode
@@ -201,16 +206,16 @@ func Run(argv []string, in io.Reader, out, err io.Writer) int {
 	st.showPkgs = resolved.showPkgs
 	st.log = resolved.log
 	st.color = wantColor(resolved.color, opts, isTTY(out))
-	st.colorErr = wantColor(resolved.color, opts, isTTY(err))
+	st.colorErr = wantColor(resolved.color, opts, isTTY(errW))
 	st.progressBar = resolved.mode != config.ModePlain
 	st.unit = summary.SizeUnit(resolved.unit)
 	st.theme = summaryTheme(cfg.Color.Theme)
 	st.r = &runner{
 		cfg:     cfg,
-		out:     err,
+		out:     errW,
 		verbose: resolved.verbose,
 		stdout:  out,
-		stderr:  err,
+		stderr:  errW,
 		stdin:   in,
 	}
 

@@ -130,6 +130,10 @@ func (r *runner) streamHybrid(name string, args ...string) (int, error) {
 	return r.streamHybridWithSignals(nil, name, args...)
 }
 
+// openPtyFn allocates the hybrid engine's PTY. Tests replace it to exercise the
+// no-PTY fallback (BF-46).
+var openPtyFn = openPty
+
 func (r *runner) streamHybridWithSignals(sigs chan os.Signal, name string, args ...string) (int, error) {
 	sigs, release := streamSignals(sigs)
 	defer release()
@@ -138,7 +142,7 @@ func (r *runner) streamHybridWithSignals(sigs chan os.Signal, name string, args 
 		r.parser = NewStreamParser(0, 0)
 	}
 
-	master, slave, err := openPty()
+	master, slave, err := openPtyFn()
 	if err != nil {
 		return r.streamDirectWithSignals(sigs, name, args...)
 	}
@@ -176,7 +180,7 @@ func (r *runner) streamHybridWithSignals(sigs chan os.Signal, name string, args 
 				_ = inheritPtySize(f, master)
 			}
 			if r.liveProgress != nil {
-				if f, ok := r.stderrWriter().(*os.File); ok {
+				if f, ok := asFile(r.stderrWriter()); ok {
 					if tw := terminalWidth(f); tw > 0 {
 						r.liveProgress.SetWidth(tw)
 					}
@@ -204,7 +208,7 @@ func (r *runner) streamHybridWithSignals(sigs chan os.Signal, name string, args 
 	stdoutDone := make(chan struct{})
 	go func() {
 		defer close(stdoutDone)
-		scanner := bufio.NewScanner(master)
+		scanner := newChildScanner(master, bufio.ScanLines)
 		for scanner.Scan() {
 			line := scanner.Text()
 			rawStdout.WriteString(line)
@@ -223,6 +227,11 @@ func (r *runner) streamHybridWithSignals(sigs chan os.Signal, name string, args 
 				fmt.Fprintln(display, line)
 			}
 		}
+		if scanner.Err() != nil {
+			// A scan that stopped early must not leave the child blocked on
+			// an unread PTY (BF-06).
+			_, _ = io.Copy(&rawStdout, master)
+		}
 	}()
 
 	var rawStderr bytes.Buffer
@@ -237,8 +246,7 @@ func (r *runner) streamHybridWithSignals(sigs chan os.Signal, name string, args 
 		parserDone := make(chan struct{})
 		go func() {
 			defer close(parserDone)
-			s := bufio.NewScanner(pr)
-			s.Split(scanLinesOrCR)
+			s := newChildScanner(pr, scanLinesOrCR)
 			for s.Scan() {
 				if r.parser != nil {
 					r.parser.FeedStderr(s.Text())
@@ -246,6 +254,11 @@ func (r *runner) streamHybridWithSignals(sigs chan os.Signal, name string, args 
 				if r.liveProgress != nil {
 					r.liveProgress.ObserveChildOutput(s.Text())
 				}
+			}
+			if s.Err() != nil {
+				// Nothing reads pr after this, so drain it to EOF: the copy
+				// below must not block on the pipe (BF-06).
+				_, _ = io.Copy(io.Discard, pr)
 			}
 		}()
 
@@ -277,18 +290,30 @@ func (r *runner) streamDirectWithSignals(sigs chan os.Signal, name string, args 
 
 	// FR-065: with no live view the child output is forwarded verbatim on
 	// stderr. A live plain line consumes it instead and keeps it for the
-	// failure path.
+	// failure path, and its telemetry reaches the parser line by line as the
+	// hybrid engine's does, so a run without a PTY still drives the widget
+	// (BF-46).
 	var rawStdout bytes.Buffer
 	var tee *teeWriter
+	var outPipe, errPipe io.ReadCloser
 	if r.live {
-		cmd.Stdout = &rawStdout
+		if r.parser == nil {
+			r.parser = NewStreamParser(0, 0)
+		}
 		tee = &teeWriter{w: io.Discard}
+		var err error
+		if outPipe, err = cmd.StdoutPipe(); err != nil {
+			return 1, fmt.Errorf("creating stdout pipe for %s: %w", name, err)
+		}
+		if errPipe, err = cmd.StderrPipe(); err != nil {
+			return 1, fmt.Errorf("creating stderr pipe for %s: %w", name, err)
+		}
 	} else {
 		display := &serializedWriter{w: r.stderrWriter()}
 		cmd.Stdout = display
 		tee = &teeWriter{w: display}
+		cmd.Stderr = tee
 	}
-	cmd.Stderr = tee
 	if err := cmd.Start(); err != nil {
 		return 1, fmt.Errorf("starting %s: %w", name, err)
 	}
@@ -300,6 +325,32 @@ func (r *runner) streamDirectWithSignals(sigs chan os.Signal, name string, args 
 			}
 		}
 	}()
+
+	if r.live {
+		// Both feeds end when the child closes its output, and Wait must not
+		// run while a pipe still has a reader.
+		var feeds sync.WaitGroup
+		feeds.Add(2)
+		go func() {
+			defer feeds.Done()
+			feedLines(io.TeeReader(outPipe, &rawStdout), bufio.ScanLines, func(line string) {
+				r.parser.FeedStdout(line)
+				if r.liveProgress != nil {
+					r.liveProgress.ObserveChildOutput(line)
+				}
+			})
+		}()
+		go func() {
+			defer feeds.Done()
+			feedLines(io.TeeReader(errPipe, tee), scanLinesOrCR, func(line string) {
+				r.parser.FeedStderr(line)
+				if r.liveProgress != nil {
+					r.liveProgress.ObserveChildOutput(line)
+				}
+			})
+		}()
+		feeds.Wait()
+	}
 
 	err := cmd.Wait()
 	r.lastStdout = rawStdout.String()
@@ -445,4 +496,44 @@ func (t *teeWriter) Write(p []byte) (int, error) {
 
 func (t *teeWriter) String() string {
 	return t.buf.String()
+}
+
+// childLineMax is the most a child stream's scanner returns as one token. It
+// sits well under the scanner's 64 KiB buffer, so a longer line is delivered in
+// pieces instead of failing the scan (BF-06).
+const childLineMax = 32 << 10
+
+// boundedSplit never lets a token exceed limit: when split finds no token in a
+// full limit-sized window, the window itself is returned, so the scanner cannot
+// fail with ErrTooLong and stop draining the child.
+func boundedSplit(split bufio.SplitFunc, limit int) bufio.SplitFunc {
+	return func(data []byte, atEOF bool) (int, []byte, error) {
+		adv, tok, err := split(data, atEOF)
+		if adv == 0 && tok == nil && err == nil && len(data) >= limit {
+			return limit, data[:limit], nil
+		}
+		return adv, tok, err
+	}
+}
+
+// newChildScanner scans one child stream with its tokens bounded by
+// childLineMax.
+func newChildScanner(src io.Reader, split bufio.SplitFunc) *bufio.Scanner {
+	s := bufio.NewScanner(src)
+	s.Buffer(make([]byte, 0, 64<<10), 64<<10)
+	s.Split(boundedSplit(split, childLineMax))
+	return s
+}
+
+// feedLines hands each line of one child stream to observe. If the scan stops
+// early, the rest of src is drained, so the copy that feeds src never blocks on
+// a reader that has given up (BF-06).
+func feedLines(src io.Reader, split bufio.SplitFunc, observe func(string)) {
+	scanner := newChildScanner(src, split)
+	for scanner.Scan() {
+		observe(scanner.Text())
+	}
+	if scanner.Err() != nil {
+		_, _ = io.Copy(io.Discard, src)
+	}
 }
