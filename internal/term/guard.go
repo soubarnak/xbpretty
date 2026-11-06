@@ -126,6 +126,16 @@ func (g *Guard) SetMouse(on bool) {
 	g.mouse = on
 }
 
+// TrackCursorHidden records that the cursor was hidden by a writer other than
+// the guard: the inline viewport hides it when it anchors (BF-45). Restore then
+// shows it on every exit path, including a panic or signal that unwinds past
+// the viewport's own Teardown. It writes nothing itself.
+func (g *Guard) TrackCursorHidden() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.cursorHi = true
+}
+
 // RestoreTermios restores the saved mode without touching the screen.
 func (g *Guard) RestoreTermios() {
 	g.mu.Lock()

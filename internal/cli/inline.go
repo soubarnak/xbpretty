@@ -59,6 +59,11 @@ func (st *state) startInline(live *liveProgress) *inlineSurface {
 		}
 	}
 	vp.Start(tui.Anchor{})
+	if s.guard != nil {
+		// The viewport hid the cursor when it anchored (BF-45). The guard must
+		// know, so a panic or signal that skips Teardown still shows it.
+		s.guard.TrackCursorHidden()
+	}
 	live.SetInline(vp, s.guard, s.guard != nil)
 	s.watchWidth(func() int { return terminalWidth(st.stderr) })
 	return s

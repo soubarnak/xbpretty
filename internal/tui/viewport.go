@@ -24,11 +24,14 @@ type Viewport struct {
 	width  int
 	height int
 	// started is set by Start, drawn tracks whether the box is currently on
-	// screen, hidden is the `?1049h/l` latch's state. The mutex keeps a
-	// deferred Teardown safe against a concurrent render or latch redraw.
-	started bool
-	drawn   bool
-	hidden  bool
+	// screen, hidden is the `?1049h/l` latch's state, cursorHidden records
+	// that Start hid the cursor and Teardown must show it again. The mutex
+	// keeps a deferred Teardown safe against a concurrent render or latch
+	// redraw.
+	started      bool
+	drawn        bool
+	hidden       bool
+	cursorHidden bool
 }
 
 // NewViewport creates the inline surface for a terminal of width columns. The
@@ -82,7 +85,8 @@ func (v *Viewport) SetWidth(width int) {
 	v.width = clampViewportWidth(width)
 }
 
-// Start anchors the viewport. An answered DSR needs no output; a silent one
+// Start anchors the viewport. The cursor is hidden first so it never blinks
+// inside the box (BF-45). An answered DSR needs nothing more; a silent one
 // writes the no-anchor fallback so the box starts on a fresh line (AC-055).
 func (v *Viewport) Start(a Anchor) {
 	v.mu.Lock()
@@ -91,9 +95,8 @@ func (v *Viewport) Start(a Anchor) {
 		return
 	}
 	v.started = true
-	if seq := a.BeginSequence(); seq != "" {
-		_, _ = io.WriteString(v.out, seq)
-	}
+	v.cursorHidden = true
+	_, _ = io.WriteString(v.out, term.CursorHide+a.BeginSequence())
 }
 
 // Draw repaints the box. The cursor ends at column zero of the last row, which
@@ -144,16 +147,29 @@ func (v *Viewport) Show(lines []string) {
 	v.writeBox(lines)
 }
 
-// Teardown clears the box and stops all further drawing. It is idempotent so
-// every exit path can call it.
+// Teardown shows the cursor again, clears the box and stops all further
+// drawing. The erase stays the last write of a teardown, the contract the
+// progress tests pin on the stream. It is idempotent so every exit path can
+// call it.
 func (v *Viewport) Teardown() {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if !v.started {
 		return
 	}
+	v.showCursor()
 	v.erase()
 	v.started = false
+}
+
+// showCursor undoes Start's cursor hide once. It is a no-op when Start did not
+// hide the cursor or when it was already shown.
+func (v *Viewport) showCursor() {
+	if !v.cursorHidden {
+		return
+	}
+	_, _ = io.WriteString(v.out, term.CursorShow)
+	v.cursorHidden = false
 }
 
 // erase unwinds the box from the cursor on its last row to the first row and

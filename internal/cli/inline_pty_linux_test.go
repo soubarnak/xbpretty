@@ -179,6 +179,9 @@ func TestInlineViewportOnTheNormalScreen(t *testing.T) {
 	if strings.Contains(capture, term.AltEnter) {
 		t.Error("xbpretty entered an alternate screen")
 	}
+	// BF-45: the cursor is hidden before the first box and shown after the
+	// last erase, so a normal exit leaves the cursor visible.
+	assertCursorBracketsTheBox(t, capture)
 	// FR-072's no-anchor fallback is the only inline path: a DSR query would
 	// have to read the queued stdin bytes, so the box starts on a fresh line.
 	firstBox := strings.Index(capture, "╭")
@@ -375,6 +378,8 @@ func TestInlineViewportCtrlCExits130AndTearsDown(t *testing.T) {
 	if strings.Contains(capture, term.AltEnter) {
 		t.Error("the inline viewport entered an alternate screen")
 	}
+	// BF-45: the SIGINT path tears the box down and shows the cursor.
+	assertCursorBracketsTheBox(t, capture)
 	r.assertTermiosRestored(t)
 }
 
@@ -827,6 +832,8 @@ func TestInlineViewportCtrlCThroughTheTTY(t *testing.T) {
 	if strings.Count(capture, term.AltEnter) != 1 {
 		t.Errorf("alternate-screen entries = %d, want 1 (S1 only)", strings.Count(capture, term.AltEnter))
 	}
+	// BF-45: a real ^C ends with the cursor shown after the box erase.
+	assertCursorBracketsTheBox(t, capture)
 	// The box is torn down after the interruption rather than left painted.
 	if strings.HasSuffix(capture, "╯\r") {
 		t.Errorf("the inline box was left on screen after ^C")

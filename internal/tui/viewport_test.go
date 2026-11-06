@@ -17,11 +17,11 @@ func TestViewportNoAnchorStart(t *testing.T) {
 	var out bytes.Buffer
 	vp := NewViewport(&out, 80)
 	vp.Start(Anchor{})
-	if got, want := out.String(), term.NoAnchor; got != want {
+	if got, want := out.String(), term.CursorHide+term.NoAnchor; got != want {
 		t.Fatalf("Start without anchor = %q, want %q", got, want)
 	}
 	vp.Draw(inlineBox)
-	want := term.NoAnchor + "┏━┓\n┃x┃\n┗━┛\r"
+	want := term.CursorHide + term.NoAnchor + "┏━┓\n┃x┃\n┗━┛\r"
 	if got := out.String(); got != want {
 		t.Fatalf("no-anchor draw = %q, want %q", got, want)
 	}
@@ -31,13 +31,14 @@ func TestViewportNoAnchorStart(t *testing.T) {
 }
 
 // TestViewportAnchorWritesNothingBeforeTheBox keeps the DSR reply path quiet:
-// an answered query needs no extra line.
+// an answered query needs no extra line. The only byte is the cursor hide
+// (BF-45), which is not a line and does not move the box.
 func TestViewportAnchorWritesNothingBeforeTheBox(t *testing.T) {
 	var out bytes.Buffer
 	vp := NewViewport(&out, 80)
 	vp.Start(Anchor{Row: 12, Col: 1, OK: true})
-	if got := out.String(); got != "" {
-		t.Fatalf("anchored Start wrote %q, want nothing", got)
+	if got, want := out.String(), term.CursorHide; got != want {
+		t.Fatalf("anchored Start wrote %q, want only the cursor hide %q", got, want)
 	}
 }
 
@@ -150,8 +151,9 @@ func TestViewportHideShowsTheFullScreenLatch(t *testing.T) {
 	}
 }
 
-// TestViewportTeardownClears is FR-072's teardown: erase the box, stop drawing,
-// and stay idempotent around a deferred second call.
+// TestViewportTeardownClears is FR-072's teardown: show the cursor again
+// (BF-45), erase the box, stop drawing, and stay idempotent around a deferred
+// second call.
 func TestViewportTeardownClears(t *testing.T) {
 	var out bytes.Buffer
 	vp := NewViewport(&out, 80)
@@ -159,7 +161,7 @@ func TestViewportTeardownClears(t *testing.T) {
 	vp.Draw(inlineBox)
 	before := out.Len()
 	vp.Teardown()
-	if got, want := out.String()[before:], term.MoveUp(2)+"\r"+clearDown; got != want {
+	if got, want := out.String()[before:], term.CursorShow+term.MoveUp(2)+"\r"+clearDown; got != want {
 		t.Fatalf("teardown = %q, want %q", got, want)
 	}
 	after := out.Len()
@@ -179,7 +181,7 @@ func TestViewportInsertWithoutDraw(t *testing.T) {
 	vp := NewViewport(&out, 80)
 	vp.Start(Anchor{OK: true})
 	vp.Insert("first")
-	if got, want := out.String(), "first\n"; got != want {
+	if got, want := out.String(), term.CursorHide+"first\n"; got != want {
 		t.Fatalf("insert before draw = %q, want %q", got, want)
 	}
 }
@@ -223,8 +225,8 @@ func TestViewportShowBeforeStartIsInert(t *testing.T) {
 	}
 	vp.Start(Anchor{OK: true})
 	vp.Hide()
-	before := out.Len()
 	vp.Teardown()
+	before := out.Len()
 	vp.Show(inlineBox)
 	if out.Len() != before {
 		t.Fatalf("Show after Teardown wrote %q", out.String()[before:])
