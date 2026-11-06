@@ -407,6 +407,21 @@ func OpenTransactionLog(path string) (*os.File, error) {
 	return f, nil
 }
 
+// OpenTransactionLogRead opens the log for reading with the same no-follow and
+// ownership rules as OpenTransactionLog, and never creates it. A missing file
+// returns an error satisfying fs.ErrNotExist.
+func OpenTransactionLogRead(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|logOpenFlags, 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkTransactionLog(f); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
 // checkTransactionLog judges the opened log through its descriptor.
 func checkTransactionLog(f *os.File) error {
 	info, err := f.Stat()

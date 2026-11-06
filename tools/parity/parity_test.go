@@ -22,7 +22,7 @@ func TestParityMatrix(t *testing.T) {
 	if len(m.Inventory) != 189 || len(m.Matrix) != 189 {
 		t.Fatalf("parity: want 189/189 rows, got %d/%d", len(m.Inventory), len(m.Matrix))
 	}
-	if m.NACount() != 37 {
-		t.Fatalf("parity: want 37 n/a rows, got %d", m.NACount())
+	if m.NACount() != 35 {
+		t.Fatalf("parity: want 35 n/a rows, got %d", m.NACount())
 	}
 }

@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	releaseVersion = "0.4.0"
-	releaseTag     = "xbpretty-v0.4.0"
+	releaseVersion = "0.4.1"
+	releaseTag     = "xbpretty-v0.4.1"
 	// These literals come from FR-001 / AC-058, not from spec.LinkNames(), so
 	// a change to the implementation constant cannot make the drift test
 	// agree with itself.
@@ -298,7 +298,7 @@ func TestReleaseGatesEnforceBudgetsAndStaticLink(t *testing.T) {
 		t.Errorf("binary gate failure does not name the 8,000,000-byte budget:\n%s", out)
 	}
 
-	bigPkg := filepath.Join(t.TempDir(), "xbpretty-0.4.0_1.x86_64.xbps")
+	bigPkg := filepath.Join(t.TempDir(), "xbpretty-0.4.1_1.x86_64.xbps")
 	if err := os.WriteFile(bigPkg, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -38,6 +38,7 @@ type syncTracker struct {
 	size    int64
 	errText string
 
+	failedRepos  int
 	fetchedRepos int
 	fetchedBytes int64
 }
@@ -94,6 +95,7 @@ func (t *syncTracker) failed(url, reason string) {
 	}
 	t.status = repoError
 	t.errText = reason
+	t.failedRepos++
 }
 
 // finish emits the last repository's line at the end of the sync.
@@ -132,6 +134,11 @@ func (t *syncTracker) finishLocked() {
 func (t *syncTracker) completion(elapsed time.Duration) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.failedRepos > 0 && t.fetchedRepos == 0 {
+		// xbps exits 0 when every repository fails; claiming "Nothing to fetch"
+		// after Error lines would be wrong.
+		return ""
+	}
 	text := "Nothing to fetch"
 	if t.fetchedRepos > 0 {
 		seconds := elapsed.Seconds()
@@ -232,7 +239,9 @@ func (st *state) runSync(caller string) (int, hints.Output, error) {
 		st.printCaptured(output)
 		return code, output, nil
 	}
-	fmt.Fprintln(st.stderr, tracker.completion(time.Since(started)))
+	if line := tracker.completion(time.Since(started)); line != "" {
+		fmt.Fprintln(st.stderr, line)
+	}
 	return -1, output, nil
 }
 

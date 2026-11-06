@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"strings"
 
 	"github.com/soubarnak/xbpretty/internal/config"
@@ -37,7 +36,7 @@ func (st *state) runLog(opts *options) int {
 		st.errorf("cannot locate the transaction log: %v\n", err)
 		return exitRuntime
 	}
-	f, err := os.Open(path)
+	f, err := config.OpenTransactionLogRead(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return st.nothingLogged()

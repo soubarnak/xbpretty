@@ -80,3 +80,13 @@ func TestSyncTrackerColourUsesRoles(t *testing.T) {
 		t.Errorf("Error label is not Error: %q", lines[1])
 	}
 }
+
+func TestSyncCompletionIsSilentWhenEveryRepositoryFailed(t *testing.T) {
+	tracker := newSyncTracker(summary.Theme{}, false, func(string) {})
+	tracker.start("https://r.example/current/x86_64-repodata")
+	tracker.failed("https://r.example/current/x86_64-repodata", "Connection refused")
+	tracker.finish()
+	if got := tracker.completion(time.Second); got != "" {
+		t.Fatalf("completion after only errors = %q, want empty", got)
+	}
+}
