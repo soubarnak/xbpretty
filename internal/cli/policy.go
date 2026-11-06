@@ -317,6 +317,15 @@ func (st *state) runPolicyPackages(opts *options) int {
 		if name == "" {
 			name = token
 		}
+		// BF-41: a virtual token resolves on the repository side to its
+		// provider, so the installed record is asked under the canonical
+		// name. Otherwise an installed provider reads as "Installed: none".
+		if name != token && !installedFound {
+			installedRec, installedFound, code = st.record("-S", name)
+			if code >= 0 {
+				return code
+			}
+		}
 		variants := s.repo[name]
 		if !installedFound && !candidateFound && len(variants) == 0 {
 			missing = append(missing, token)

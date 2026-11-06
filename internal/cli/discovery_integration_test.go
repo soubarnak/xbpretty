@@ -561,7 +561,9 @@ func TestAC020ShowAllMissingStillNotice(t *testing.T) {
 
 func TestAC019SummaryDescriptionCompositionAndOrGlobs(t *testing.T) {
 	bin, _, _, env := discoveryEnv(t)
-	env["XB_STUB_LONG_DESC"] = "alpha-2.0_1: The long alpha description (https://example.test/alpha)\n"
+	// Repository-mode long_desc carries the repository URL as a trailing
+	// `(URL)` on every row (BF-40); the description text is what precedes it.
+	env["XB_STUB_LONG_DESC"] = "alpha-2.0_1: The long alpha description (https://repo-de.voidlinux.org/current)\n"
 	code, out, errs := runDiscovery(t, bin, env, "list", "--summary", "beta")
 	if code != 0 {
 		t.Fatalf("list --summary exit = %d\n%s", code, errs)
@@ -575,7 +577,7 @@ func TestAC019SummaryDescriptionCompositionAndOrGlobs(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("list --description exit = %d\n%s", code, errs)
 	}
-	want = "alpha (2.0_1) [repo-de.voidlinux.org/current] [Installed, Upgradable from: 1.0_1]\nThe long alpha description (https://example.test/alpha)\n"
+	want = "alpha (2.0_1) [repo-de.voidlinux.org/current] [Installed, Upgradable from: 1.0_1]\nThe long alpha description\n"
 	if out != want {
 		t.Errorf("list --description = %q, want %q", out, want)
 	}
@@ -611,8 +613,11 @@ func TestAC019FailedUpgradePlanForwardsStderrAndKeepsExitZero(t *testing.T) {
 	if strings.Contains(out, "Upgradable from:") {
 		t.Errorf("failed plan still printed an upgrade:\n%s", out)
 	}
-	if !strings.Contains(out, "alpha (2.0_1) [repo-de.voidlinux.org/current] []\n") {
-		t.Errorf("repository fallback row missing after failed plan:\n%s", out)
+	// BF-15: with no plan the installed copy is the honest row. The
+	// repository candidate is not shown as an upgrade, and the installed
+	// state is not dropped.
+	if out != "alpha (1.0_1) [local] [Installed]\n" {
+		t.Errorf("failed-plan row = %q, want the installed row", out)
 	}
 	if errs != "ERROR: failed to open repodata\n" {
 		t.Errorf("stderr = %q", errs)

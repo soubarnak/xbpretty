@@ -27,7 +27,7 @@ func TestRepositorySuffixAcceptsSchemesAndLocalPaths(t *testing.T) {
 
 func TestLongDescriptionKeepsURLTails(t *testing.T) {
 	desc := "A tool that ends with (https://example.test/tool)"
-	got := parseDescriptionProperty("tool-1.0_1: " + desc + "\n")
+	got := parseDescriptionProperty("tool-1.0_1: "+desc+"\n", false)
 	if got["tool-1.0_1"] != desc {
 		t.Errorf("long_desc = %q, want the literal description %q", got["tool-1.0_1"], desc)
 	}

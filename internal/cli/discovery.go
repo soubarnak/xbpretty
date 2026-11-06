@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"regexp"
@@ -152,8 +153,8 @@ func (st *state) loadDiscoverySnapshot(needs discoveryNeeds) (*discoverySnapshot
 		if !ok {
 			return nil, repoLong.exitCode, false
 		}
-		s.longDesc = parseDescriptionProperty(repoLong.stdout)
-		for pkgver, desc := range parseDescriptionProperty(installedDesc.stdout) {
+		s.longDesc = parseDescriptionProperty(repoLong.stdout, true)
+		for pkgver, desc := range parseDescriptionProperty(installedDesc.stdout, false) {
 			s.longDesc[pkgver] = desc
 		}
 	}
@@ -367,9 +368,13 @@ func isRepositoryURI(value string) bool {
 	return false
 }
 
-func parseDescriptionProperty(stdout string) map[string]string {
+// parseDescriptionProperty reads one long_desc pass. Repository-mode rows end
+// in xbps's `(URL)` repository suffix, which is not description text (BF-40),
+// so that pass strips it. Installed-mode rows carry no suffix and keep their
+// text whole, URL tails included.
+func parseDescriptionProperty(stdout string, repositoryMode bool) map[string]string {
 	out := map[string]string{}
-	for _, row := range parsePropertyRows(stdout, false) {
+	for _, row := range parsePropertyRows(stdout, repositoryMode) {
 		out[row[0]] = row[1]
 	}
 	return out
@@ -450,6 +455,11 @@ func (st *state) runSearch(opts *options) int {
 }
 
 func (st *state) runDiscoveryRows(opts *options, search bool) int {
+	// BF-44: an unclosed brace is a usage error, refused before any child runs.
+	if token, unbalanced := unbalancedGlobToken(opts.args, search); unbalanced {
+		st.errorf("invalid pattern '%s': %v\n", token, errUnbalancedBrace)
+		return exitUsage
+	}
 	needs := discoveryNeeds{
 		installed: true, manual: true, holds: true, orphans: true, repolocked: true,
 		plan: !opts.virtual, description: opts.description, virtual: opts.virtual,
@@ -459,8 +469,7 @@ func (st *state) runDiscoveryRows(opts *options, search bool) int {
 		return code
 	}
 
-	namesNeedingResolution := s.namesNeedingResolution(opts)
-	if len(namesNeedingResolution) > 0 {
+	if namesNeedingResolution := s.namesNeedingResolution(opts, search); len(namesNeedingResolution) > 0 {
 		resolved, err := st.resolveMultiVariant(namesNeedingResolution)
 		if err != nil {
 			st.errorf("%v\n", err)
@@ -469,29 +478,48 @@ func (st *state) runDiscoveryRows(opts *options, search bool) int {
 		s.resolved = resolved
 	}
 
-	rows := s.rows(opts)
-	if search {
-		filtered, badPattern, err := filterSearchRows(rows, opts.args, opts.namesOnly)
-		if err != nil {
-			st.errorf("invalid pattern '%s': %v\n", badPattern, err)
-			return exitRuntime
-		}
-		rows = filtered
-	} else {
-		filtered, notices, badPattern, err := filterGlobRows(rows, opts.args)
-		if err != nil {
-			st.errorf("invalid pattern '%s': %v\n", badPattern, err)
-			return exitRuntime
-		}
-		for _, notice := range notices {
-			fmt.Fprintf(st.stderr, "Notice: '%s' was not found\n", notice)
-		}
-		rows = filtered
+	rows, notices, badPattern, err := filterDiscoveryRows(s.rows(opts), opts, search)
+	if err != nil {
+		st.errorf("invalid pattern '%s': %v\n", badPattern, err)
+		return exitRuntime
+	}
+	for _, notice := range notices {
+		fmt.Fprintf(st.stderr, "Notice: '%s' was not found\n", notice)
 	}
 	return st.renderDiscoveryRows(rows, opts, s)
 }
 
-func (s *discoverySnapshot) namesNeedingResolution(opts *options) []string {
+// unbalancedGlobToken returns the first list token with an unclosed brace.
+// Search patterns are RE2, where braces are not glob alternatives.
+func unbalancedGlobToken(tokens []string, search bool) (string, bool) {
+	if search {
+		return "", false
+	}
+	for _, token := range tokens {
+		if _, err := parseGlobToken(token); errors.Is(err, errUnbalancedBrace) {
+			return token, true
+		}
+	}
+	return "", false
+}
+
+// filterDiscoveryRows applies the token filter: FR-024's globs for list, RE2
+// over names and descriptions for search. Glob notices name each token that
+// selected nothing.
+func filterDiscoveryRows(rows []discovery.Row, opts *options, search bool) ([]discovery.Row, []string, string, error) {
+	if search {
+		filtered, badPattern, err := filterSearchRows(rows, opts.args, opts.namesOnly)
+		return filtered, nil, badPattern, err
+	}
+	return filterGlobRows(rows, opts.args)
+}
+
+// namesNeedingResolution lists the repository-only names with more than one
+// variant. BF-43: a name is kept only when the token filter keeps one of its
+// variants, so a name no token selects costs no `-R -S` call. The variants are
+// filtered as the rows they would be, so globs on =version and :arch and
+// search on descriptions decide the same way the final pass does.
+func (s *discoverySnapshot) namesNeedingResolution(opts *options, search bool) []string {
 	if opts.virtual || opts.installed || opts.upgradable || opts.allVersions {
 		return nil
 	}
@@ -509,7 +537,30 @@ func (s *discoverySnapshot) namesNeedingResolution(opts *options) []string {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return names
+	if len(opts.args) == 0 {
+		return names
+	}
+	var variantRows []discovery.Row
+	for _, name := range names {
+		variantRows = append(variantRows, s.repo[name]...)
+	}
+	kept, _, _, err := filterDiscoveryRows(variantRows, opts, search)
+	if err != nil {
+		// A bad pattern is reported by the final filter, after the snapshot
+		// has been read; it must not cost record queries first.
+		return nil
+	}
+	keep := make(map[string]bool, len(kept))
+	for _, row := range kept {
+		keep[row.Name] = true
+	}
+	matched := names[:0]
+	for _, name := range names {
+		if keep[name] {
+			matched = append(matched, name)
+		}
+	}
+	return matched
 }
 
 func (s *discoverySnapshot) rows(opts *options) []discovery.Row {
@@ -591,8 +642,14 @@ func (s *discoverySnapshot) defaultRow(name string) discovery.Row {
 			}
 		}
 	}
-	if info, ok := s.installed[name]; ok && chosen.Pkgver == info.Pkgver {
-		return s.attachInstalled(chosen, info)
+	if info, ok := s.installed[name]; ok {
+		// BF-15: an installed copy that differs from the chosen repository
+		// candidate (held, or locally newer) keeps its installed state. The
+		// candidate stays visible under list -a and show.
+		if chosen.Pkgver == info.Pkgver {
+			return s.attachInstalled(chosen, info)
+		}
+		return s.installedRow(name, info)
 	}
 	return chosen
 }
@@ -767,37 +824,11 @@ func filterGlobRows(rows []discovery.Row, tokens []string) ([]discovery.Row, []s
 	if len(tokens) == 0 {
 		return rows, nil, "", nil
 	}
-	type matcher struct {
-		token   string
-		pattern string
-		version string
-		arch    string
-	}
-	matchers := make([]matcher, 0, len(tokens))
+	matchers := make([]globMatcher, 0, len(tokens))
 	for _, token := range tokens {
-		m := matcher{token: token, pattern: token}
-		if name, arch, ok := strings.Cut(m.pattern, ":"); ok && arch != "" && !strings.HasPrefix(name, "cmd") && !strings.HasPrefix(name, "shlib") {
-			m.pattern, m.arch = name, arch
-		}
-		if name, version, ok := strings.Cut(m.pattern, "="); ok {
-			m.pattern, m.version = name, version
-		}
-		expanded, err := expandBraces(m.pattern)
+		m, err := parseGlobToken(token)
 		if err != nil {
 			return nil, nil, token, err
-		}
-		m.pattern = expanded[0]
-		if len(expanded) > 1 {
-			// A brace token is OR-ed internally; keep it as a synthetic
-			// pattern set by testing each alternative below.
-			m.pattern = strings.Join(expanded, "\x00")
-		}
-		// Validate the glob before running it, so a bad token is a runtime
-		// error even when another token matches.
-		for _, glob := range expanded {
-			if _, err := path.Match(strings.ToLower(glob), "x"); err != nil {
-				return nil, nil, token, err
-			}
 		}
 		matchers = append(matchers, m)
 	}
@@ -825,6 +856,77 @@ func filterGlobRows(rows []discovery.Row, tokens []string) ([]discovery.Row, []s
 	return out, notices, "", nil
 }
 
+// globMatcher is one parsed list token: the name glob (alternatives joined by
+// NUL), an optional =version and an optional :arch.
+type globMatcher struct {
+	token   string
+	pattern string
+	version string
+	arch    string
+}
+
+// parseGlobToken splits one list token into its name glob, version and arch,
+// expands its braces and validates every alternative, so a bad token is a
+// runtime error even when another token matches.
+func parseGlobToken(token string) (globMatcher, error) {
+	m := globMatcher{token: token, pattern: token}
+	if name, arch, ok := splitGlobArch(m.pattern); ok {
+		m.pattern, m.arch = name, arch
+	}
+	if name, version, ok := strings.Cut(m.pattern, "="); ok {
+		m.pattern, m.version = name, version
+	}
+	expanded, err := expandBraces(m.pattern)
+	if err != nil {
+		return m, err
+	}
+	// A brace token is OR-ed internally: each alternative is one glob.
+	m.pattern = strings.Join(expanded, "\x00")
+	for _, glob := range expanded {
+		if _, err := path.Match(pathGlob(glob), "x"); err != nil {
+			return m, err
+		}
+	}
+	return m, nil
+}
+
+// splitGlobArch splits `name:arch` at the last colon, and only when the suffix
+// is an architecture Void ships. A colon inside a virtual name (`pc:zlib-ng`,
+// `font:*`) stays part of the name, and so does the `cmd` and `shlib` kind
+// prefix of a virtual row.
+func splitGlobArch(token string) (string, string, bool) {
+	cut := strings.LastIndexByte(token, ':')
+	if cut <= 0 || cut == len(token)-1 {
+		return token, "", false
+	}
+	name, arch := token[:cut], token[cut+1:]
+	if name == "cmd" || name == "shlib" || !knownArch(arch) {
+		return token, "", false
+	}
+	return name, arch, true
+}
+
+// voidArches are the architectures Void ships without a family prefix. Each
+// may carry a -musl suffix; the ppc and mips families are matched by prefix.
+var voidArches = map[string]bool{
+	"noarch": true, "x86_64": true, "i686": true, "aarch64": true,
+	"armv6l": true, "armv7l": true,
+}
+
+func knownArch(arch string) bool {
+	base := strings.TrimSuffix(arch, "-musl")
+	if voidArches[base] {
+		return true
+	}
+	return strings.HasPrefix(base, "ppc") || strings.HasPrefix(base, "mips")
+}
+
+// pathGlob is the pattern path.Match reads. Names fold to lower case, and
+// nala's `[!x]` negation is path's `[^x]`.
+func pathGlob(glob string) string {
+	return strings.ReplaceAll(strings.ToLower(glob), "[!", "[^")
+}
+
 func globRowMatches(row discovery.Row, pattern, version, arch string) bool {
 	if version != "" && row.FullVersion() != version && row.Version != version {
 		return false
@@ -833,7 +935,7 @@ func globRowMatches(row discovery.Row, pattern, version, arch string) bool {
 		return false
 	}
 	for _, glob := range strings.Split(pattern, "\x00") {
-		ok, err := path.Match(strings.ToLower(glob), strings.ToLower(row.Name))
+		ok, err := path.Match(pathGlob(glob), strings.ToLower(row.Name))
 		if err == nil && ok {
 			return true
 		}
@@ -841,8 +943,12 @@ func globRowMatches(row discovery.Row, pattern, version, arch string) bool {
 	return false
 }
 
+// errUnbalancedBrace is a list token whose `{` no `}` closes. It is a usage
+// error (BF-44), not a literal to match.
+var errUnbalancedBrace = errors.New("unbalanced '{'")
+
 // expandBraces expands nala's {a,b} glob alternative. Nested braces are not
-// part of the surface; an unmatched brace is left for path.Match to reject.
+// part of the surface; a `{` that no `}` closes is errUnbalancedBrace.
 func expandBraces(pattern string) ([]string, error) {
 	open := strings.IndexByte(pattern, '{')
 	if open < 0 {
@@ -850,7 +956,7 @@ func expandBraces(pattern string) ([]string, error) {
 	}
 	close := strings.IndexByte(pattern[open:], '}')
 	if close < 0 {
-		return []string{pattern}, nil
+		return nil, errUnbalancedBrace
 	}
 	close += open
 	body := pattern[open+1 : close]
@@ -945,23 +1051,43 @@ func (st *state) runShow(opts *options) int {
 	var blocks []block
 	var additional int
 
-	for _, name := range opts.args {
-		installedRec, found, code := st.record("-S", name)
+	for _, token := range opts.args {
+		installedRec, installed, code := st.record("-S", token)
 		if code >= 0 {
 			return code
 		}
+		// BF-42: a pkgver, a pattern or a virtual name is not an installed
+		// name, so the repository record query answers it before the token is
+		// reported missing. The record names the package, and that name drives
+		// the installed and variant lookups.
+		var candidateRec *xbpsRecord
+		name := token
+		if !installed {
+			rec, found, code := st.record("-R", "-S", token)
+			if code >= 0 {
+				return code
+			}
+			if found {
+				candidateRec = rec
+				name = policyRecordName(rec)
+				if name != token {
+					installedRec, installed, code = st.record("-S", name)
+					if code >= 0 {
+						return code
+					}
+				}
+			}
+		}
 		variants := s.repo[name]
-		if !found && len(variants) == 0 {
-			missing = append(missing, name)
+		if !installed && candidateRec == nil && len(variants) == 0 {
+			missing = append(missing, token)
 			continue
 		}
 
 		var perName []block
-		installedPrinted := false
-		if found {
+		if installed {
 			row := s.recordRow(installedRec, true)
 			perName = append(perName, block{row: row, props: installedRec})
-			installedPrinted = true
 		}
 
 		if opts.allVersions {
@@ -985,21 +1111,23 @@ func (st *state) runShow(opts *options) int {
 				}
 				perName = append(perName, block{row: row, props: rec})
 			}
-		} else if !installedPrinted {
-			rec, variantFound, code := st.record("-R", "-S", name)
-			if code >= 0 {
-				return code
+			if len(variants) == 0 && candidateRec != nil {
+				// A pkgver or virtual token with no variant row still prints
+				// the repository record it resolved to.
+				row := s.recordRow(candidateRec, false)
+				perName = append(perName, block{row: row, props: candidateRec})
 			}
-			if !variantFound {
-				missing = append(missing, name)
+		} else if !installed {
+			if candidateRec == nil {
+				missing = append(missing, token)
 				continue
 			}
-			row := s.recordRow(rec, false)
-			perName = append(perName, block{row: row, props: rec})
+			row := s.recordRow(candidateRec, false)
+			perName = append(perName, block{row: row, props: candidateRec})
 		}
 
 		if len(perName) > 0 && !opts.allVersions {
-			if installedPrinted {
+			if installed {
 				additional += len(variants)
 			} else if len(variants) > 1 {
 				additional += len(variants) - 1
