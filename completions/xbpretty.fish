@@ -110,6 +110,8 @@ function __xbpretty_no_subcommand
 end
 
 function __xbpretty_installed
+    set -l word (commandline -ct)
+    string match -q -- '-*' $word; and return 0
     LC_ALL=C xbps-query -l 2>/dev/null | awk '{print $2}' | string replace -r -- '-[^-]*$' ''
 end
 
