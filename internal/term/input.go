@@ -6,7 +6,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 )
 
@@ -97,6 +96,11 @@ type Decoder struct {
 	f       *os.File
 	reader  io.Reader
 	pending []byte
+	// inPaste is set from ESC[200~ until ESC[201~: readKey discards every byte
+	// in between, however long the paste pauses (FR-072). pasteTail is the
+	// sliding window that matches the terminator.
+	inPaste   bool
+	pasteTail [len(pasteEnd)]byte
 	// cancel makes a blocking tty read abandonable: the screen closes this
 	// channel before waiting for the decoder goroutine, so no surface can
 	// keep consuming stdin after Close (FR-072).
@@ -124,6 +128,15 @@ func newReaderDecoder(r io.Reader) *Decoder { return &Decoder{reader: r} }
 func (d *Decoder) ReadKey() (Key, error) { return d.readKey() }
 
 func (d *Decoder) readKey() (Key, error) {
+	if d.inPaste {
+		ctrlC, ok := d.discardPaste()
+		if !ok {
+			return Key{}, io.EOF
+		}
+		if ctrlC {
+			return Key{Type: KeyCtrlC}, nil
+		}
+	}
 	b, ok, err := d.nextByte(-1)
 	if err != nil {
 		return Key{}, err
@@ -339,15 +352,17 @@ func (d *Decoder) readCSI() (Key, error) {
 		}
 		return Key{Type: KeyUnknown}, nil
 	case 'M', 'm':
-		// SGR mouse: ESC[<b;x;yM
+		// SGR mouse: ESC[<b;x;yM. Buttons 64 and 65 are the vertical wheel.
+		// 66 and 67 are the horizontal wheel and must not scroll (BF-28).
+		// Shift, meta, ctrl and motion are modifier bits, masked off first.
 		if strings.HasPrefix(body, "<") {
 			parts := strings.Split(body[1:], ";")
 			if len(parts) == 3 && final == 'M' {
 				btn, _ := strconv.Atoi(parts[0])
-				if btn&64 != 0 {
-					if btn&1 == 0 {
-						return Key{Type: KeyWheelUp}, nil
-					}
+				switch btn &^ (4 | 8 | 16 | 32) {
+				case 64:
+					return Key{Type: KeyWheelUp}, nil
+				case 65:
 					return Key{Type: KeyWheelDown}, nil
 				}
 			}
@@ -366,7 +381,9 @@ func (d *Decoder) readCSI() (Key, error) {
 		case "3":
 			return Key{Type: KeyDelete}, nil
 		case "200":
-			d.discardPaste()
+			// readKey consumes the pasted content from here on (FR-072).
+			d.inPaste = true
+			d.pasteTail = [len(pasteEnd)]byte{}
 			return Key{Type: KeyPaste}, nil
 		}
 		return Key{Type: KeyUnknown}, nil
@@ -374,25 +391,34 @@ func (d *Decoder) readCSI() (Key, error) {
 	return Key{Type: KeyUnknown}, nil
 }
 
-// discardPaste consumes until ESC[201~; the content is deliberately thrown
-// away so a pasted "y" cannot confirm a transaction (FR-072).
-func (d *Decoder) discardPaste() {
-	var window []byte
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if d.cancelled() {
-			return
+// pasteEnd is the bracketed-paste terminator.
+const pasteEnd = "\x1b[201~"
+
+// discardPaste consumes pasted content through the ESC[201~ terminator, which
+// clears inPaste. The content is deliberately thrown away so a pasted "y"
+// cannot confirm a transaction (FR-072). There is no time bound: a paste may
+// pause for any length of time, and only the terminator, EOF, a read error or
+// cancel ends the wait. ok is false in the last three cases, and the decoder
+// stays in paste mode.
+//
+// ctrlC reports that the content carried ETX. A raw-mode terminal sends Ctrl-C
+// as that byte, so the user keeps a way out of a paste whose terminator never
+// arrives. Paste mode continues after it, and the text that follows stays
+// discarded.
+func (d *Decoder) discardPaste() (ctrlC, ok bool) {
+	for {
+		b, got, _ := d.nextByte(-1)
+		if !got {
+			return false, false
 		}
-		b, ok, _ := d.nextByte(100)
-		if !ok {
-			return
+		copy(d.pasteTail[:], d.pasteTail[1:])
+		d.pasteTail[len(pasteEnd)-1] = b
+		if string(d.pasteTail[:]) == pasteEnd {
+			d.inPaste = false
+			return false, true
 		}
-		window = append(window, b)
-		if len(window) > 6 {
-			window = window[len(window)-6:]
-		}
-		if string(window) == "\x1b[201~" {
-			return
+		if b == 0x03 {
+			return true, true
 		}
 	}
 }

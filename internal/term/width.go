@@ -104,6 +104,15 @@ var wideRanges = []runeRange{
 	{0x1f191, 0x1f19a}, // squared symbols
 	{0x1f200, 0x1f2ff}, // enclosed ideographs
 	{0x1f300, 0x1f64f}, // emoji
+	{0x1f680, 0x1f6c5}, // transport and map symbols
+	{0x1f6cc, 0x1f6cc}, // sleeping accommodation
+	{0x1f6d0, 0x1f6d2}, // place of worship, stop, shopping trolley
+	{0x1f6d5, 0x1f6d7}, // hindu temple, hut, elevator
+	{0x1f6dc, 0x1f6df}, // wireless, playground slide, wheel, ring buoy
+	{0x1f6eb, 0x1f6ec}, // airplane departure, arrival
+	{0x1f6f4, 0x1f6fc}, // transport vehicles, kick scooter to roller skate
+	{0x1f7e0, 0x1f7eb}, // coloured circles and squares
+	{0x1f7f0, 0x1f7f0}, // heavy equals sign
 	{0x1f900, 0x1f9ff}, // supplemental emoji
 	{0x1fa70, 0x1faff}, // symbols and pictographs extended A
 	{0x20000, 0x3fffd}, // CJK extensions B..

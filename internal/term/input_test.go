@@ -2,7 +2,9 @@ package term
 
 import (
 	"bytes"
+	"fmt"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -91,5 +93,67 @@ func TestEscapeFollowedByKeyKeepsTheByte(t *testing.T) {
 	keys := decodeAll(t, "\x1bj")
 	if len(keys) != 2 || keys[0].Type != KeyEsc || keys[1].Type != KeyRune || keys[1].Rune != 'j' {
 		t.Fatalf("esc+j = %+v", keys)
+	}
+}
+
+// traceKeys renders keys in the PTY harness's trace form (Key.String).
+func traceKeys(keys []Key) []string {
+	out := make([]string, len(keys))
+	for i, k := range keys {
+		out[i] = k.String()
+	}
+	return out
+}
+
+// TestSGRWheelButtons is BF-28: only buttons 64 and 65, with any shift, meta
+// or ctrl bits set, are vertical wheel events. Buttons 66 and 67 are the
+// horizontal wheel and must not scroll the list.
+func TestSGRWheelButtons(t *testing.T) {
+	cases := []struct {
+		button int
+		want   KeyType
+	}{
+		{0, KeyUnknown},
+		{64, KeyWheelUp},
+		{65, KeyWheelDown},
+		{66, KeyUnknown},
+		{67, KeyUnknown},
+		{68, KeyWheelUp},
+		{69, KeyWheelDown},
+		{70, KeyUnknown},
+		{71, KeyUnknown},
+		{72, KeyWheelUp},
+		{76, KeyWheelUp},
+		{77, KeyWheelDown},
+		{80, KeyWheelUp},
+		{81, KeyWheelDown},
+		{88, KeyWheelUp},
+	}
+	for _, c := range cases {
+		keys := decodeAll(t, fmt.Sprintf("\x1b[<%d;10;20M", c.button))
+		if len(keys) != 1 || keys[0].Type != c.want {
+			t.Errorf("SGR button %d decoded as %v, want %v", c.button, traceKeys(keys), c.want)
+		}
+	}
+}
+
+// TestPasteCtrlCIsSurfacedWhilePasteStaysDiscarded is BF-08's escape hatch.
+// The full-screen surfaces run with ISIG off, so Ctrl-C reaches the decoder as
+// ETX. It must reach the surface as a key while the pasted text after it stays
+// discarded, including when the terminator never arrives.
+func TestPasteCtrlCIsSurfacedWhilePasteStaysDiscarded(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{"ctrl-c inside a terminated paste", "\x1b[200~y\x03z\x1b[201~q", []string{"paste-discarded", "ctrl-c", "rune:q"}},
+		{"ctrl-c in an unterminated paste", "\x1b[200~y\x03z", []string{"paste-discarded", "ctrl-c"}},
+	}
+	for _, c := range cases {
+		got := traceKeys(decodeAll(t, c.input))
+		if strings.Join(got, ",") != strings.Join(c.want, ",") {
+			t.Errorf("%s: keys = %v, want %v", c.name, got, c.want)
+		}
 	}
 }

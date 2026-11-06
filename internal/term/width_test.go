@@ -48,3 +48,59 @@ func TestRuneWidth(t *testing.T) {
 		t.Errorf("Truncate(0) = %q, want empty", got)
 	}
 }
+
+// TestEmojiBlocksAreWide is BF-33: the transport, geometric and colour-circle
+// emoji blocks measure as two cells, the same as the emoji around them.
+func TestEmojiBlocksAreWide(t *testing.T) {
+	cases := []struct {
+		name string
+		r    rune
+	}{
+		{"rocket", 0x1f680},
+		{"octagonal sign", 0x1f6d1},
+		{"green circle", 0x1f7e2},
+		{"luggage", 0x1f6c5},
+		{"sleeping accommodation", 0x1f6cc},
+		{"place of worship", 0x1f6d0},
+		{"shopping trolley", 0x1f6d2},
+		{"hindu temple", 0x1f6d5},
+		{"elevator", 0x1f6d7},
+		{"wireless", 0x1f6dc},
+		{"ring buoy", 0x1f6df},
+		{"airplane departure", 0x1f6eb},
+		{"airplane arriving", 0x1f6ec},
+		{"kick scooter", 0x1f6f4},
+		{"roller skate", 0x1f6fc},
+		{"large orange circle", 0x1f7e0},
+		{"large brown square", 0x1f7eb},
+		{"heavy equals sign", 0x1f7f0},
+	}
+	for _, c := range cases {
+		if got := RuneWidth(c.r); got != 2 {
+			t.Errorf("%s: RuneWidth(%U) = %d, want 2", c.name, c.r, got)
+		}
+	}
+}
+
+// TestRangeTablesAreSortedAndDisjoint guards the binary search in inRanges: every
+// table must be ascending, with each range non-empty and starting after the
+// previous range ends.
+func TestRangeTablesAreSortedAndDisjoint(t *testing.T) {
+	tables := []struct {
+		name   string
+		ranges []runeRange
+	}{
+		{"wideRanges", wideRanges},
+		{"zeroWidthRanges", zeroWidthRanges},
+	}
+	for _, table := range tables {
+		for i, r := range table.ranges {
+			if r.lo > r.hi {
+				t.Errorf("%s[%d] = {%U,%U} is empty", table.name, i, r.lo, r.hi)
+			}
+			if i > 0 && r.lo <= table.ranges[i-1].hi {
+				t.Errorf("%s[%d] = {%U,%U} is not after {%U,%U}", table.name, i, r.lo, r.hi, table.ranges[i-1].lo, table.ranges[i-1].hi)
+			}
+		}
+	}
+}
