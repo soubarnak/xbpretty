@@ -11,7 +11,9 @@ import (
 )
 
 var (
-	ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	// ansiRegex strips CSI sequences, private modes included: a child's
+	// alternate-screen switch (`ESC[?1049h`) is a control, never a line to show.
+	ansiRegex = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
 
 	// Stderr download regexes:
 	// TTY tick: [ 0%] libxcrypt-compat-4.4.38_1.x86_64.xbps.sig2: [512B 100%] 54MB/s ETA: 00m00s\x1b[K\r
@@ -39,6 +41,9 @@ var (
 	// xbps-install's own removal lines, printed when a plan replaces a package (BF-19).
 	installRemoveRunRegex = regexp.MustCompile(`^([\w.+~\-]+):\s+removing \.\.\.$`)
 	installRemoveOkRegex  = regexp.MustCompile(`^([\w.+~\-]+):\s+removed successfully\.$`)
+
+	// A failed repository fetch on stderr: the URL and xbps's reason (BF-03).
+	repoErrorRegex = regexp.MustCompile("^ERROR: \\[reposync\\] failed to fetch file ['\"\x60]([^'\"\x60]+)['\"\x60]: (.+)$")
 
 	// Transaction summary regex:
 	summaryRegex = regexp.MustCompile(`^(\d+)\s+downloaded,\s+(\d+)\s+installed,\s+(\d+)\s+updated,\s+(\d+)\s+configured,\s+(\d+)\s+removed,\s+(\d+)\s+on hold\.$`)
@@ -346,6 +351,12 @@ type StreamParser struct {
 	OnPackageEvent     func(event PackageEvent)
 	OnRepoUpdate       func(url string)
 	OnSummary          func(sum TransactionSummary)
+
+	// BF-03: repository sync telemetry. A `-repodata` transfer is a repository
+	// fetch, never a package download, so these callbacks take it instead.
+	OnRepoTick    func(tick DownloadTick)
+	OnRepoFetched func(file string, size int64)
+	OnRepoError   func(url, reason string)
 }
 
 // NewStreamParser creates a stream parser with optional known totals.
@@ -360,11 +371,108 @@ func NewStreamParser(totalPackages int, totalDownloadBytes int64) *StreamParser 
 	}
 }
 
-// FeedStderr parses one line from child stderr.
-func (p *StreamParser) FeedStderr(line string) {
+// FeedStderr parses one line from child stderr. It reports whether the line was
+// telemetry the live view consumes (BF-16): a line it does not consume is child
+// output the live view shows above the box.
+func (p *StreamParser) FeedStderr(line string) bool {
+	if m := repoErrorRegex.FindStringSubmatch(cleanLine(line)); len(m) >= 3 {
+		p.mu.RLock()
+		cb := p.OnRepoError
+		p.mu.RUnlock()
+		if cb != nil {
+			cb(m[1], m[2])
+		}
+		return true
+	}
+	return p.feedDownload(line)
+}
+
+// FeedStdout parses one line from child stdout and reports whether the live
+// view consumes it (BF-16). Download telemetry can arrive here too: xbps writes
+// its transfer lines to stdout when stdout is not a terminal.
+func (p *StreamParser) FeedStdout(line string) bool {
+	if p.feedDownload(line) {
+		return true
+	}
+	p.mu.Lock()
+
+	if m := repoSyncRegex.FindStringSubmatch(cleanLine(line)); len(m) >= 2 {
+		p.state.Phase = "RepoSync"
+		phaseCB := p.OnPhaseChange
+		repoCB := p.OnRepoUpdate
+		p.mu.Unlock()
+		if phaseCB != nil {
+			phaseCB("RepoSync")
+		}
+		if repoCB != nil {
+			repoCB(m[1])
+		}
+		return true
+	}
+
+	if phase, ok := ParsePhaseHeader(line); ok {
+		p.state.Phase = phase
+		cb := p.OnPhaseChange
+		p.mu.Unlock()
+		if cb != nil {
+			cb(phase)
+		}
+		return true
+	}
+
+	if event, ok := ParsePackageEvent(line); ok {
+		switch event.Action {
+		case "unpacking", "updating":
+			p.state.Phase = "Unpacking"
+		case "configuring":
+			p.state.Phase = "Configuring"
+		case "removing":
+			p.state.Phase = "Removing"
+		}
+		p.state.CurrentPackage = event.Package
+
+		cb := p.OnPackageEvent
+		p.mu.Unlock()
+		if cb != nil {
+			cb(*event)
+		}
+		return true
+	}
+
+	if sum, ok := ParseTransactionSummary(line); ok {
+		cb := p.OnSummary
+		p.mu.Unlock()
+		if cb != nil {
+			cb(*sum)
+		}
+		return true
+	}
+	p.mu.Unlock()
+	return false
+}
+
+// isRepodataFile reports whether a transfer is a repository index, the
+// `<arch>-repodata` file xbps fetches during a sync.
+func isRepodataFile(name string) bool {
+	return strings.HasSuffix(name, "-repodata")
+}
+
+// feedDownload handles one download tick or completion line. It reports
+// whether the line was one of them. A repodata transfer goes to the repository
+// callbacks (BF-03) and leaves the package counters alone.
+func (p *StreamParser) feedDownload(line string) bool {
 	p.mu.Lock()
 
 	if tick, ok := ParseDownloadTick(line); ok {
+		if isRepodataFile(tick.Filename) {
+			cb := p.OnRepoTick
+			p.mu.Unlock()
+			if cb != nil {
+				cb(*tick)
+			}
+			return true
+		}
+
 		p.state.Phase = "Downloading"
 		p.state.CurrentPackage = tick.PackageName
 		p.state.DownloadRate = tick.Rate
@@ -403,10 +511,19 @@ func (p *StreamParser) FeedStderr(line string) {
 		if cb != nil {
 			cb(*tick)
 		}
-		return
+		return true
 	}
 
 	if comp, ok := ParseDownloadComplete(line); ok {
+		if isRepodataFile(comp.Filename) {
+			cb := p.OnRepoFetched
+			p.mu.Unlock()
+			if cb != nil {
+				cb(comp.Filename, comp.SizeBytes)
+			}
+			return true
+		}
+
 		p.completedFiles[comp.Filename] = comp.SizeBytes
 		var completedSum int64
 		for _, sz := range p.completedFiles {
@@ -421,67 +538,10 @@ func (p *StreamParser) FeedStderr(line string) {
 		if cb != nil {
 			cb(*comp)
 		}
-		return
+		return true
 	}
 	p.mu.Unlock()
-}
-
-// FeedStdout parses one line from child stdout.
-func (p *StreamParser) FeedStdout(line string) {
-	p.mu.Lock()
-
-	if m := repoSyncRegex.FindStringSubmatch(cleanLine(line)); len(m) >= 2 {
-		p.state.Phase = "RepoSync"
-		phaseCB := p.OnPhaseChange
-		repoCB := p.OnRepoUpdate
-		p.mu.Unlock()
-		if phaseCB != nil {
-			phaseCB("RepoSync")
-		}
-		if repoCB != nil {
-			repoCB(m[1])
-		}
-		return
-	}
-
-	if phase, ok := ParsePhaseHeader(line); ok {
-		p.state.Phase = phase
-		cb := p.OnPhaseChange
-		p.mu.Unlock()
-		if cb != nil {
-			cb(phase)
-		}
-		return
-	}
-
-	if event, ok := ParsePackageEvent(line); ok {
-		switch event.Action {
-		case "unpacking", "updating":
-			p.state.Phase = "Unpacking"
-		case "configuring":
-			p.state.Phase = "Configuring"
-		case "removing":
-			p.state.Phase = "Removing"
-		}
-		p.state.CurrentPackage = event.Package
-
-		cb := p.OnPackageEvent
-		p.mu.Unlock()
-		if cb != nil {
-			cb(*event)
-		}
-		return
-	}
-
-	if sum, ok := ParseTransactionSummary(line); ok {
-		cb := p.OnSummary
-		p.mu.Unlock()
-		if cb != nil {
-			cb(*sum)
-		}
-		return
-	}
-	p.mu.Unlock()
+	return false
 }
 
 // SeedDownloaded records one predownload completion so the child's own

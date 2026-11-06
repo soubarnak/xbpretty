@@ -38,14 +38,15 @@ type progressView struct {
 	ratio     float64
 }
 
-// Fixed view heights: Download carries two info rows, the others one.
+// Fixed view heights: Download and Update carry two info rows (BF-03), the
+// others one.
 const (
 	heightDownload = 7
 	heightOther    = 6
 )
 
 func (v progressView) height() int {
-	if v.kind == viewDownload {
+	if v.kind == viewDownload || v.kind == viewUpdate {
 		return heightDownload
 	}
 	return heightOther

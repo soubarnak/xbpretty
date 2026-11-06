@@ -138,17 +138,26 @@ func TestMirrorModelStartsOnMirrorScore(t *testing.T) {
 	}
 }
 
-// TestUpdateUnknownRepositoryTotal shows `cur/?` rather than 100% when xbps
-// never announced a count and the xbps.d seed failed (fix 15).
+// TestUpdateUnknownRepositoryTotal shows `done/?` in the plain line, never a
+// false 100%, when xbps-query -L named no total (fix 15, BF-03, BF-04). The
+// widget carries no repository counter; its bar follows the bytes instead.
 func TestUpdateUnknownRepositoryTotal(t *testing.T) {
 	m := newProgressModel("update", nil, nil)
-	m.repository("https://repo.voidlinux.org/current")
-	view := m.view()
-	if len(view.left) != 1 || view.left[0].value != "1/?" {
-		t.Fatalf("repository counter = %+v, want 1/?", view.left)
+	m.repository("https://repo.voidlinux.org/current/x86_64-repodata")
+	state := m.plain()
+	if !state.hasRepos || repositoryPair(state.reposDone, state.reposTotal) != "0/?" {
+		t.Fatalf("plain repositories = %+v, want 0/?", state)
 	}
-	if view.ratio != 0 {
+	if got := renderPlainLine(state); !strings.Contains(got, "Repositories: 0/?") {
+		t.Errorf("plain line = %q, want Repositories: 0/?", got)
+	}
+	if view := m.view(); view.ratio != 0 {
 		t.Errorf("unknown total ratio = %v, want 0 (never a false 100%%)", view.ratio)
+	}
+	for _, info := range m.view().left {
+		if info.label == "Repositories" {
+			t.Errorf("the widget still shows a Repositories counter: %+v", info)
+		}
 	}
 }
 

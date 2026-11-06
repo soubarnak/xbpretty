@@ -53,6 +53,12 @@ type runner struct {
 	live         bool
 	liveProgress *liveProgress
 
+	// shown counts the child lines the live view inserted above its box during
+	// the current stream, by cleaned text. A failure dump skips them so each
+	// line prints once (BF-16). shownMu guards it: both stream readers insert.
+	shownMu sync.Mutex
+	shown   map[string]int
+
 	// verboseMu serialises the verbose line written by the discovery worker
 	// pool, where several xbps-query children run at once.
 	verboseMu sync.Mutex

@@ -843,7 +843,7 @@ func TestAC009UpdateSyncsThenCountsWithoutSummaryOrPrompt(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit = %d, want 0\n%s", code, errs)
 	}
-	if !strings.Contains(out, "package(s) can be upgraded. Run 'xbp list --upgradable' to see them.") {
+	if !strings.Contains(out, "56 packages can be upgraded. Run 'xbp list --upgradable' to see them.") {
 		t.Errorf("update printed no count line:\n%q", out)
 	}
 	if strings.Contains(out, "Upgrade\n") || strings.Contains(out, "Summary") {
@@ -1142,7 +1142,7 @@ func (e *env) transactionCalls() []string {
 	var out []string
 	for _, c := range e.commands() {
 		switch {
-		case c == "-H", c == "-l", c == "-m", c == "--list-repolock-pkgs",
+		case c == "-H", c == "-l", c == "-m", c == "-L", c == "--list-repolock-pkgs",
 			strings.HasPrefix(c, "-p "), strings.HasPrefix(c, "-X "):
 			continue
 		}
@@ -1882,6 +1882,10 @@ func TestNalaPlaintextWhenNoColor(t *testing.T) {
 	e.tty = true
 	e.set("NO_COLOR", "1")
 	e.set("XB_STUB_STDOUT", planCapture(t, "0607/upgrade.txt"))
+	// The stub's sync step echoes its stdout. A real sync prints no plan, and
+	// an echoed plan would be shown above the live box (BF-16) and fill this
+	// in-process run's stderr pipe, which is read only after Main returns.
+	e.set("XB_STUB_RUN_STDOUT", "")
 	code, out, errs := e.run("xbpretty", "upgrade", "--dry-run")
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0\n%s", code, errs)
@@ -2142,6 +2146,9 @@ func TestPrecedenceColorFlagAndNoColor(t *testing.T) {
 		}
 	}
 	e.set("XB_STUB_STDOUT", planCapture(t, "0607/upgrade.txt"))
+	// The sync step's echoed plan would be shown above the live box (BF-16)
+	// and fill this in-process run's stderr pipe; a real sync prints no plan.
+	e.set("XB_STUB_RUN_STDOUT", "")
 	setMode("Auto")
 
 	// 1. With NO_COLOR set, color is disabled under Auto.

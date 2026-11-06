@@ -306,7 +306,7 @@ func TestAC009UpdateShowPackages(t *testing.T) {
 	if !strings.Contains(out, "figlet 2.2.5_6 -> 2.2.5_7\n") {
 		t.Errorf("stdout is missing the per-package line:\n%q", out)
 	}
-	if strings.Contains(out, "package(s) can be upgraded") {
+	if strings.Contains(out, "can be upgraded") {
 		t.Errorf("the count line was printed with update_show_packages = true:\n%q", out)
 	}
 }

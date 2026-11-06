@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/soubarnak/xbpretty/internal/fetch"
 	"github.com/soubarnak/xbpretty/internal/summary"
 	"github.com/soubarnak/xbpretty/internal/term"
 	"github.com/soubarnak/xbpretty/internal/tui"
@@ -45,8 +44,8 @@ type progressModel struct {
 	lastCompleted  string
 	inFlight       map[string]uint64
 
-	// inserts holds completed lines the inline viewport must push above the
-	// box on the next draw (FR-072). Without a viewport they are dropped.
+	// inserts holds completed lines the renderer pushes above the box on the
+	// next draw (FR-072, BF-05). The viewport or the in-place renderer places them.
 	inserts []string
 
 	// Install state: U = 2·A unpack units for install/update rows, one configure
@@ -61,14 +60,19 @@ type progressModel struct {
 	currentPkg     string
 	status         string
 
-	// Update and MirrorScore state.
+	// Update and MirrorScore state. A repository counts as done when the next one
+	// starts or at the end of the sync (BF-03), so reposDone never runs ahead.
 	reposDone, reposTotal int
 	reposTotalKnown       bool
 	repoURL               string
-	mirrorDone            int
-	mirrorTotal           int
-	mirrorURL             string
-	mirrorElapsed         time.Duration
+	repoStarted           bool
+	repoEnded             bool
+	// repoSeen records the repodata transfers whose size already joined totalBytes.
+	repoSeen      map[string]bool
+	mirrorDone    int
+	mirrorTotal   int
+	mirrorURL     string
+	mirrorElapsed time.Duration
 
 	kind      progressKind
 	verifying bool
@@ -91,6 +95,7 @@ func newProgressModel(op string, rows []xbps.Row, now func() time.Time) *progres
 		unpacked:   map[string]bool{},
 		configured: map[string]bool{},
 		removed:    map[string]bool{},
+		repoSeen:   map[string]bool{},
 	}
 	switch op {
 	case "remove", "purge", "autoremove", "autopurge":
@@ -306,18 +311,59 @@ func (m *progressModel) packageEvent(event PackageEvent) {
 	}
 }
 
-// repository records one `[*] Updating repository '<url>' ...` line. xbps
-// does not announce the repository count first; the caller seeds it from the
-// same xbps.d set xbps reads. Until that seed exists the view shows `cur/?`
-// rather than claiming every repository is done.
+// repository records one `[*] Updating repository '<url>' ...` line. The
+// previous repository is finished now (BF-03): nala counts a repository done
+// when the next one starts, not when it starts itself, so the first start
+// shows 0/N.
 func (m *progressModel) repository(url string) {
-	m.reposDone++
+	if m.repoStarted {
+		m.reposDone++
+	}
+	m.repoStarted = true
 	m.repoURL = url
-	if m.reposTotalKnown && m.reposDone > m.reposTotal {
-		m.reposTotal = m.reposDone
+}
+
+// repositoriesFinished counts the last repository done at the end of the sync.
+func (m *progressModel) repositoriesFinished() {
+	if m.repoStarted && !m.repoEnded {
+		m.reposDone++
+		m.repoEnded = true
 	}
 }
 
+// countRepoTransfer adds a repodata transfer's size to the Data total the first
+// time it is seen. nala's total grows as items start.
+func (m *progressModel) countRepoTransfer(file string, size uint64) {
+	if m.repoSeen[file] {
+		return
+	}
+	m.repoSeen[file] = true
+	m.totalBytes += size
+}
+
+// repoTick applies one repodata transfer tick to the Updating view.
+func (m *progressModel) repoTick(tick DownloadTick) {
+	if m.completed[tick.Filename] {
+		return
+	}
+	m.countRepoTransfer(tick.Filename, uint64(tick.TotalSizeBytes))
+	m.inFlight[tick.Filename] = uint64(tick.DownloadedBytes)
+}
+
+// repoFetched applies one repodata completion: the file's exact size is done.
+func (m *progressModel) repoFetched(file string, size int64) {
+	if m.completed[file] {
+		return
+	}
+	m.completed[file] = true
+	m.countRepoTransfer(file, uint64(size))
+	m.completedBytes += uint64(size)
+	m.completedCount++
+	delete(m.inFlight, file)
+}
+
+// setRepositoryTotal seeds the repository count from xbps-query -L. Until it is
+// known the ratio follows the bytes and the plain line shows `n/?`.
 func (m *progressModel) setRepositoryTotal(total int) {
 	if total > 0 {
 		m.reposTotal = total
@@ -363,10 +409,15 @@ func (m *progressModel) ratio() float64 {
 		done := len(m.unpacked) + len(m.configured) + len(m.removed)
 		return clampRatio(float64(done) / float64(denominator))
 	case viewUpdate:
-		if m.reposTotal == 0 {
+		// The bar follows the repositories when xbps-query -L named them, and
+		// the transferred bytes otherwise (BF-03, BF-04).
+		if m.reposTotalKnown {
+			return clampRatio(float64(m.reposDone) / float64(m.reposTotal))
+		}
+		if m.totalBytes == 0 {
 			return 0
 		}
-		return clampRatio(float64(m.reposDone) / float64(m.reposTotal))
+		return clampRatio(float64(m.position()) / float64(m.totalBytes))
 	case viewMirrorScore:
 		if m.mirrorTotal == 0 {
 			return 0
@@ -444,18 +495,29 @@ func (m *progressModel) view() progressView {
 			ratio:     m.ratio(),
 		}
 	case viewUpdate:
-		repositories := fmt.Sprintf("%d/?", m.reposDone)
-		if m.reposTotal > 0 {
-			repositories = pairCount(m.reposDone, m.reposTotal)
+		// nala's Updating view (BF-03): the repodata transfer in progress, its
+		// Data and Remaining, and Speed and Elapsed. The repository count lives
+		// in the plain line only.
+		position := m.position()
+		rate := m.downloadSpeed()
+		remaining := "—"
+		if eta, ok := etaSeconds(position, m.totalBytes, rate); ok {
+			remaining = widgetTime(eta)
 		}
 		return progressView{
 			kind:      viewUpdate,
-			msgHeader: "Updating",
+			msgHeader: "Downloading",
 			msgText:   m.repoURL,
 			msgRole:   roleRegular,
-			left:      []progressInfo{{"Repositories", repositories}},
-			right:     []progressInfo{{"Elapsed", m.elapsedText()}},
-			ratio:     m.ratio(),
+			left: []progressInfo{
+				{"Data", summary.WidgetSize(position) + "/" + summary.WidgetSize(m.totalBytes)},
+				{"Remaining", remaining},
+			},
+			right: []progressInfo{
+				{"Speed", summary.WidgetSize(rate) + "/s"},
+				{"Elapsed", m.elapsedText()},
+			},
+			ratio: m.ratio(),
 		}
 	case viewMirrorScore:
 		return progressView{
@@ -547,6 +609,15 @@ func (m *progressModel) plain() plainState {
 	return state
 }
 
+// repositoryPair is `done/total`, or `done/?` while xbps-query -L has not named
+// the total (BF-03, BF-04).
+func repositoryPair(done, total int) string {
+	if total <= 0 {
+		return fmt.Sprintf("%d/?", done)
+	}
+	return pairCount(done, total)
+}
+
 // renderPlainLine reproduces nala's PlainProgress grammar: a 40-cell bar of
 // `=`, the truncated `%3d` percent, the message, then the view's filters.
 func renderPlainLine(state plainState) string {
@@ -570,7 +641,7 @@ func renderPlainLine(state plainState) string {
 		b.WriteString(" | Packages: " + pairCount(state.itemsDone, state.itemsTotal))
 	}
 	if state.hasRepos {
-		b.WriteString(" | Repositories: " + pairCount(state.reposDone, state.reposTotal))
+		b.WriteString(" | Repositories: " + repositoryPair(state.reposDone, state.reposTotal))
 	}
 	if state.hasMirrors {
 		b.WriteString(" | Mirrors: " + pairCount(state.mirrorDone, state.mirrorTotal))
@@ -607,6 +678,10 @@ type liveProgress struct {
 	guard    *term.Guard
 	cbreak   bool
 	latch    tui.AltScreenLatch
+
+	// suspended is set while a child owns the terminal below the box (BF-02's
+	// key-import prompt). Nothing draws until Resume.
+	suspended bool
 
 	lastDraw time.Time
 	timer    *time.Timer
@@ -744,7 +819,7 @@ func (l *liveProgress) requestLocked(force bool) {
 
 func (l *liveProgress) drawLocked() {
 	defer l.guardRenderPanic()
-	if l.closed {
+	if l.closed || l.suspended {
 		return
 	}
 	if l.mode == livePlainMode {
@@ -807,21 +882,60 @@ func (l *liveProgress) renderLinesLocked() []string {
 	return renderProgressViewThemed(l.model.view(), l.width, l.color, l.theme)
 }
 
-// flushInsertsLocked writes every completed child line above the box. The
-// lines are consumed even without a viewport: nothing else displays them.
+// flushInsertsLocked writes every queued line above the box and reports whether
+// the caller must redraw. With an inline viewport the viewport places the lines
+// (FR-072). Without one the renderer does it itself (BF-05): the in-place box
+// is erased, the lines are written, and the caller redraws the box below them.
 func (l *liveProgress) flushInsertsLocked() bool {
 	if len(l.model.inserts) == 0 {
 		return false
 	}
 	lines := l.model.inserts
 	l.model.inserts = nil
-	if l.viewport == nil {
-		return false
+	if l.viewport != nil {
+		for _, line := range lines {
+			l.viewport.Insert(line)
+		}
+		return true
+	}
+	if l.mode == livePlainMode {
+		// The plain line is one row: overwrite it with each line, which leaves
+		// the cursor on a fresh row for the caller's redraw.
+		for _, line := range lines {
+			fmt.Fprintf(l.out, "\r\x1b[2K%s\n", line)
+		}
+		return true
+	}
+	var b strings.Builder
+	if l.drawn > 0 {
+		b.WriteString("\r")
+		if l.drawn > 1 {
+			fmt.Fprintf(&b, "\x1b[%dA", l.drawn-1)
+		}
+		b.WriteString("\x1b[J")
+		l.drawn = 0
 	}
 	for _, line := range lines {
-		l.viewport.Insert(line)
+		b.WriteString(line)
+		b.WriteString("\r\n")
 	}
+	fmt.Fprint(l.out, b.String())
 	return true
+}
+
+// InsertAbove queues one finished child line for the scrollback above the box
+// and redraws it below (FR-072, BF-05). It does nothing once the surface has
+// finished, because no box is left to place the line against.
+func (l *liveProgress) InsertAbove(line string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	defer l.guardRenderPanic()
+	if l.closed {
+		return
+	}
+	l.model.inserts = append(l.model.inserts, line)
+	l.flushInsertsLocked()
+	l.requestLocked(true)
 }
 
 // Finish tears the live surface down. Success clears without any completion
@@ -843,32 +957,68 @@ func (l *liveProgress) Finish() {
 		l.drawn = 0
 		return
 	}
+	l.eraseLocked()
+}
+
+// eraseLocked clears the in-place box (or plain line) it drew last.
+func (l *liveProgress) eraseLocked() {
 	if l.drawn == 0 {
 		return
 	}
 	if l.mode == livePlainMode {
 		fmt.Fprint(l.out, "\r\x1b[2K")
-		l.drawn = 0
-		return
+	} else {
+		var b strings.Builder
+		b.WriteString("\r")
+		if l.drawn > 1 {
+			fmt.Fprintf(&b, "\x1b[%dA", l.drawn-1)
+		}
+		b.WriteString("\x1b[J")
+		fmt.Fprint(l.out, b.String())
 	}
-	var b strings.Builder
-	b.WriteString("\r")
-	if l.drawn > 1 {
-		fmt.Fprintf(&b, "\x1b[%dA", l.drawn-1)
-	}
-	b.WriteString("\x1b[J")
-	fmt.Fprint(l.out, b.String())
 	l.drawn = 0
 }
 
-// repositoryCount is the repository total the Update view can know before the
-// sync starts. xbps prints one `[*] Updating repository ...` line per repo and
-// never announces the count, so the xbps.d scan seeds it where possible; when
-// the scan fails the view shows `cur/?`.
-func repositoryCount() int {
-	cfg, err := fetch.DiscoverRepositories(fetchXBPSDDirs)
-	if err != nil {
-		return 0
+// Suspend clears the box and stops drawing until Resume (BF-02). A child that
+// prompts below the box needs the rows the box occupied.
+func (l *liveProgress) Suspend() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	defer l.guardRenderPanic()
+	if l.closed || l.suspended {
+		return
 	}
-	return len(cfg.Lines)
+	l.suspended = true
+	if l.viewport != nil {
+		l.viewport.Hide()
+		return
+	}
+	l.eraseLocked()
+}
+
+// Resume draws the box again after Suspend.
+func (l *liveProgress) Resume() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	defer l.guardRenderPanic()
+	if l.closed || !l.suspended {
+		return
+	}
+	l.suspended = false
+	if l.viewport != nil {
+		l.viewport.Show(l.renderLinesLocked())
+		return
+	}
+	l.drawLocked()
+}
+
+// WriteRaw writes child bytes to the terminal while the surface is suspended.
+// It takes the renderer's lock, so the bytes never interleave with a draw.
+func (l *liveProgress) WriteRaw(b []byte) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return
+	}
+	_, _ = l.out.Write(b)
 }

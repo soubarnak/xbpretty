@@ -159,11 +159,17 @@ func TestRemoveViewRatio(t *testing.T) {
 func TestUpdateAndMirrorRatios(t *testing.T) {
 	up := newProgressModel("update", nil, nil)
 	up.setRepositoryTotal(2)
-	up.repository("https://repo.voidlinux.org/current")
+	up.repository("https://repo.voidlinux.org/current/x86_64-repodata")
+	// BF-03: the first repository is not done until the next one starts, so
+	// the bar does not run ahead of the sync.
+	if got, want := up.ratio(), 0.0; got != want {
+		t.Errorf("update ratio after the first start = %v, want %v", got, want)
+	}
+	up.repository("https://repo.voidlinux.org/current/nonfree/x86_64-repodata")
 	if got, want := up.ratio(), 0.5; got != want {
 		t.Errorf("update ratio = %v, want %v", got, want)
 	}
-	if view := up.view(); view.msgRole != roleRegular || view.kind != viewUpdate {
+	if view := up.view(); view.msgRole != roleRegular || view.kind != viewUpdate || view.msgHeader != "Downloading" {
 		t.Errorf("update view = %+v", view)
 	}
 	mirror := newProgressModel("fetch", nil, nil)

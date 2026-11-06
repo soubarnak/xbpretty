@@ -204,9 +204,10 @@ func parityDownloadNoMirrorTable(t *testing.T) {
 	}
 }
 
-// parityUpdateTelemetryAbsence drives a real update through the telemetry stub
-// and proves neither nala's Fetched line nor `Nothing to fetch` renders.
-func parityUpdateTelemetryAbsence(t *testing.T) {
+// parityUpdateCompletionLines drives a real update through the telemetry stub
+// and proves the completion line nala prints for the sync (BF-03): `Fetched`
+// when a repodata transfer completed, `Nothing to fetch` when none did.
+func parityUpdateCompletionLines(t *testing.T, syncBody, want string) {
 	e := newEnv(t)
 	e.root = true
 	e.tty = true
@@ -218,10 +219,7 @@ case "${1:-}" in
     exit 0
     ;;
   -S)
-    printf "[*] Updating repository 'https://repo-default.voidlinux.org/current' ...\n"
-    sleep 0.05
-    printf "[*] Updating repository 'https://repo-default.voidlinux.org/current/nonfree' ...\n"
-    exit 0
+` + syncBody + `
     ;;
 esac
 exit 0
@@ -235,15 +233,30 @@ exit 0
 	if code != 0 {
 		t.Fatalf("exit = %d\n%s", code, errs)
 	}
-	if !strings.Contains(errs, "Updating Package Lists") || !strings.Contains(errs, "Updating: https://repo-default.voidlinux.org/current") {
+	if !strings.Contains(errs, "Updating Package Lists") || !strings.Contains(errs, "Downloading: https://repo-default.voidlinux.org/current") {
 		t.Errorf("the real Update view did not render:\n%s", errs)
 	}
-	for _, literal := range []string{"Fetched ", "Nothing to fetch"} {
-		if strings.Contains(errs, literal) {
-			t.Errorf("%q rendered in the real update view:\n%s", literal, errs)
-		}
+	if !strings.Contains(errs, want) {
+		t.Errorf("%q missing from the real update output:\n%s", want, errs)
 	}
 }
+
+// parityUpdateFetchedBody fetches one repodata transfer: its tick on stderr and
+// its completion line.
+const parityUpdateFetchedBody = `
+    printf "[*] Updating repository 'https://repo-default.voidlinux.org/current/x86_64-repodata' ...\n"
+    sleep 0.05
+    printf "[ 50%%] x86_64-repodata: [1854KB 50%%] 2391KB/s ETA: 00m01s\033[K\r" >&2
+    sleep 0.05
+    printf "x86_64-repodata: 1854KB [avg rate: 2391KB/s]\033[K\n" >&2
+    exit 0`
+
+// parityUpdateUnchangedBody syncs two repositories, neither of which changed.
+const parityUpdateUnchangedBody = `
+    printf "[*] Updating repository 'https://repo-default.voidlinux.org/current/x86_64-repodata' ...\n"
+    sleep 0.05
+    printf "[*] Updating repository 'https://repo-default.voidlinux.org/current/nonfree/x86_64-repodata' ...\n"
+    exit 0`
 
 // parityNoAuthFileRead proves P-BEH-038 as an absence: xbpretty never reads
 // /etc/apt/auth.conf or a netrc file; Void repositories are public.

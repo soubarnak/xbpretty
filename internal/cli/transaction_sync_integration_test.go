@@ -394,7 +394,7 @@ func TestIntegrationAC009UpdateCount(t *testing.T) {
 		if code != 0 {
 			t.Fatalf("exit = %d, want 0\n%s", code, errs)
 		}
-		want := "3 package(s) can be upgraded. Run 'xbp list --upgradable' to see them.\n"
+		want := "3 packages can be upgraded. Run 'xbp list --upgradable' to see them.\n"
 		if out != want {
 			t.Errorf("stdout = %q, want exactly %q", out, want)
 		}
@@ -452,7 +452,7 @@ func TestIntegrationAC009UpdateShowPackages(t *testing.T) {
 	if out != want {
 		t.Errorf("stdout = %q, want exactly %q", out, want)
 	}
-	if strings.Contains(out, "package(s) can be upgraded") {
+	if strings.Contains(out, "can be upgraded") {
 		t.Errorf("the count line was printed with update_show_packages = true:\n%q", out)
 	}
 	assertInstallArgv(t, env, "-S", "-n -u")
@@ -496,7 +496,7 @@ func TestIntegrationUpdateExitCodeFollowsXbps(t *testing.T) {
 	if code != 3 {
 		t.Fatalf("exit = %d, want 3 (the count plan's code)\n%s", code, errs)
 	}
-	if strings.Contains(out, "package(s) can be upgraded") {
+	if strings.Contains(out, "can be upgraded") {
 		t.Errorf("a failed count plan printed the count line:\n%q", out)
 	}
 	assertInstallArgv(t, env, "-S", "-n -u")

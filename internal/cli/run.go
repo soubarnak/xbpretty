@@ -138,6 +138,7 @@ func (r *runner) streamHybridWithSignals(sigs chan os.Signal, name string, args 
 	sigs, release := streamSignals(sigs)
 	defer release()
 	r.echo(name, args)
+	r.resetShown()
 	if r.parser == nil {
 		r.parser = NewStreamParser(0, 0)
 	}
@@ -206,32 +207,38 @@ func (r *runner) streamHybridWithSignals(sigs chan os.Signal, name string, args 
 	}
 	var rawStdout bytes.Buffer
 	stdoutDone := make(chan struct{})
+	// BF-02: the key-import block is a raw stretch. Its prompt has no newline,
+	// so the gate hands its bytes to the terminal as they arrive.
+	gate := newKeyImportGate(r.liveProgress)
 	go func() {
 		defer close(stdoutDone)
-		scanner := newChildScanner(master, bufio.ScanLines)
-		for scanner.Scan() {
-			line := scanner.Text()
+		lines := &childLineReader{src: master, raw: gate.isRaw, echo: r.echoRaw}
+		lines.run(func(line string) {
+			gate.observe(line)
 			rawStdout.WriteString(line)
 			rawStdout.WriteByte('\n')
+			consumed := false
 			if r.parser != nil {
-				r.parser.FeedStdout(line)
+				consumed = r.parser.FeedStdout(line)
 			}
 			// FR-072: a child that owns an alternate screen hides the box and
 			// gives termios back; the matching leave redraws it.
 			if r.liveProgress != nil {
 				r.liveProgress.ObserveChildOutput(line)
+				// BF-16: child output the live view does not parse is shown
+				// above the box, except the raw key-import block (echoed as it
+				// arrives).
+				if !consumed && !gate.isRaw() {
+					r.insertChildLine(line)
+				}
 			}
 			// FR-066: child stdout is never copied to xbpretty's stdout.
 			// With no live view it is forwarded verbatim on stderr.
 			if !r.live {
 				fmt.Fprintln(display, line)
 			}
-		}
-		if scanner.Err() != nil {
-			// A scan that stopped early must not leave the child blocked on
-			// an unread PTY (BF-06).
-			_, _ = io.Copy(&rawStdout, master)
-		}
+		})
+		gate.finish()
 	}()
 
 	var rawStderr bytes.Buffer
@@ -248,11 +255,16 @@ func (r *runner) streamHybridWithSignals(sigs chan os.Signal, name string, args 
 			defer close(parserDone)
 			s := newChildScanner(pr, scanLinesOrCR)
 			for s.Scan() {
+				consumed := false
 				if r.parser != nil {
-					r.parser.FeedStderr(s.Text())
+					consumed = r.parser.FeedStderr(s.Text())
 				}
 				if r.liveProgress != nil {
 					r.liveProgress.ObserveChildOutput(s.Text())
+					// BF-16: an unparsed stderr line (a WARNING:, say) goes above the box.
+					if !consumed {
+						r.insertChildLine(s.Text())
+					}
 				}
 			}
 			if s.Err() != nil {
@@ -284,6 +296,7 @@ func (r *runner) streamDirectWithSignals(sigs chan os.Signal, name string, args 
 	sigs, release := streamSignals(sigs)
 	defer release()
 	r.echo(name, args)
+	r.resetShown()
 	cmd := exec.Command(name, args...)
 	cmd.Env = r.env()
 	cmd.Stdin = r.stdinReader()
@@ -334,18 +347,24 @@ func (r *runner) streamDirectWithSignals(sigs chan os.Signal, name string, args 
 		go func() {
 			defer feeds.Done()
 			feedLines(io.TeeReader(outPipe, &rawStdout), bufio.ScanLines, func(line string) {
-				r.parser.FeedStdout(line)
+				consumed := r.parser.FeedStdout(line)
 				if r.liveProgress != nil {
 					r.liveProgress.ObserveChildOutput(line)
+					if !consumed {
+						r.insertChildLine(line)
+					}
 				}
 			})
 		}()
 		go func() {
 			defer feeds.Done()
 			feedLines(io.TeeReader(errPipe, tee), scanLinesOrCR, func(line string) {
-				r.parser.FeedStderr(line)
+				consumed := r.parser.FeedStderr(line)
 				if r.liveProgress != nil {
 					r.liveProgress.ObserveChildOutput(line)
+					if !consumed {
+						r.insertChildLine(line)
+					}
 				}
 			})
 		}()
@@ -513,6 +532,122 @@ func boundedSplit(split bufio.SplitFunc, limit int) bufio.SplitFunc {
 			return limit, data[:limit], nil
 		}
 		return adv, tok, err
+	}
+}
+
+// childLineReader splits one PTY stream into lines the way bufio.ScanLines does,
+// with each line bounded by about childLineMax (BF-06). Unlike a scanner it
+// hands out the bytes of a raw stretch as they arrive (BF-02): a prompt printed
+// without a newline is visible before its answer. raw reports whether the
+// stream is in a raw stretch; echo receives those bytes.
+type childLineReader struct {
+	src    io.Reader
+	raw    func() bool
+	echo   func([]byte)
+	line   []byte
+	echoed int
+}
+
+// run reads src to EOF or error and calls onLine for every complete line, and
+// for the unterminated tail at EOF. onLine may change the raw state; the bytes
+// of the line that changed it are then echoed or not accordingly.
+func (c *childLineReader) run(onLine func(string)) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := c.src.Read(buf)
+		data := buf[:n]
+		for len(data) > 0 {
+			seg := data
+			newline := bytes.IndexByte(data, '\n')
+			if newline >= 0 {
+				seg = data[:newline+1]
+			}
+			data = data[len(seg):]
+			c.line = append(c.line, seg...)
+			if newline < 0 && len(c.line) < childLineMax {
+				c.flushRaw()
+				continue
+			}
+			onLine(lineText(c.line))
+			c.flushRaw()
+			c.line = c.line[:0]
+			c.echoed = 0
+		}
+		if err != nil {
+			break
+		}
+	}
+	if len(c.line) > 0 {
+		onLine(lineText(c.line))
+		c.flushRaw()
+		c.line = c.line[:0]
+		c.echoed = 0
+	}
+}
+
+// flushRaw echoes the not-yet-echoed bytes of the current line while the stream
+// is in a raw stretch.
+func (c *childLineReader) flushRaw() {
+	if c.echo == nil || c.raw == nil || !c.raw() || c.echoed >= len(c.line) {
+		return
+	}
+	c.echo(c.line[c.echoed:])
+	c.echoed = len(c.line)
+}
+
+// lineText drops the terminator of one raw line, the way ScanLines does.
+func lineText(b []byte) string {
+	s := strings.TrimSuffix(string(b), "\n")
+	return strings.TrimSuffix(s, "\r")
+}
+
+// resetShown starts a stream's record of the lines the live view has shown.
+func (r *runner) resetShown() {
+	r.shownMu.Lock()
+	defer r.shownMu.Unlock()
+	r.shown = map[string]int{}
+}
+
+// shownCopy returns a copy of the record, safe to consume while matching.
+func (r *runner) shownCopy() map[string]int {
+	r.shownMu.Lock()
+	defer r.shownMu.Unlock()
+	out := make(map[string]int, len(r.shown))
+	for k, v := range r.shown {
+		out[k] = v
+	}
+	return out
+}
+
+// insertChildLine shows one child line the live view does not consume above
+// its box (BF-16). The line is cleaned of ANSI, and a leading WARNING: takes the
+// Warning role when colour is on (FR-061: the text itself is never repainted).
+// A blank line has nothing to show.
+func (r *runner) insertChildLine(line string) {
+	live := r.liveProgress
+	text := cleanLine(line)
+	if live == nil || text == "" {
+		return
+	}
+	r.shownMu.Lock()
+	if r.shown == nil {
+		r.shown = map[string]int{}
+	}
+	r.shown[text]++
+	r.shownMu.Unlock()
+
+	display := text
+	if prefix := "WARNING:"; strings.HasPrefix(text, prefix) && live.color {
+		display = paintRole(live.theme, true, roleWarning, prefix) + text[len(prefix):]
+	}
+	live.InsertAbove(display)
+}
+
+// echoRaw writes a raw stretch's bytes to the terminal under the live
+// renderer's lock, so they never interleave with a draw (BF-02).
+func (r *runner) echoRaw(b []byte) {
+	if live := r.liveProgress; live != nil {
+		live.WriteRaw(b)
 	}
 }
 

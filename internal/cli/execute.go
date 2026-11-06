@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"fmt"
 	"os"
 	"os/signal"
 	"strings"
@@ -116,14 +115,10 @@ func (st *state) execute(cmd, bin string, args []string, rows ...xbps.Row) int {
 	}
 
 	// On failure the live surface clears, then the captured child output is
-	// printed on stderr before the one matching hint (FR-064, FR-066).
+	// printed on stderr before the one matching hint (FR-064, FR-066). Lines
+	// the live view already showed above its box are not printed twice (BF-16).
 	if live != nil {
-		if st.r.lastStdout != "" {
-			fmt.Fprint(st.stderr, st.r.lastStdout)
-		}
-		if st.r.lastStderr != "" {
-			fmt.Fprint(st.stderr, st.r.lastStderr)
-		}
+		st.printCaptured(hints.Output{Stdout: st.r.lastStdout, Stderr: stderr})
 	}
 	if h := hints.Lookup(code, hints.Output{Stdout: st.r.lastStdout, Stderr: stderr}); h != nil {
 		st.hintf("%s\n", h.Text)

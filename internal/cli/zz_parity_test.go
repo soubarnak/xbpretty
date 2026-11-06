@@ -420,11 +420,11 @@ func TestParity_P_VIS_030_download_view_mirror_table(t *testing.T) {
 }
 
 func TestParity_P_VIS_031_fetched_completion_line(t *testing.T) {
-	parityUpdateTelemetryAbsence(t)
+	parityUpdateCompletionLines(t, parityUpdateFetchedBody, "Fetched 1.8 MiB in ")
 }
 
 func TestParity_P_VIS_032_nothing_to_fetch(t *testing.T) {
-	parityUpdateTelemetryAbsence(t)
+	parityUpdateCompletionLines(t, parityUpdateUnchangedBody, "Nothing to fetch")
 }
 
 func TestParity_P_VIS_033_dpkg_conffile_and_status(t *testing.T) {

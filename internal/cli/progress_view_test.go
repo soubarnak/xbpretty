@@ -94,7 +94,7 @@ func TestProgressViewsFixedHeightsAndTitles(t *testing.T) {
 		{viewDownload, 7, "Downloading Packages"},
 		{viewInstall, 6, "Installing Packages"},
 		{viewRemove, 6, "Removing Packages"},
-		{viewUpdate, 6, "Updating Package Lists"},
+		{viewUpdate, 7, "Updating Package Lists"},
 		{viewMirrorScore, 6, "Testing Mirrors"},
 	}
 	for _, tc := range cases {
@@ -206,19 +206,22 @@ func TestProgressViewGoldens(t *testing.T) {
 			},
 		},
 		{
+			// BF-03: the Updating view is the seven-row Downloading widget. Its
+			// frame is pinned by TestUpdateViewGoldenSevenRows.
 			name: "update",
 			view: progressView{
-				kind: viewUpdate, msgHeader: "Updating", msgText: "https://repo-default.voidlinux.org/current", msgRole: roleRegular,
-				left:  []progressInfo{{"Repositories", "1/2"}},
-				right: []progressInfo{{"Elapsed", "2s"}},
+				kind: viewUpdate, msgHeader: "Downloading", msgText: "https://repo-default.voidlinux.org/current/x86_64-repodata", msgRole: roleRegular,
+				left:  []progressInfo{{"Data", "1.8 MiB/3.6 MiB"}, {"Remaining", "2s"}},
+				right: []progressInfo{{"Speed", "1.9 MiB/s"}, {"Elapsed", "3s"}},
 				ratio: 0.5,
 			},
 			want: []string{
 				"╭" + repeat("─", 26) + "  Updating Package Lists  " + repeat("─", 26) + "╮",
-				"│ " + pad(" Updating: https://repo-default.voidlinux.org/current", 76) + " │",
+				"│ " + pad(" Downloading: https://repo-default.voidlinux.org/current/x86_64-repodata", 76) + " │",
 				div50,
 				bar38,
-				"│ " + pad(" Repositories:  1/2", 38) + " Elapsed:  2s" + repeat(" ", 25) + " │",
+				"│ " + pad(" Data:       1.8 MiB/3.6 MiB", 38) + " Speed:    1.9 MiB/s" + repeat(" ", 18) + " │",
+				"│ " + pad(" Remaining:  2s", 38) + " Elapsed:  3s" + repeat(" ", 25) + " │",
 				bottom,
 			},
 		},

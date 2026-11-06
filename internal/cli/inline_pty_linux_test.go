@@ -620,10 +620,12 @@ func TestInlineViewportAfterS1Confirm(t *testing.T) {
 	leave := strings.Index(capture, term.AltLeave)
 	cursorShow := strings.Index(capture, term.CursorShow)
 	mouseOff := strings.LastIndex(capture, term.MouseOff)
-	boxAt := strings.Index(capture, "╭")
 	if leave < 0 || cursorShow < 0 || mouseOff < 0 {
 		t.Fatalf("S1 did not restore before the viewport; capture:\n%q", capture)
 	}
+	// The first box after S1 is the viewport: the repository sync's in-place
+	// widget draws before S1 (BF-02), so the first box in the capture is not it.
+	boxAt := leave + strings.Index(capture[leave:], "╭")
 	if !(leave < cursorShow && cursorShow < boxAt) {
 		t.Errorf("handoff order leave=%d cursor=%d box=%d, want leave < cursor < box", leave, cursorShow, boxAt)
 	}
@@ -832,8 +834,10 @@ func TestInlineViewportCtrlCThroughTheTTY(t *testing.T) {
 	if strings.Count(capture, term.AltEnter) != 1 {
 		t.Errorf("alternate-screen entries = %d, want 1 (S1 only)", strings.Count(capture, term.AltEnter))
 	}
-	// BF-45: a real ^C ends with the cursor shown after the box erase.
-	assertCursorBracketsTheBox(t, capture)
+	// BF-45: a real ^C ends with the cursor shown after the box erase. The
+	// check starts at the S1 handoff, so the sync's in-place box (BF-02, drawn
+	// before S1) is not the box it measures.
+	assertCursorBracketsTheBox(t, capture[strings.Index(capture, term.AltLeave):])
 	// The box is torn down after the interruption rather than left painted.
 	if strings.HasSuffix(capture, "╯\r") {
 		t.Errorf("the inline box was left on screen after ^C")

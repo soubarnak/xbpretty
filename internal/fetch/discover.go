@@ -103,6 +103,47 @@ func DiscoverRepositories(dirs []string) (RepositoryConfig, error) {
 	return cfg, nil
 }
 
+// AllRepositoryLines returns every remote repository= value xbps reads from
+// the xbps.d directories, in load order (BF-04's fallback when xbps-query -L
+// cannot answer). Unlike DiscoverRepositories it reads every *.conf file, not
+// only *-repository-*.conf, because xbps-install -S syncs all of them. A file
+// in an earlier directory masks a same-named file later on, local paths and
+// file:// URLs are dropped, and duplicates are removed.
+func AllRepositoryLines(dirs []string) []string {
+	masked := map[string]bool{}
+	seen := map[string]bool{}
+	var urls []string
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".conf") || masked[name] {
+				continue
+			}
+			masked[name] = true
+			_, repos := parseXbpsDConfig(filepath.Join(dir, name))
+			for _, value := range repos {
+				if !isRemoteRepositoryValue(value) || seen[value] {
+					continue
+				}
+				seen[value] = true
+				urls = append(urls, value)
+			}
+		}
+	}
+	return urls
+}
+
+// isRemoteRepositoryValue reports whether a repository= value names a network
+// repository, the only kind xbps-install -S downloads an index from.
+func isRemoteRepositoryValue(value string) bool {
+	return strings.Contains(value, "://") && !strings.HasPrefix(value, "file://")
+}
+
 // isRepositoryConf reports whether name matches dec:#48 §3.1's glob
 // *-repository-*.conf.
 func isRepositoryConf(name string) bool {

@@ -366,9 +366,9 @@ case "${1:-}" in
     exit 0
     ;;
   -S)
-    printf "[*] Updating repository 'https://repo-default.voidlinux.org/current' ...\n"
+    printf "[*] Updating repository 'https://repo-default.voidlinux.org/current/x86_64-repodata' ...\n"
     sleep 0.05
-    printf "[*] Updating repository 'https://repo-default.voidlinux.org/current/nonfree' ...\n"
+    printf "[*] Updating repository 'https://repo-default.voidlinux.org/current/nonfree/x86_64-repodata' ...\n"
     exit 0
     ;;
 esac
@@ -387,11 +387,16 @@ exit 0
 	if !strings.Contains(errs, "Updating Package Lists") {
 		t.Errorf("missing the Update view:\n%s", errs)
 	}
-	if !strings.Contains(errs, "Updating: https://repo-default.voidlinux.org/current") {
-		t.Errorf("missing the repository URL message:\n%s", errs)
+	// The message row clips the URL to its 76 columns; the visible prefix is
+	// the repository being fetched.
+	if !strings.Contains(errs, "Downloading: https://repo-default.voidlinux.org/current/nonfree") {
+		t.Errorf("missing the repodata URL message:\n%s", errs)
 	}
-	if !strings.Contains(errs, "Repositories:") {
-		t.Errorf("missing the Repositories counter:\n%s", errs)
+	if !strings.Contains(errs, "No Change: https://repo-default.voidlinux.org/current x86_64-repodata") {
+		t.Errorf("the finished repository has no status line:\n%s", errs)
+	}
+	if !strings.Contains(errs, "Nothing to fetch") {
+		t.Errorf("missing the completion line:\n%s", errs)
 	}
 	if strings.Contains(errs, "Transaction complete") {
 		t.Errorf("the Update view printed a completion line:\n%s", errs)

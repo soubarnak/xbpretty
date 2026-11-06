@@ -808,7 +808,7 @@ func TestUpdateNeverOpensAReleaseScreen(t *testing.T) {
 		wantText string
 	}{
 		{"empty repodata", "", ""},
-		{"changed repodata", tuiScreenPlan, "package(s) can be upgraded"},
+		{"changed repodata", tuiScreenPlan, "can be upgraded"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bin := testrootBinary(t)
