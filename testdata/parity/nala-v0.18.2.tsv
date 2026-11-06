@@ -117,7 +117,7 @@ P-VIS-013	VIS	progress widget frame and titles	—	src/tui/progress.rs:125-560	�
 P-VIS-014	VIS	Progress label and percent	—	src/tui/progress.rs:125-560	—
 P-VIS-015	VIS	progress bar	—	src/tui/progress.rs:125-560	—
 P-VIS-016	VIS	widget info and message rows	—	src/tui/progress.rs:155-377	—
-P-VIS-017	VIS	update view Updating:	—	src/tui/progress.rs:155-377	—
+P-VIS-017	VIS	update view message `Downloading: <url>`	—	src/tui/progress.rs:212-234	—
 P-VIS-018	VIS	mirror-score Finished:	—	src/tui/progress.rs:155-377	—
 P-VIS-019	VIS	plain progress line	—	src/progress.rs:279-377	—
 P-VIS-020	VIS	discovery row format and order	—	src/cmd/list.rs:11-45	—
@@ -131,8 +131,8 @@ P-VIS-027	VIS	summary and widget size formatting	—	src/util/units.rs:24-47;src
 P-VIS-028	VIS	Downgrade section	—	src/libnala/transaction.rs:24-37	—
 P-VIS-029	VIS	held-reason vocabulary beyond Manual hold	—	src/tui/summary/row.rs:129-134	—
 P-VIS-030	VIS	Download view mirror table	—	src/tui/progress.rs:125-560	—
-P-VIS-031	VIS	Fetched ... completion line	—	src/progress.rs:497-538	—
-P-VIS-032	VIS	Nothing to fetch	—	src/progress.rs:497-538	—
+P-VIS-031	VIS	Fetched ... completion line	—	src/cmd/update.rs:129;src/progress.rs:259-271	—
+P-VIS-032	VIS	Nothing to fetch	—	src/cmd/update.rs:129;src/progress.rs:259-271	—
 P-VIS-033	VIS	dpkg conffile and status-fd handling	—	src/dpkg.rs:34-42	—
 P-VIS-034	VIS	APT essential-package removal warning	—	src/summary.rs:222-227	—
 P-TUI-001	TUI	transaction summary screen	—	src/tui/summary/mod.rs:374-455	—
@@ -163,7 +163,7 @@ P-BEH-020	BEH	--print-uris JSON	—	src/download/uri.rs	—
 P-BEH-021	BEH	machine-schema identity	—	src/iterators/serde.rs	—
 P-BEH-022	BEH	early update and auto_update	—	src/config/configuration.rs:276-293	—
 P-BEH-023	BEH	implicit autoremove second transaction	—	src/summary.rs:264-307	—
-P-BEH-024	BEH	sync step	—	src/config/configuration.rs:276-293	—
+P-BEH-024	BEH	sync step	—	src/main.rs:92-94;src/config/configuration.rs:276-299	—
 P-BEH-025	BEH	N/A flag contract	—	src/cli/parser.rs	—
 P-BEH-026	BEH	non-TTY refusal	—	src/util/prompt.rs:9-87	—
 P-BEH-027	BEH	colour precedence	—	src/config/color.rs:696-709	—

@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-06
 - **Baseline:** `main` at `d92d66a` (xbpretty 0.4.0, rev 6)
-- **Status:** ready to implement
+- **Status:** implemented in the 0.4.1 candidate (`cb5ccac`); see "Implementation status" at the end
 
 ## How to read this plan
 
@@ -1211,3 +1211,110 @@ completions and manpages, shellcheck and mandoc.
   Download view's per-mirror table, P-VIS-030, which nala v0.18.2 does show
   and xbpretty could now feed from its 3-per-host predownload limiter). These
   are candidates for a later `bug-fix-2`.
+
+---
+
+## Implementation status
+
+Derived from `git log 7352e29..HEAD` (the plan commit to the 0.4.1 candidate at
+`cb5ccac`). Commits, in order: `383e6a5`, `591bb42`, `f7e9788`, `81d1bd0`,
+`bb61355`, `b06dd62`, `cd15b9f`, `d355ef6`, `8233ca5`, `d075549`, `dc9b037`,
+`5624b83`, `cb5ccac`. Some BF items landed before the BF-01 commit, so the
+range starts at the plan commit, not at `81d1bd0`.
+
+| ID | Status | Commit | Note |
+|---|---|---|---|
+| BF-01 | done | 81d1bd0 | Every child environment names the history, state, config and home directories. |
+| BF-02 | done | cb5ccac | One `runSync` for update and the upgrade family; key-import block suspends the box. |
+| BF-03 | partial | cb5ccac | Lines, completion line, count line and 7-row view shipped. Not shipped: the styled `update_show_packages` line (plain `name old -> new` per FR-012); the new inventory row (see ADR-0021). Fetched size is the completion-line sum, not a stat diff (deviation, ADR-0021 §3). |
+| BF-04 | done | cb5ccac | Repository total from `xbps-query -L`, with a scan of every `.conf` as fallback. |
+| BF-05 | done | cb5ccac | `InsertAbove` works in the in-place and plain renderers. |
+| BF-06 | done | d355ef6 | Bounded scanners; long lines split at 32 KiB. |
+| BF-07 | done | d355ef6 | stderr is a lossy writer; stdout keeps EPIPE-only semantics. |
+| BF-08 | done | 591bb42 | Paste mode is stateful with no time bound. Ctrl-C inside a paste is the quit key, not SIGINT (see below). |
+| BF-09 | done | dc9b037 | The log is opened with `O_NOFOLLOW`, refuses hard links and symlinked state components, and is chowned through the descriptor. `xbp log` reads through a plain open (see below). |
+| BF-10 | done | dc9b037 | Invoker-owned ancestors are created with `Lchown` after the safety walk. |
+| BF-11 | done | bb61355 | A re-fetch keeps `created`; clean removes the file. |
+| BF-12 | done | bb61355 | Arch resolves from the config line, the test hook, `XBPS_ARCH`, `xbps-uhelper arch`, then the runtime mapping. |
+| BF-13 | done | bb61355 | Reverted fetch removes its backups; a stale backup is rewritten. |
+| BF-14 | done | dc9b037 | Boolean long flags with a value exit 2. |
+| BF-15 | done | 5624b83 | A held or locally newer installed package keeps its `[local]` installed row. |
+| BF-16 | done | cb5ccac | Unparsed child lines are inserted above the box. |
+| BF-17 | done | f7e9788 | Install ratio counts by name. |
+| BF-18 | done | f7e9788 | `markCached` seeds the commit view from predownload completions. |
+| BF-19 | done | f7e9788 | Mixed plans stay in the Install view; `removing`/`removed` lines are parsed. |
+| BF-20 | done | f7e9788 | Retry and failed file reset in-flight bytes. |
+| BF-21 | done | f7e9788 | SIGTERM during predownload exits 143. |
+| BF-22 | done | 383e6a5 | Reinstall nets the old installed size. |
+| BF-23 | done | cd15b9f | Scrollbar thumb follows the scroll offset. |
+| BF-24 | partial | cd15b9f | Squeezed gaps and span clipping shipped. At 60 columns the history table can still touch neighbouring cells (the commit message says so), so the 60×18 goldens keep that case. |
+| BF-25 | done | cd15b9f | Custom `Regular` background covers the frame. |
+| BF-26 | done | cd15b9f | The help block keeps the confirm hint at 60 columns. |
+| BF-27 | done | cd15b9f | Too-small notice stays inside the border. |
+| BF-28 | done | 591bb42 | Horizontal wheel buttons are unknown keys. |
+| BF-29 | done | cd15b9f | Scroll offset moves only when the selection leaves the window. |
+| BF-30 | done | cd15b9f | Fetch info band wraps into its two rows. |
+| BF-31 | done | 383e6a5 | Header wrapping is colour-independent. |
+| BF-32 | done | d075549 | `ManualHold` displays as `Manual hold`. |
+| BF-33 | done | 591bb42 | Emoji width ranges added. |
+| BF-34 | done | 383e6a5 | `VersionDiff` and its tests removed; the spec's defect sentence removed. |
+| BF-35 | done | d075549 | Redo's drift check uses the `before` state. |
+| BF-36 | done | d075549 | Undo's repository and size come from a second `xbps-query -R -p pkgver,repository,filename-size` call (see below). |
+| BF-37 | skipped | b06dd62 | Premise wrong for xbps 0.60.7: an `ignorepkg` package produces no message to match. The hint is not implemented; FR-073 says so. |
+| BF-38 | done | b06dd62 | Download mode stages `.sig2.part` and publishes it after the archive verifies. |
+| BF-39 | done | d075549 | Header reads `Date and Time`. |
+| BF-40 | done | 5624b83 | Repository-pass `--description` prints the description only. |
+| BF-41 | done | 5624b83 | `policy <virtual>` reads the canonical installed record. |
+| BF-42 | done | 5624b83 | `show` resolves pkgver, pattern and virtual tokens. |
+| BF-43 | done | 5624b83 | Resolution runs only for names that survive the token filter. |
+| BF-44 | done | 5624b83 | `name:arch` splits only for a known arch (plus `mips*`, not in the plan); `[!x]` negates; an unbalanced `{` is exit 2. |
+| BF-45 | partial | 8233ca5 | Part 1 done: the cursor is hidden while the viewport is anchored and restored on every exit path. Part 2 skipped: the plan's diagnosis of the double blank line did not match the captured bytes. |
+| BF-46 | done | d355ef6 | A failed PTY open feeds the parser through the direct path. |
+| BF-47 | done | b06dd62 | A `./path` value gets the bare-name/absolute-path message. |
+| BF-48 | done | b06dd62 | Raw control characters are rejected inside TOML strings. |
+| BF-49 | done | b06dd62 | Decision D-3 taken: accepted no-ops are completed; refused flags stay hidden. |
+
+Totals across the 49 items: 45 done, 3 partial (BF-03, BF-24 and BF-45), and 1
+skipped (BF-37).
+
+### Deviations and corrections
+
+- **Ctrl-C in a paste (BF-08).** The plan said a Ctrl-C inside a full-screen
+  paste is delivered as SIGINT because ISIG stays on. That is wrong. Full-screen
+  surfaces run raw, with ISIG off, so Ctrl-C arrives as the byte `0x03`. The
+  decoder reports it as the quit key (`KeyCtrlC`), and paste mode continues
+  until `ESC[201~`. FR-072 and FR-074 now say this.
+- **Undo's repository and size (BF-36).** The fix uses a second `xbps-query`
+  call on the restored version. It does not reuse the entry's after-state
+  values.
+- **The log read path (BF-09).** The plan only named the write path. During
+  integration `xbp log` was changed to read through
+  `config.OpenTransactionLogRead`, which applies the same no-follow, regular-file
+  and ownership checks, so a symlinked log cannot make `sudo xbp log` print an
+  arbitrary file.
+- **Non-live TTY runs (BF-02, BF-03).** `-v`, `TERM=dumb` and `Plain` keep raw
+  xbps forwarding with no `Updated:` or `Fetched` lines. Non-TTY stderr does the
+  same. ADR-0021 §8 records this.
+- **Fetched size (BF-03).** The total is the sum of xbps's completion-line
+  sizes, with KiB precision. The plan preferred a stat diff of the repodata
+  files. ADR-0021 §3 records this.
+- **Count line (D-2) and widget stream (D-1).** The upgrade family's count line
+  is on stderr; `update`'s stays on stdout. The widget and status lines stay on
+  stderr. ADR-0021 §5 and §6.
+- **Per-repository lines have no inventory row.** The nala inventory is frozen
+  at 189 rows, so the plan's new `P-VIS-0xx` row is folded into P-VIS-017.
+- **Spec revision.** The changed dispositions (P-VIS-031, P-VIS-032) are an
+  in-place amendment of rev 6, not a new revision. ADR-0021 §10 records this.
+- **Parity test constant.** After P-VIS-031 and P-VIS-032 moved out of N/A, the
+  N/A total is 35. `tools/parity/parity_test.go` still asserts 37, and that
+  constant has to change with this status.
+
+### Not verified here
+
+- The full-suite gates (`make check`, the Void manual checks and the musl VM
+  check in "Verification after all PRs") were not run by the documentation
+  stream. The PTY tests for the sync, the progress and the paste behaviour
+  exist, and the packaging tests were run against the 0.4.1 bump.
+- nala source line numbers cited in the parity rows come from this plan. They
+  were not re-checked, because the nala source is not on this host.
+- The security review listed under "Out of scope" has not been carried out.

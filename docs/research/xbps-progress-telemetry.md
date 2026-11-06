@@ -334,6 +334,99 @@ All regular expressions below have been validated against live xbps streams and 
   ^(\d+)\s+downloaded,\s+(\d+)\s+installed,\s+(\d+)\s+updated,\s+(\d+)\s+configured,\s+(\d+)\s+removed,\s+(\d+)\s+on hold\.$
   ```
 
+### 4.5 Repository Sync Telemetry (`xbps-install -S`)
+
+The sync downloads one `<arch>-repodata` index per repository. Its lines are
+the same download lines as 4.1, but for the index file, so the parser routes
+them to the repository callbacks and keeps them out of the package counters
+(BF-03). The sources are xbps `lib/fetch_cb.c` and `bin/xbps-install/fetch_cb.c`
+(lines 153-193), `lib/repo_sync.c` (140-146) and
+`bin/xbps-install/state_cb.c` (68-70, 154-158). Those references come from the
+bug-fix-1 plan (BF-03), which read them against xbps 0.60.x; this document does
+not re-verify them.
+
+#### 1. Repository Start (on `stdout`, TTY or piped)
+- **Format**: ``[*] Updating repository `<url>/<arch>-repodata' ...``
+- **Regex** (`repoSyncRegex`):
+  ```regexp
+  ^\[\*\] Updating repository ['"\x60]([^'"\x60]+)['"\x60] \.\.\.$
+  ```
+- **Captures**:
+  - `Group 1` (`string`): The repository index URL, ending in `/<arch>-repodata`.
+- **Notes**: xbpretty takes the base URL and the index name, `<base> <arch>-repodata`,
+  as the repository's description. Each start line finishes the previous
+  repository, so a repository counts as done when the next one starts or at EOF.
+
+#### 2. Transfer Tick (only while downloading)
+- **Format on a TTY**: `[%2d%%] <arch>-repodata: [<size> <pct>%] <rate> ETA: <eta>\033[K\r`
+  on `stderr` when stdout is a TTY.
+- **Format piped**: `<arch>-repodata: [<size> <pct>%] <rate> ETA: <eta>\n` on
+  `stdout` when stdout is not a TTY.
+- **Regexes**:
+  ```regexp
+  ^\[\s*(\d+)%\]\s+([\w.+~\-]+):\s+\[([\d\.]+[A-Za-z]+)\s+(\d+)%\]\s+(.+?)\s+ETA:\s+(\S+)
+  ^([\w.+~\-]+):\s+\[([\d\.]+[A-Za-z]+)\s+(\d+)%\]\s+(.+?)\s+ETA:\s+(\S+)
+  ```
+- **Notes**: a file name ending in `-repodata` goes to the repository tick callback.
+
+#### 3. Transfer Done (only while downloading)
+- **Format**: `<arch>-repodata: <size> [avg rate: <rate>]`, on `stderr` when stdout
+  is a TTY and on `stdout` otherwise.
+- **Regex** (`downloadCompleteRegex`):
+  ```regexp
+  ^([\w.+~\-]+):\s+([\d\.]+[A-Za-z]+)\s+\[avg rate:\s+(\S+)\]
+  ```
+- **Captures**:
+  - `Group 2` (`string` -> bytes, base 1024): The size xbps reports. xbps prints
+    `KB`, `MB` and so on with no decimals (e.g. `1854KB`), so the total has KiB
+    precision.
+- **Notes**: this is the source of the sync's `Fetched <size>` total. The
+  parser reads it from both streams (BF-03).
+
+#### 4. Unchanged Repository (no transfer)
+- **Format**: nothing after the start line. An index that xbps does not fetch
+  prints no transfer or completion line, so the repository shows `No Change:`.
+
+#### 5. Fetch Failure (on `stderr`)
+- **Format**: ``ERROR: [reposync] failed to fetch file `<url>': <reason>``
+- **Regex** (`repoErrorRegex`):
+  ```regexp
+  ^ERROR: \[reposync\] failed to fetch file ['"\x60]([^'"\x60]+)['"\x60]: (.+)$
+  ```
+- **Captures**:
+  - `Group 1`: the repository index URL that failed.
+  - `Group 2`: xbps's reason, printed on the repository's `Error:` line.
+- **Notes**: xbps exits 0 when every fetch fails, so the exit code cannot
+  report this. The `ERROR:` line is the only signal.
+
+#### 6. New Repository Key (on `stdout`, reads `stdin`)
+- **Format**: `<url>' repository has been RSA signed by "<signer>"`, then
+  `Fingerprint: <hex>`, then `Do you want to import this public key? [Y/n]`.
+- **Regex** (`keyImportStartRegex`):
+  ```regexp
+  has been RSA signed by|^Fingerprint: 
+  ```
+- **Notes**: xbpretty suspends the live box at the first matching line and
+  forwards the following lines raw until the next repository start line, so the
+  prompt is visible and reads `stdin`. The block is raw output, not a line the
+  view consumes.
+
+### 4.6 Removals Inside `xbps-install` (on `stdout`)
+
+A mixed plan (an install or update that replaces a package) makes
+`xbps-install` remove a package itself. Those lines are not `xbps-remove`'s
+`Removing ...` lines, so they need their own patterns (BF-19).
+
+- **Formats**: `<pkgver>: removing ...` and `<pkgver>: removed successfully.`
+- **Regexes** (`installRemoveRunRegex`, `installRemoveOkRegex`):
+  ```regexp
+  ^([\w.+~\-]+):\s+removing \.\.\.$
+  ^([\w.+~\-]+):\s+removed successfully\.$
+  ```
+- **Notes**: a plan with an install, an update or a configure step keeps the
+  Install view, and the removal counts in its denominator `2A + C + R`. Only a
+  remove-only plan uses the Remove view (BF-19, FR-064).
+
 ---
 
 ## 5. Architectural Recommendations for xbpretty

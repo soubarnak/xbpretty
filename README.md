@@ -4,14 +4,15 @@
 
 # xbpretty
 
-> **Rev 6 ships as xbpretty 0.4.0.** The specification targets full parity
+> **Rev 6 ships as xbpretty 0.4.1.** The specification targets full parity
 > with nala v0.18.2 and adds history/undo/redo, predownload, fetch, discovery
-> with machine output and the full-screen TUI. This README is the 0.4.0 user
+> with machine output and the full-screen TUI. This README is the 0.4.1 user
 > guide; the contract is [`xbpretty-spec.md`](xbpretty-spec.md), with the
 > matrix in [`docs/parity/matrix.md`](docs/parity/matrix.md), the migration
 > guide in [`docs/migration-rev6.md`](docs/migration-rev6.md) and the decisions
 > in [`docs/adr/`](docs/adr/). The six alias names and the superset extensions
-> are unchanged.
+> are unchanged. 0.4.1 is the bug-fix release for rev 6; its notes are in
+> [`docs/release-notes-0.4.1.md`](docs/release-notes-0.4.1.md).
 
 A modern, friendly front end for [`xbps`](https://github.com/void-linux/xbps), the Void Linux package manager, inspired by [Nala](https://gitlab.com/volian/nala).
 
@@ -39,7 +40,8 @@ Built in pure Go with zero external dependencies, `xbpretty` compiles to a singl
 
 - **Nala-Style Inline Summary**: Borderless `=`-ruled tables in the fixed operation order (*Remove*, *AutoRemove*, *Purge*, *AutoPurge*, *Install*, *ReInstall*, *Upgrade*, *Configure*, *Held*), with the counts-and-sizes footer.
 - **Version Delta Highlighting**: Displays version transitions (`old → new`) with only the changed components highlighted (`Notice`).
-- **Live Progress Widget**: Real-time Download (7-row), Install, Remove, Update and MirrorScore (6-row) views fed by a hybrid PTY/pipe engine. `[Ui] mode = "Plain"` is the supported off switch.
+- **Live Progress Widget**: Real-time Download and Update (7-row), Install, Remove and MirrorScore (6-row) views fed by a hybrid PTY/pipe engine. `[Ui] mode = "Plain"` is the supported off switch.
+- **Nala-Style Sync Step**: `update` and the upgrade family show nala's `Updating Package Lists` view on a live terminal, with one line per repository (`No Change:`, `Updated:`, `Error:`), then `Fetched <size> in <time> (<rate>/s)` or `Nothing to fetch`. Off a terminal, with `-v`, `TERM=dumb` or `Plain`, xbps's own sync output is forwarded unchanged.
 - **Full-Screen TUI**: The S1 transaction summary, S2 history detail, S3 mirror picker and package-info view, all gated on `[Ui] mode = "Tui"` and the 60×18 entry floor.
 - **Zero Dependencies & Blazing Fast**: Pure Go standard library VT100/ANSI rendering engine. No third-party TUI frameworks, sub-2ms startup, and offline packaging friendly.
 - **Script & Pipeline Friendly**: stdout carries durable output only; the prompt, widget, hints and forwarded child output go to stderr. `Auto` colour is per stream, and `NO_COLOR` is honoured.
@@ -58,7 +60,7 @@ Built in pure Go with zero external dependencies, `xbpretty` compiles to a singl
 
 ### Live Execution Progress
 
-When running interactively, child `xbps` telemetry is captured and rendered into an in-place rounded widget. Download is seven rows; the other views are six.
+When running interactively, child `xbps` telemetry is captured and rendered into an in-place rounded widget. Download and Update are seven rows; the other views are six.
 
 ```
 ╭── Downloading... ────────────────────────────────────────────────────────────╮
@@ -66,6 +68,14 @@ When running interactively, child `xbps` telemetry is captured and rendered into
 │  Downloading:    firefox-130.0_1                                             │
 │  ETA: 0:00:03  [━━━━━━━━━━━━────────] 61.2% • 42.1 MiB/68.8 MiB • 8.4 MiB/s   │
 ╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
+The sync step prints one line per repository above its widget, then a completion line once the widget clears:
+
+```
+No Change: https://repo-default.voidlinux.org/current x86_64-repodata
+Updated: https://repo-default.voidlinux.org/current/musl x86_64-musl-repodata [1.8 MiB]
+Fetched 1.8 MiB in 2s (921.6 KiB/s)
 ```
 
 The summary is nala's inline surface, not a box: `=` rules at the terminal width, borderless tables and a colour-independent footer.
@@ -95,7 +105,7 @@ Do not accept a different fingerprint. Subsequent updates arrive automatically t
 
 ### Migrating from rev 5
 
-Rev 6 (xbpretty 0.4.0) accepts the rev-5 flat config keys with a warning during
+Rev 6 (xbpretty 0.4.1) accepts the rev-5 flat config keys with a warning during
 the rev-6 window and never rewrites your config file. The key map, retired
 keys, behaviour changes, verification and rollback steps are in
 [`docs/migration-rev6.md`](docs/migration-rev6.md), with the canonical example
@@ -154,6 +164,12 @@ Notes:
   removes packages, so `--full`, `--no-full` and `--safe` change no argv.
 - `install` does not refresh the index by default; `--update` adds the sync
   step. The upgrade family syncs by default.
+- The sync step shows the same view for `update`, the upgrade family and
+  `--update`, on a live terminal (see Features). The upgrade family's count line
+  (`N packages can be upgraded`) goes to stderr after the sync, so stdout keeps
+  only the summary. `update` prints its count on stdout.
+  `update_show_packages` lists each upgradable package instead of the count;
+  it applies to `update` only.
 - `remove` reports and filters packages that are not installed; if nothing
   remains it prints `Nothing to do.` and exits 0.
 - Implicit autoremove runs after a successful install/remove/purge/upgrade when
@@ -187,6 +203,12 @@ network.
 Discovery flags: `-i/--installed`, `-u/--upgradable`, `-V/--virtual`,
 `-a/--all-versions`, `-A/--all-arches` (accepted no-op), `--description`,
 `--summary`, `-m/--machine`.
+
+Name tokens are globs (`*`, `?`, `[...]`, `[!...]` for negation, `{a,b}`),
+`name=version`, or `name:arch`. The `:arch` suffix is read only when it names a
+known architecture (`noarch`, `x86_64`, `i686`, `aarch64`, `armv6l` or
+`armv7l`, optionally with `-musl`, or a `ppc*` or `mips*` family), so
+`pc:zlib-ng` is one name. An unbalanced `{` is a usage error (exit 2).
 
 `-m` prints NDJSON: one compact JSON object per line with `"schema":1`, no
 ANSI even with `--color=always`.
@@ -263,6 +285,8 @@ xbp history info 12                    # same as history 12
   and replays it; `redo last` targets the newest entry literally.
 - Each replay is recorded as a new history entry, so the store stays
   append-only.
+- A held row's reason reads `Manual hold`. `redo` after `undo` checks the store
+  against the state it replays from, so it no longer warns about every package.
 - `history clear <id|last>` and `history clear --all` prune the store. Replay
   and clear are root-only.
 
@@ -281,7 +305,9 @@ text summary.
 
 - Transaction summary: `j`/`k` and arrows move, `h`/`l` switch tabs,
   `Home`/`End`/`PgUp`/`PgDn` and the mouse wheel scroll, `y` confirms,
-  `q`/`Q`/`n`/`N`/`Esc`/`Ctrl-C` refuse, `s` shows package info.
+  `q`/`Q`/`n`/`N`/`Esc`/`Ctrl-C` refuse, `s` shows package info. A paste is
+  discarded whole until its end marker, so a pasted `y` never confirms; a
+  Ctrl-C byte inside a paste is the quit key.
 - History detail: navigation and `s` work; `q`/`Esc`/`Ctrl-C` quit with exit 0;
   `y` is ignored.
 - Mirror picker: `j`/`k` move (wrapping), `g`/`G`/`Home`/`End` jump, `Enter` or
@@ -331,7 +357,9 @@ Command-specific flags: `-c/--country` (fetch, repeatable), `--auto [N]`,
 `--limit N` (log); `--all` (history clear); discovery flags above.
 
 `--help`, `--version`, `completion` and `link` do not load the config.
-Unknown flags, a flag on the wrong command, and conflicting pairs (`-y`/`-n`,
+A boolean long flag given a value (`--assume-yes=false`, `--dry-run=no`) is
+refused the same way, with exit 2 and no child run. Unknown flags, a flag on the
+wrong command, and conflicting pairs (`-y`/`-n`,
 `--color`/`--no-color`, `--update`/`--no-update`, `--auto-remove`/`--no-auto-remove`,
 `--tui`/`--no-tui`) exit 2. Flags that apt has but xbps cannot express are
 refused with a clear message and exit 2; they are never silent no-ops.
@@ -471,6 +499,7 @@ For in-depth design decisions and specifications, consult the project documentat
 - [ADR-0016](docs/adr/0016-config-schema-layers-and-trust.md) — Config schema, layers and root trust.
 - [ADR-0017](docs/adr/0017-full-screen-surfaces-and-engine.md) — Full-screen surfaces, inline viewport and engine.
 - [ADR-0020](docs/adr/0020-parity-matrix-generated-and-checked.md) — The parity matrix, generated and checked.
+- [ADR-0021](docs/adr/0021-sync-step-follows-nala-update.md) — The sync step follows nala's update view.
 - [docs/migration-rev6.md](docs/migration-rev6.md) — Rev-5 to rev-6 config and behaviour migration.
 
 ---
@@ -478,18 +507,18 @@ For in-depth design decisions and specifications, consult the project documentat
 ## Releasing
 
 Releases are tag driven. `srcpkgs/xbpretty/template` is the single version
-source; rev 6 is `0.4.0` and the tag is `xbpretty-v0.4.0`.
+source; rev 6 is `0.4.1` and the tag is `xbpretty-v0.4.1`.
 
 1. Update `version=` in `srcpkgs/xbpretty/template`.
 2. Refresh the mirror snapshot when it is older than 90 days: `make mirrors`.
 3. Commit and push to `main`.
-4. Push a Git tag matching the version: `git tag xbpretty-v0.4.0 && git push origin xbpretty-v0.4.0`.
+4. Push a Git tag matching the version: `git tag xbpretty-v0.4.1 && git push origin xbpretty-v0.4.1`.
 5. The GitHub Actions release workflow gates tests, vet, generated completions
    and manpages, shell syntax, `mandoc`, `shellcheck` and actionlint, then builds
    all nine architectures with `tools/build-xbps.sh`, enforces the static-link,
    8 MB binary and 3.6 MB package budgets, checks the package contents and both
    the unsigned and signed clean-root installs, signs each architecture, and
-   creates the GitHub release from `docs/release-notes-0.4.0.md`.
+   creates the GitHub release from `docs/release-notes-0.4.1.md`.
 6. The workflow's `template` job then commits the release tarball `checksum=`
    back to `main`. Build acceptance with
    `xbps-src pkg xbpretty` runs from `main` after that checksum bump; the tagged
