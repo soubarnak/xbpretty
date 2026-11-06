@@ -126,7 +126,7 @@ func TestApplyWritesSavesBackupAndManifest(t *testing.T) {
 	}
 	manifestPath := filepath.Join(t.TempDir(), "fetch.json")
 
-	manifest, _, err := fetch.ApplyWrites(writes, fetch.Manifest{}, manifestPath, writtenAt, "https://repo-fi.voidlinux.org", "x86_64")
+	manifest, _, _, err := fetch.ApplyWrites(writes, fetch.Manifest{}, manifestPath, writtenAt, "https://repo-fi.voidlinux.org", "x86_64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestApplyWritesCreatedFileHasNoBackup(t *testing.T) {
 	}
 	writes[0].Path = filepath.Join(targetDir, filepath.Base(source))
 
-	manifest, _, err := fetch.ApplyWrites(writes, fetch.Manifest{}, filepath.Join(t.TempDir(), "fetch.json"), time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
+	manifest, _, _, err := fetch.ApplyWrites(writes, fetch.Manifest{}, filepath.Join(t.TempDir(), "fetch.json"), time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestApplyWritesKeepsTheFirstBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifestPath := filepath.Join(t.TempDir(), "fetch.json")
-	first, _, err := fetch.ApplyWrites(writes, fetch.Manifest{}, manifestPath, time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
+	first, _, _, err := fetch.ApplyWrites(writes, fetch.Manifest{}, manifestPath, time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestApplyWritesKeepsTheFirstBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := fetch.ApplyWrites(writes, first, manifestPath, time.Now(), "https://repo-de.voidlinux.org", "x86_64"); err != nil {
+	if _, _, _, err := fetch.ApplyWrites(writes, first, manifestPath, time.Now(), "https://repo-de.voidlinux.org", "x86_64"); err != nil {
 		t.Fatal(err)
 	}
 	backupContent, err := os.ReadFile(source + fetch.BackupSuffix)
@@ -272,7 +272,7 @@ func TestApplyWritesCarriesUntouchedEntries(t *testing.T) {
 			SHA256:  "deadbeef",
 		}},
 	}
-	manifest, _, err := fetch.ApplyWrites(writes, previous, filepath.Join(t.TempDir(), "fetch.json"), time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
+	manifest, _, _, err := fetch.ApplyWrites(writes, previous, filepath.Join(t.TempDir(), "fetch.json"), time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +467,7 @@ func TestApplyWritesRollsBackWhenTheManifestCannotBeWritten(t *testing.T) {
 	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := fetch.ApplyWrites(writes, fetch.Manifest{}, filepath.Join(blocker, "fetch.json"), time.Now(), "https://repo-fi.voidlinux.org", "x86_64"); err == nil {
+	if _, _, _, err := fetch.ApplyWrites(writes, fetch.Manifest{}, filepath.Join(blocker, "fetch.json"), time.Now(), "https://repo-fi.voidlinux.org", "x86_64"); err == nil {
 		t.Fatal("ApplyWrites succeeded with an uncreatable manifest")
 	}
 	content, err := os.ReadFile(source)
@@ -600,7 +600,7 @@ func TestApplyWritesDedupesByPath(t *testing.T) {
 		Path: target, Content: []byte("repository=https://repo-fi.voidlinux.org/current\n"),
 		SHA256: strings.Repeat("a", 64),
 	}
-	manifest, _, err := fetch.ApplyWrites([]fetch.PlannedWrite{write, write}, fetch.Manifest{}, filepath.Join(t.TempDir(), "fetch.json"), time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
+	manifest, _, _, err := fetch.ApplyWrites([]fetch.PlannedWrite{write, write}, fetch.Manifest{}, filepath.Join(t.TempDir(), "fetch.json"), time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -609,7 +609,7 @@ func TestApplyWritesDedupesByPath(t *testing.T) {
 	}
 }
 
-func TestApplyWritesSnapshotsAPreviouslyCreatedFile(t *testing.T) {
+func TestApplyWritesRefetchKeepsCreated(t *testing.T) {
 	dir := t.TempDir()
 	set, _ := managedSet(t, dir, "10-repository-main.conf")
 	fixtureSource := filepath.Join(dir, "10-repository-main.conf")
@@ -630,7 +630,7 @@ func TestApplyWritesSnapshotsAPreviouslyCreatedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifestPath := filepath.Join(t.TempDir(), "fetch.json")
-	first, _, err := fetch.ApplyWrites(
+	first, _, _, err := fetch.ApplyWrites(
 		mustPlan(t, set, "https://repo-fi.voidlinux.org", dir),
 		fetch.Manifest{}, manifestPath, time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
 	if err != nil {
@@ -639,24 +639,81 @@ func TestApplyWritesSnapshotsAPreviouslyCreatedFile(t *testing.T) {
 	if len(first.Files) != 1 || !first.Files[0].Created || first.Files[0].Backup != "" {
 		t.Fatalf("first manifest = %+v, want created with no backup", first.Files)
 	}
-	firstContent, err := os.ReadFile(first.Files[0].Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	second, _, err := fetch.ApplyWrites(
+	// The pre-fetch state was absence, and a re-fetch must not change that:
+	// the entry stays created, with no backup of the first fetch's output.
+	second, _, backups, err := fetch.ApplyWrites(
 		mustPlan(t, set, "https://repo-de.voidlinux.org", dir),
 		first, manifestPath, time.Now(), "https://repo-de.voidlinux.org", "x86_64")
 	if err != nil {
 		t.Fatal(err)
 	}
 	entry := second.Files[0]
-	if entry.Created || entry.Backup == "" {
-		t.Errorf("second entry = %+v, want a snapshot backup", entry)
+	if !entry.Created || entry.Backup != "" {
+		t.Errorf("second entry = %+v, want created with no backup", entry)
 	}
-	backup, err := os.ReadFile(entry.Backup)
-	if err != nil || string(backup) != string(firstContent) {
-		t.Errorf("snapshot backup = %q, %v; want the first fetch's output", backup, err)
+	if _, err := os.Stat(first.Files[0].Path + fetch.BackupSuffix); !os.IsNotExist(err) {
+		t.Errorf("a re-fetch snapshotted the first fetch's output: %v", err)
+	}
+	if len(backups) != 0 {
+		t.Errorf("backups written = %v, want none", backups)
+	}
+}
+
+func TestApplyWritesRewritesAnOrphanBackup(t *testing.T) {
+	dir := t.TempDir()
+	set, source := managedSet(t, dir, "10-repository-main.conf")
+	// An earlier run left a backup behind; the admin has since edited the file,
+	// so that backup is stale and must not be trusted.
+	edited := []byte("repository=https://repo-default.voidlinux.org/current\nignorepkg=hand-edited\n")
+	if err := os.WriteFile(source, edited, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale := source + fetch.BackupSuffix
+	if err := os.WriteFile(stale, []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, _, backups, err := fetch.ApplyWrites(
+		mustPlan(t, set, "https://repo-fi.voidlinux.org", dir),
+		fetch.Manifest{}, filepath.Join(t.TempDir(), "fetch.json"), time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := os.ReadFile(stale)
+	if err != nil || string(backup) != string(edited) {
+		t.Errorf("backup = %q, %v; want the bytes the target held before this run", backup, err)
+	}
+	if len(manifest.Files) != 1 || manifest.Files[0].Backup != stale {
+		t.Errorf("manifest = %+v, want the rewritten backup", manifest.Files)
+	}
+	if len(backups) != 1 || backups[0] != stale {
+		t.Errorf("created backups = %v, want [%s]", backups, stale)
+	}
+}
+
+func TestApplyWritesReturnsOnlyTheBackupsItWrote(t *testing.T) {
+	dir := t.TempDir()
+	set, source := managedSet(t, dir, "10-repository-main.conf")
+	manifestPath := filepath.Join(t.TempDir(), "fetch.json")
+	first, _, backups, err := fetch.ApplyWrites(
+		mustPlan(t, set, "https://repo-fi.voidlinux.org", dir),
+		fetch.Manifest{}, manifestPath, time.Now(), "https://repo-fi.voidlinux.org", "x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 || backups[0] != source+fetch.BackupSuffix {
+		t.Errorf("first run backups = %v, want [%s]", backups, source+fetch.BackupSuffix)
+	}
+
+	// The second run reuses the manifest's backup and writes none.
+	_, _, backups, err = fetch.ApplyWrites(
+		mustPlan(t, set, "https://repo-de.voidlinux.org", dir),
+		first, manifestPath, time.Now(), "https://repo-de.voidlinux.org", "x86_64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 0 {
+		t.Errorf("second run backups = %v, want none: the manifest backup is reused", backups)
 	}
 }
 

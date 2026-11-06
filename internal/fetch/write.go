@@ -352,8 +352,10 @@ func WriteManifest(path string, manifest Manifest) error {
 // ApplyWrites commits every planned file and the manifest as one unit. Backups
 // are made before any target changes, targets are renamed into place only after
 // every temp exists, and a failure rolls the renames back. Entries for files
-// this run did not touch are carried over from previous (FR-047).
-func ApplyWrites(writes []PlannedWrite, previous Manifest, manifestPath string, writtenAt time.Time, mirror, arch string) (Manifest, []PreImage, error) {
+// this run did not touch are carried over from previous (FR-047). The returned
+// pre-images restore each target, and the returned backup paths are the ones
+// this run wrote, which a revert removes once the configuration is back.
+func ApplyWrites(writes []PlannedWrite, previous Manifest, manifestPath string, writtenAt time.Time, mirror, arch string) (Manifest, []PreImage, []string, error) {
 	previousByPath := map[string]ManifestFile{}
 	for _, entry := range previous.Files {
 		previousByPath[entry.Path] = entry
@@ -370,61 +372,60 @@ func ApplyWrites(writes []PlannedWrite, previous Manifest, manifestPath string, 
 		info, statErr := os.Lstat(write.Path)
 		exists := statErr == nil && !info.IsDir()
 		if statErr != nil && !os.IsNotExist(statErr) {
-			return Manifest{}, nil, fmt.Errorf("writing %s: %w", write.Path, statErr)
+			return Manifest{}, nil, nil, fmt.Errorf("writing %s: %w", write.Path, statErr)
 		}
 		if write.Derived && exists {
 			prev, managed := previousByPath[write.Path]
 			if !managed || !prev.Created {
-				return Manifest{}, nil, fmt.Errorf("refusing to overwrite %s: not created by xbp fetch", write.Path)
+				return Manifest{}, nil, nil, fmt.Errorf("refusing to overwrite %s: not created by xbp fetch", write.Path)
 			}
 		}
 		if err := os.MkdirAll(filepath.Dir(write.Path), 0o755); err != nil {
-			return Manifest{}, nil, fmt.Errorf("writing %s: %w", write.Path, err)
+			return Manifest{}, nil, nil, fmt.Errorf("writing %s: %w", write.Path, err)
 		}
 		var original []byte
 		if exists {
 			var err error
 			original, err = os.ReadFile(write.Path)
 			if err != nil {
-				return Manifest{}, nil, fmt.Errorf("writing %s: %w", write.Path, err)
+				return Manifest{}, nil, nil, fmt.Errorf("writing %s: %w", write.Path, err)
 			}
 		}
 		preImages = append(preImages, PreImage{Path: write.Path, Existed: exists, Content: original})
 
 		t := writeTarget{write: write, exists: exists, original: original}
-		if prev, ok := previousByPath[write.Path]; ok {
-			switch {
-			case prev.Backup != "" && fileExists(prev.Backup):
-				t.backup = prev.Backup
-			case prev.Created && exists:
-				// created:true says no backup is known, but the target exists
-				// now, so snapshot the bytes a later clean must restore.
-				t.backup = write.Path + BackupSuffix
-			case prev.Created:
-				t.created = true
-			case exists:
-				t.backup = write.Path + BackupSuffix
-			default:
-				t.created = true
-			}
-		} else if exists {
+		prev, managed := previousByPath[write.Path]
+		switch {
+		case managed && prev.Backup != "" && fileExists(prev.Backup):
+			// The manifest's backup is the pre-first-fetch file; keep it.
+			t.backup = prev.Backup
+		case managed && prev.Created:
+			// The pre-fetch state was absence, whatever the file holds now (a
+			// re-fetch wrote it), so no backup is taken and clean removes it.
+			t.created = true
+		case exists:
+			// Nothing trustworthy is recorded, so the bytes the target holds now
+			// are the pre-run state. Snapshot them afresh, never reusing a file
+			// already at the backup path: it may be stale.
 			t.backup = write.Path + BackupSuffix
-		} else {
+			t.snapshot = true
+		default:
 			t.created = true
 		}
 		targets = append(targets, t)
 	}
 
 	// Backups first: a failure here touches no target and removes the backups
-	// this run created.
+	// this run wrote. A reused manifest backup is left as it is.
 	createdBackups := make([]string, 0)
 	for _, t := range targets {
-		if t.backup == "" || fileExists(t.backup) || !t.exists {
+		takesSnapshot := t.backup != "" && t.exists && (t.snapshot || !fileExists(t.backup))
+		if !takesSnapshot {
 			continue
 		}
 		if err := writeFileAtomic(t.backup, t.original); err != nil {
 			removeAll(createdBackups)
-			return Manifest{}, nil, fmt.Errorf("writing %s: %w", t.backup, err)
+			return Manifest{}, nil, nil, fmt.Errorf("writing %s: %w", t.backup, err)
 		}
 		createdBackups = append(createdBackups, t.backup)
 	}
@@ -436,7 +437,7 @@ func ApplyWrites(writes []PlannedWrite, previous Manifest, manifestPath string, 
 		if err != nil {
 			removeAll(temps)
 			removeAll(createdBackups)
-			return Manifest{}, nil, fmt.Errorf("writing %s: %w", t.write.Path, err)
+			return Manifest{}, nil, nil, fmt.Errorf("writing %s: %w", t.write.Path, err)
 		}
 		temps[i] = temp
 	}
@@ -447,7 +448,7 @@ func ApplyWrites(writes []PlannedWrite, previous Manifest, manifestPath string, 
 			removeAll(temps[i:])
 			rollbackTargets(targets, renamed)
 			removeAll(createdBackups)
-			return Manifest{}, nil, fmt.Errorf("writing %s: %w", t.write.Path, err)
+			return Manifest{}, nil, nil, fmt.Errorf("writing %s: %w", t.write.Path, err)
 		}
 		temps[i] = ""
 		renamed = append(renamed, i)
@@ -485,18 +486,21 @@ func ApplyWrites(writes []PlannedWrite, previous Manifest, manifestPath string, 
 	if err := WriteManifest(manifestPath, manifest); err != nil {
 		rollbackTargets(targets, renamed)
 		removeAll(createdBackups)
-		return Manifest{}, nil, fmt.Errorf("writing %s: %w", manifestPath, err)
+		return Manifest{}, nil, nil, fmt.Errorf("writing %s: %w", manifestPath, err)
 	}
-	return manifest, preImages, nil
+	return manifest, preImages, createdBackups, nil
 }
 
 // writeTarget is one planned file with the pre-run state rollback needs.
+// snapshot marks a backup taken from the bytes the target holds now, which
+// replaces whatever is at the backup path, rather than a manifest's backup.
 type writeTarget struct {
 	write    PlannedWrite
 	exists   bool
 	original []byte
 	backup   string
 	created  bool
+	snapshot bool
 }
 
 // rollbackTargets restores the pre-run state of every renamed target.

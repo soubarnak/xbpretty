@@ -26,7 +26,9 @@ var (
 	fetchWriteDir      = "/etc/xbps.d"
 	fetchManifestPath  = fetch.DefaultManifestPath
 	fetchHTTPClient    = fetch.NewHTTPClient
-	fetchArch          = runtimeXBPSArch()
+	// fetchArch, when non-empty, stands in for the detected architecture
+	// (see xbpsArch). Only the test hooks set it.
+	fetchArch          = ""
 	fetchPreviousHosts = func() []string { return fetch.ManifestMirrorURLs(fetchManifestPath) }
 	// pickMirror is #78's picker seam. Nil means the real enhanced-gate
 	// picker; the non-TTY top-3 shortlist is the fallback below the floor or
@@ -89,10 +91,7 @@ func (st *state) runFetch(opts *options) int {
 		st.errorf("%v\n", err)
 		return exitRuntime
 	}
-	arch := repos.Arch
-	if arch == "" {
-		arch = fetchArch
-	}
+	arch := st.xbpsArch(cfg)
 
 	mirrors = fetch.FilterMirrors(mirrors, opts.country)
 	if len(mirrors) == 0 {
@@ -352,7 +351,7 @@ func (st *state) writeRepositoryConfiguration(plan fetchWritePlan) ([]string, in
 		previous = fetch.Manifest{}
 	}
 
-	_, preImages, err := fetch.ApplyWrites(writes, previous, fetchManifestPath, plan.WrittenAt, plan.Mirror.URL, plan.Arch)
+	_, preImages, createdBackups, err := fetch.ApplyWrites(writes, previous, fetchManifestPath, plan.WrittenAt, plan.Mirror.URL, plan.Arch)
 	if err != nil {
 		return nil, exitRuntime, err
 	}
@@ -364,13 +363,13 @@ func (st *state) writeRepositoryConfiguration(plan fetchWritePlan) ([]string, in
 
 	code, output, runErr := st.r.streamStderr(st.r.cfg.Xbps.InstallPath, "-S")
 	if runErr != nil {
-		st.revertFetchWrites(preImages, previous)
+		st.revertFetchWrites(preImages, previous, createdBackups...)
 		return nil, exitRuntime, runErr
 	}
 
 	failed, foreign := fetch.ScanSyncErrors(output.Stdout, output.Stderr, fetch.WrittenURLs(writes))
 	if code != 0 || failed {
-		st.revertFetchWrites(preImages, previous)
+		st.revertFetchWrites(preImages, previous, createdBackups...)
 		if code != 0 {
 			return nil, code, nil
 		}
@@ -386,8 +385,10 @@ func (st *state) writeRepositoryConfiguration(plan fetchWritePlan) ([]string, in
 // before this run, not the pre-first-fetch backup, then puts the previous
 // manifest back (or removes it on a first write) so carried-over entries and an
 // earlier fetch stay revertable. A failed revert step keeps the current
-// manifest for a later clean --fetch.
-func (st *state) revertFetchWrites(preImages []fetch.PreImage, previous fetch.Manifest) {
+// manifest for a later clean --fetch. createdBackups are the backups this run
+// wrote; once the previous manifest is back nothing needs them, so they go,
+// except one the previous manifest still names.
+func (st *state) revertFetchWrites(preImages []fetch.PreImage, previous fetch.Manifest, createdBackups ...string) {
 	restored := true
 	for _, pre := range preImages {
 		var revertErr error
@@ -415,7 +416,26 @@ func (st *state) revertFetchWrites(preImages []fetch.PreImage, previous fetch.Ma
 	} else {
 		_ = os.Remove(fetchManifestPath)
 	}
+	st.removeCreatedBackups(createdBackups, previous)
 	st.errorf("%s\n", "repository sync failed; previous configuration restored")
+}
+
+// removeCreatedBackups deletes the backups a reverted run wrote, except any the
+// restored previous manifest still names: those are needed for a later
+// clean --fetch.
+func (st *state) removeCreatedBackups(createdBackups []string, previous fetch.Manifest) {
+	referenced := map[string]bool{}
+	for _, entry := range previous.Files {
+		referenced[entry.Backup] = true
+	}
+	for _, backup := range createdBackups {
+		if referenced[backup] {
+			continue
+		}
+		if err := os.Remove(backup); err != nil && !os.IsNotExist(err) {
+			st.errorf("reverting: removing backup %s: %v\n", backup, err)
+		}
+	}
 }
 
 // mirrorBaseURLs returns the live mirror URLs, whose paths are the bases a
