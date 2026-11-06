@@ -306,6 +306,57 @@ func assertFetchBorders(t *testing.T, grid string, w int) {
 	}
 }
 
+// TestFetchInfoWrapsIntoTwoRows: at 60 columns the info sentence
+// fills the two-row band instead of truncating its tail.
+func TestFetchInfoWrapsIntoTwoRows(t *testing.T) {
+	const info = "Score is how many milliseconds it takes to download the repository index."
+	lines := strings.Split(RenderFetch(&FetchModel{Rows: goldenMirrors()}, 60, 18, DefaultTheme()).Text(), "\n")
+	// Rows 12 and 13 are the band: infoY is 1+listH and the help band starts
+	// two rows below it.
+	// Each row sits between the rounded side borders.
+	inside := func(line string) string { return strings.Trim(line, "│ ") }
+	band := strings.Join([]string{inside(lines[12]), inside(lines[13])}, " ")
+	if band != info {
+		t.Errorf("info band = %q, want %q", band, info)
+	}
+	if inside(lines[14]) != "" {
+		t.Errorf("row 14 = %q, want the blank gap before the help band", lines[14])
+	}
+}
+
+// TestFetchScrollKeepsOffsetWhenMovingUp: moving up
+// inside the visible window leaves the window alone, and the wrap from the
+// first mirror back to the last scrolls it to the end.
+func TestFetchScrollKeepsOffsetWhenMovingUp(t *testing.T) {
+	rows := make([]FetchRow, 30)
+	for i := range rows {
+		rows[i] = FetchRow{URL: "https://mirror.example/" + itoa(i), Region: "EU", Tier: 1, Latency: "1 ms", Speed: "1 MiB/s", Score: itoa(i + 1)}
+	}
+	m := &FetchModel{Rows: rows}
+	m.SetSelection(29)
+	RenderFetch(m, 80, 24, DefaultTheme())
+	// 80x24 shows 16 mirror rows, so the window for row 29 starts at 14.
+	if m.Offset != 14 {
+		t.Fatalf("offset after End = %d, want 14", m.Offset)
+	}
+	m.Move(-1)
+	RenderFetch(m, 80, 24, DefaultTheme())
+	if m.Offset != 14 || m.Sel != 28 {
+		t.Errorf("after k: offset %d sel %d, want offset 14 sel 28", m.Offset, m.Sel)
+	}
+	m.Move(1)
+	m.Move(1)
+	RenderFetch(m, 80, 24, DefaultTheme())
+	if m.Sel != 0 || m.Offset != 0 {
+		t.Errorf("after wrap to the top: offset %d sel %d, want 0/0", m.Offset, m.Sel)
+	}
+	m.Move(-1)
+	RenderFetch(m, 80, 24, DefaultTheme())
+	if m.Sel != 29 || m.Offset != 14 {
+		t.Errorf("after wrap to the bottom: offset %d sel %d, want 14/29", m.Offset, m.Sel)
+	}
+}
+
 // TestFetchNoColorKeepsGlyphs is AC-055's fetch slice: --color never removes
 // SGR but keeps every frame glyph.
 func TestFetchNoColorKeepsGlyphs(t *testing.T) {

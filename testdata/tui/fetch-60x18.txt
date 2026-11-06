@@ -10,8 +10,8 @@
 │                                                          │
 │                                                          │
 │                                                          │
-│                                                          │
-│Score is how many milliseconds it takes to download the re│
+│ Score is how many milliseconds it takes to download the  │
+│                    repository index.                     │
 │                                                          │
 │        Use ↓↑ to move, Home/End to go top/bottom,        │
 │            q/Enter to select, Esc to cancel.             │

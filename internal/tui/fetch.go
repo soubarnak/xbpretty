@@ -1,6 +1,10 @@
 package tui
 
-import "github.com/soubarnak/xbpretty/internal/term"
+import (
+	"strings"
+
+	"github.com/soubarnak/xbpretty/internal/term"
+)
 
 // FetchRow is one scored mirror in the fetch picker (FR-070). The display
 // strings arrive preformatted: the cli owns the ms and binary-rate rules, the
@@ -20,6 +24,9 @@ type FetchRow struct {
 type FetchModel struct {
 	Rows []FetchRow
 	Sel  int
+	// Offset is the first mirror on screen; see SummaryModel.Offset.
+	Offset int
+	view   int
 }
 
 // Move shifts the selection by d with wrap-around, which is FR-070's j/k rule.
@@ -29,12 +36,14 @@ func (m *FetchModel) Move(d int) {
 		return
 	}
 	m.Sel = (m.Sel + d + n) % n
+	m.follow()
 }
 
 // SetSelection clamps the selection to the list; Home/End use it.
 func (m *FetchModel) SetSelection(i int) {
 	if len(m.Rows) == 0 {
 		m.Sel = 0
+		m.follow()
 		return
 	}
 	if i < 0 {
@@ -44,6 +53,13 @@ func (m *FetchModel) SetSelection(i int) {
 		i = len(m.Rows) - 1
 	}
 	m.Sel = i
+	m.follow()
+}
+
+// follow keeps Offset in step with the selection using the height of the
+// last frame.
+func (m *FetchModel) follow() {
+	m.Offset = followWindow(m.Sel, m.Offset, m.view, len(m.Rows))
 }
 
 // fetchCol is one visible picker column.
@@ -158,7 +174,7 @@ func RenderFetch(m *FetchModel, w, h int, t Theme) *Buffer {
 	drawFetchFrame(buf, w, h, t)
 	drawFetchTitle(buf, w, t)
 	if !Fits(w, h) {
-		centerText(buf, h/2, TooSmall(w, h), t.style(RoleNotice))
+		drawTooSmall(buf, t.style(RoleNotice))
 		return buf
 	}
 
@@ -193,10 +209,9 @@ func RenderFetch(m *FetchModel, w, h int, t Theme) *Buffer {
 	}
 
 	visible := listH - 1
-	offset := 0
-	if m.Sel >= visible && visible > 0 {
-		offset = m.Sel - visible + 1
-	}
+	m.view = visible
+	m.Offset = followWindow(m.Sel, m.Offset, visible, len(m.Rows))
+	offset := m.Offset
 	for i := 0; i < visible && offset+i < len(m.Rows); i++ {
 		idx := offset + i
 		row := m.Rows[idx]
@@ -227,12 +242,15 @@ func RenderFetch(m *FetchModel, w, h int, t Theme) *Buffer {
 		}
 	}
 
-	// Two-row info band, then the two-line help band (FR-070).
+	// Two-row info band, then the two-line help band (FR-070). The sentence
+	// wraps into the band; a single line stays on the band's lower row.
 	infoY := 1 + listH
-	info := "Score is how many milliseconds it takes to download the repository index."
 	infoStyle := t.style(RoleRegular)
 	infoStyle.Mods |= term.Italic
-	buf.DrawTextCenter(1, infoY+1, w-2, info, infoStyle)
+	infoLines := infoBandLines(fetchInfo, w-2)
+	for i, line := range infoLines {
+		buf.DrawTextCenter(1, infoY+2-len(infoLines)+i, w-2, line, infoStyle)
+	}
 	helpY := infoY + 2
 	for i, line := range []string{
 		"Use ↓↑ to move, Home/End to go top/bottom,",
@@ -241,6 +259,31 @@ func RenderFetch(m *FetchModel, w, h int, t Theme) *Buffer {
 		buf.DrawTextCenter(1, helpY+1+i, w-2, line, t.style(RoleSecondary))
 	}
 	return buf
+}
+
+// fetchInfo is FR-070's score explanation, shown in the two-row info band.
+const fetchInfo = "Score is how many milliseconds it takes to download the repository index."
+
+// infoBandLines fits s into the two-row info band. The text wraps at the
+// interior width; a third row, which the 60-column floor never produces, is
+// folded into the second with an ellipsis.
+func infoBandLines(s string, w int) []string {
+	lines := wrapText(s, w)
+	if len(lines) > 2 {
+		lines = []string{lines[0], ellipsize(strings.Join(lines[1:], " "), w)}
+	}
+	return lines
+}
+
+// ellipsize clips s to w cells and ends a clipped line with an ellipsis.
+func ellipsize(s string, w int) string {
+	if term.StringWidth(s) <= w {
+		return s
+	}
+	if w <= 1 {
+		return term.Truncate(s, w)
+	}
+	return term.Truncate(s, w-1) + "…"
 }
 
 // drawFetchFrame paints the rounded border.

@@ -33,15 +33,22 @@ type Tab struct {
 // detail (#77) state. The interaction policy lives in the cli; this type only
 // carries the data the frame renders.
 type SummaryModel struct {
-	Title     string
-	Tabs      []Tab
-	Active    int
-	Sel       int
+	Title  string
+	Tabs   []Tab
+	Active int
+	Sel    int
+	// Offset is the first table row on screen. It moves only when Sel leaves
+	// the window, so the cursor can walk inside a scrolled view.
+	Offset    int
 	Download  string
 	DiskLabel string
 	Disk      string
 	History   bool
 	Help      []string
+
+	// view is the number of table rows the last frame showed. The key moves
+	// use it to keep Offset in step with Sel between frames.
+	view int
 }
 
 func (m *SummaryModel) cur() *Tab {
@@ -66,6 +73,44 @@ func (m *SummaryModel) MoveRow(d int) {
 	if m.Sel > len(t.Rows)-1 {
 		m.Sel = len(t.Rows) - 1
 	}
+	m.follow()
+}
+
+// follow keeps Offset in step with the selection using the height of the
+// last frame.
+func (m *SummaryModel) follow() {
+	if t := m.cur(); t != nil {
+		m.Offset = followWindow(m.Sel, m.Offset, m.view, len(t.Rows))
+	}
+}
+
+// followWindow returns the first visible row that keeps sel on screen. It is
+// ratatui's TableState rule: the window moves only when the selection
+// leaves it, so a cursor that walks back up inside a scrolled view leaves the
+// view where it is. A visible height of zero means no frame has been drawn
+// yet, so only the upward rule applies.
+func followWindow(sel, offset, visible, rows int) int {
+	if sel < offset {
+		offset = sel
+	}
+	if visible > 0 && sel >= offset+visible {
+		offset = sel - visible + 1
+	}
+	window := visible
+	if window < 1 {
+		window = 1
+	}
+	maxOffset := rows - window
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if offset > maxOffset {
+		offset = maxOffset
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return offset
 }
 
 // RowCount is the active tab's row count (0 when there is no tab).
@@ -116,6 +161,7 @@ func (m *SummaryModel) MoveTab(d int) {
 	}
 	m.Active = next
 	m.Sel = 0
+	m.Offset = 0
 }
 
 // SetSelection clamps the selection to the active tab.
@@ -123,6 +169,7 @@ func (m *SummaryModel) SetSelection(row int) {
 	t := m.cur()
 	if t == nil || len(t.Rows) == 0 {
 		m.Sel = 0
+		m.follow()
 		return
 	}
 	if row < 0 {
@@ -132,6 +179,7 @@ func (m *SummaryModel) SetSelection(row int) {
 		row = len(t.Rows) - 1
 	}
 	m.Sel = row
+	m.follow()
 }
 
 // tabHasVersionDiff reports whether a tab's rows include a changed version.
@@ -285,10 +333,10 @@ func RenderSummary(m *SummaryModel, w, h int, t Theme) *Buffer {
 	// interior (FR-072).
 	buf.Fill(0, 0, w, h, t.Regular)
 	border := &block{X: 0, Y: 0, W: w, H: h}
-	border.fill(buf, t.Primary)
+	border.fill(buf, t.style(RolePrimary))
 	border.title(buf, m.Title, t.style(RoleHighlight))
 	if !Fits(w, h) {
-		centerText(buf, h/2, TooSmall(w, h), t.style(RoleNotice))
+		drawTooSmall(buf, t.style(RoleNotice))
 		return buf
 	}
 
@@ -371,6 +419,28 @@ func RenderSummary(m *SummaryModel, w, h int, t Theme) *Buffer {
 		footerRows = 2
 	}
 
+	// The footer's label and value columns set the help block's width, so the
+	// help wraps before the table height is known.
+	labelW, valueW := 0, 0
+	for _, row := range footer {
+		labelW = max(labelW, term.StringWidth(row[0]))
+		valueW = max(valueW, term.StringWidth(row[1]))
+	}
+	helpX := bx + labelW + valueW + 1
+	helpW := bw - (labelW + valueW + 1)
+	var helpLines []string
+	if helpW >= 12 {
+		for _, line := range m.Help {
+			helpLines = append(helpLines, wrapText(line, helpW)...)
+		}
+	}
+	// Wrapped help may claim more footer rows, but never so many that
+	// the table drops below its four-row floor. Otherwise the confirm hint at
+	// 60 columns was clipped away.
+	if len(helpLines) > footerRows {
+		footerRows = max(footerRows, min(len(helpLines), bh-6))
+	}
+
 	tableH := bh - 2 - footerRows
 	if tableH < 4 {
 		tableH = 4
@@ -378,11 +448,11 @@ func RenderSummary(m *SummaryModel, w, h int, t Theme) *Buffer {
 	tableY := by + 2
 	tableW := bw - 3
 	table := &block{X: bx, Y: tableY, W: tableW, H: tableH}
-	table.fill(buf, t.Primary)
+	table.fill(buf, t.style(RolePrimary))
 
 	gutterX := bx + tableW
 	gutter := &block{X: gutterX, Y: tableY, W: 3, H: tableH}
-	gutter.fill(buf, t.Primary)
+	gutter.fill(buf, t.style(RolePrimary))
 
 	tab := m.cur()
 	if tab != nil {
@@ -409,10 +479,9 @@ func RenderSummary(m *SummaryModel, w, h int, t Theme) *Buffer {
 		if visible < 0 {
 			visible = 0
 		}
-		scroll := 0
-		if m.Sel >= visible && visible > 0 {
-			scroll = m.Sel - visible + 1
-		}
+		m.view = visible
+		m.Offset = followWindow(m.Sel, m.Offset, visible, len(tab.Rows))
+		scroll := m.Offset
 
 		aligns := alignsFor(len(headers))
 		for i, hd := range headers {
@@ -457,8 +526,10 @@ func RenderSummary(m *SummaryModel, w, h int, t Theme) *Buffer {
 					thumbH = 1
 				}
 				maxPos := interior - thumbH
+				// The thumb follows the first visible row, so it reaches the
+				// bottom exactly when the view does.
 				if maxPos > 0 && len(tab.Rows)-visible > 0 {
-					thumbY = tableY + 1 + m.Sel*maxPos/(len(tab.Rows)-visible)
+					thumbY = tableY + 1 + scroll*maxPos/(len(tab.Rows)-visible)
 				}
 			}
 			for yy := tableY + 1; yy < tableY+tableH-1; yy++ {
@@ -472,15 +543,6 @@ func RenderSummary(m *SummaryModel, w, h int, t Theme) *Buffer {
 
 	// Footer left block and the help block one column to its right.
 	fy := tableY + tableH
-	labelW, valueW := 0, 0
-	for _, row := range footer {
-		if term.StringWidth(row[0]) > labelW {
-			labelW = term.StringWidth(row[0])
-		}
-		if term.StringWidth(row[1]) > valueW {
-			valueW = term.StringWidth(row[1])
-		}
-	}
 	for i, row := range footer {
 		y := fy + i
 		if y >= by+bh {
@@ -493,19 +555,11 @@ func RenderSummary(m *SummaryModel, w, h int, t Theme) *Buffer {
 			buf.DrawTextRight(bx+labelW+valueW, y, row[1], t.style(RoleRegular))
 		}
 	}
-	helpX := bx + labelW + valueW + 1
-	helpW := bw - (labelW + valueW + 1)
-	if helpW >= 12 {
-		var lines []string
-		for _, line := range m.Help {
-			lines = append(lines, wrapText(line, helpW)...)
+	for i, line := range helpLines {
+		if i >= footerRows {
+			break
 		}
-		for i, line := range lines {
-			if i >= footerRows {
-				break
-			}
-			buf.DrawTextCenter(helpX, fy+i, helpW, line, t.style(RoleSecondary))
-		}
+		buf.DrawTextCenter(helpX, fy+i, helpW, line, t.style(RoleSecondary))
 	}
 	return buf
 }
@@ -515,11 +569,17 @@ func TooSmall(w, h int) string {
 	return "Terminal too small (60x18 minimum; now " + itoa(w) + "x" + itoa(h) + ")"
 }
 
+// squeezeMinName is the narrowest the Package column is squeezed to before the
+// other columns give up cells.
+const squeezeMinName = 8
+
 // columnLayout returns each column's offset and draw width inside the table
-// interior. When the natural widths fit, SpaceAround spreads them. When they
-// do not (the 60x18 floor with realistic names), it shrinks deterministically
-// from the left, reserving one cell for every remaining column, so columns
-// never overlap or paint over the gutter.
+// interior. When the natural widths fit, SpaceAround spreads them (FR-068);
+// neighbours may touch there when the spare cells are fewer than the gaps.
+// When they do not (the 60x18 floor with realistic names), every pair of
+// neighbours keeps one blank cell: Package gives up cells first, down to
+// squeezeMinName, and whatever is still too wide is clipped from the right,
+// so columns never overlap or paint over the gutter.
 func columnLayout(natural []int, total int) (offsets, widths []int) {
 	n := len(natural)
 	offsets = make([]int, n)
@@ -535,24 +595,27 @@ func columnLayout(natural []int, total int) (offsets, widths []int) {
 		copy(widths, natural)
 		return spaceAround(natural, total), widths
 	}
-	remaining := total
+	budget := total - (n - 1)
+	copy(widths, natural)
+	if shrink := min(content-budget, widths[0]-squeezeMinName); shrink > 0 {
+		widths[0] -= shrink
+	}
+	remaining := budget
 	for i := 0; i < n; i++ {
 		reserve := n - 1 - i
 		maxWidth := remaining - reserve
 		if maxWidth < 1 {
 			maxWidth = 1
 		}
-		w := natural[i]
-		if w > maxWidth {
-			w = maxWidth
+		if widths[i] > maxWidth {
+			widths[i] = maxWidth
 		}
-		widths[i] = w
-		remaining -= w
+		remaining -= widths[i]
 	}
 	pos := 0
 	for i := 0; i < n; i++ {
 		offsets[i] = pos
-		pos += widths[i]
+		pos += widths[i] + 1
 	}
 	return offsets, widths
 }
@@ -595,13 +658,18 @@ func drawAligned(buf *Buffer, x, y, w int, s string, st Style, align int) {
 	}
 }
 
+// drawSpansAligned aligns a version diff inside its column. A diff wider than
+// the column starts at the column's left edge and clips at its right edge, so
+// it never paints over the column to the left.
 func drawSpansAligned(buf *Buffer, x, y, w int, spans []Span, t Theme, align int) {
 	total := spanWidth(spans)
 	start := x
-	if align == 1 {
-		start = x + (w-total)/2
-	} else if align == 2 {
-		start = x + w - total
+	if total <= w {
+		if align == 1 {
+			start = x + (w-total)/2
+		} else if align == 2 {
+			start = x + w - total
+		}
 	}
 	col := start
 	for _, sp := range spans {
@@ -665,8 +733,25 @@ func bodyRect(w, h int) (x, y, bw, bh int) {
 	return 2, 1, w - 4, h - 2
 }
 
-func centerText(buf *Buffer, y int, s string, st Style) {
-	buf.DrawTextCenter(0, y, buf.W, s, st)
+// drawTooSmall paints FR-071's notice inside the frame. The text wraps to the
+// interior width and is centred vertically between the border rows, so no
+// line can paint over a border cell.
+func drawTooSmall(buf *Buffer, st Style) {
+	if buf.W < 3 || buf.H < 3 {
+		return
+	}
+	lines := wrapText(TooSmall(buf.W, buf.H), buf.W-2)
+	top := 1 + (buf.H-2-len(lines))/2
+	if top < 1 {
+		top = 1
+	}
+	for i, line := range lines {
+		y := top + i
+		if y > buf.H-2 {
+			break
+		}
+		buf.DrawTextCenter(1, y, buf.W-2, line, st)
+	}
 }
 
 func itoa(n int) string {

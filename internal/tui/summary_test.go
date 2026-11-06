@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/soubarnak/xbpretty/internal/term"
 )
 
 func goldenUpgrade() *SummaryModel {
@@ -375,6 +377,227 @@ func TestManyOperationTabsStayInsideTheBody(t *testing.T) {
 			}
 			if got := buf.Get(geometry.w-2, y).R; got != ' ' {
 				t.Errorf("%dx%d row %d right padding = %q, want space", geometry.w, geometry.h, y, got)
+			}
+		}
+	}
+}
+
+// thumbRowsOf returns the rows that paint a scrollbar thumb cell anywhere in
+// the frame, in order.
+func thumbRowsOf(buf *Buffer) []int {
+	var rows []int
+	for y := 0; y < buf.H; y++ {
+		for x := 0; x < buf.W; x++ {
+			if buf.Get(x, y).R == '█' {
+				rows = append(rows, y)
+				break
+			}
+		}
+	}
+	return rows
+}
+
+// TestScrollbarThumbTracksScrollOffset: the thumb follows the first
+// visible row, not the selection, so it is never clipped near the end.
+func TestScrollbarThumbTracksScrollOffset(t *testing.T) {
+	// 80x24 with the four-row footer: the table interior is rows 4..17.
+	const firstInterior, lastInterior = 4, 17
+	m := goldenScrollable()
+	prevTop := -1
+	for sel := 0; sel < 30; sel++ {
+		m.Sel = sel
+		rows := thumbRowsOf(RenderSummary(m, 80, 24, DefaultTheme()))
+		if len(rows) != 6 {
+			t.Fatalf("Sel %d: thumb rows = %v, want a 6-cell thumb", sel, rows)
+		}
+		if rows[0] < prevTop {
+			t.Errorf("Sel %d: thumb moved up to row %d from %d", sel, rows[0], prevTop)
+		}
+		prevTop = rows[0]
+		if sel <= 12 && rows[0] != firstInterior {
+			t.Errorf("Sel %d: thumb starts at row %d, want the first interior row %d", sel, rows[0], firstInterior)
+		}
+		if sel == 29 && rows[len(rows)-1] != lastInterior {
+			t.Errorf("Sel 29: thumb ends at row %d, want the last interior row %d", rows[len(rows)-1], lastInterior)
+		}
+	}
+}
+
+// TestScrollKeepsOffsetWhenMovingUp: after End, k moves the cursor
+// up inside the window instead of scrolling it, and PgUp only scrolls once
+// the cursor leaves the window.
+func TestScrollKeepsOffsetWhenMovingUp(t *testing.T) {
+	m := goldenScrollable()
+	m.SetSelection(29)
+	RenderSummary(m, 80, 24, DefaultTheme())
+	offset := m.Offset
+	if offset != 17 {
+		t.Fatalf("offset after End = %d, want 17", offset)
+	}
+	m.MoveRow(-1)
+	RenderSummary(m, 80, 24, DefaultTheme())
+	if m.Offset != offset || m.Sel != 28 {
+		t.Errorf("after k: offset %d sel %d, want offset %d sel 28", m.Offset, m.Sel, offset)
+	}
+	m.MoveRow(-10)
+	RenderSummary(m, 80, 24, DefaultTheme())
+	if m.Offset != offset || m.Sel != 18 {
+		t.Errorf("after PgUp inside the window: offset %d sel %d, want offset %d sel 18", m.Offset, m.Sel, offset)
+	}
+	m.MoveRow(-10)
+	RenderSummary(m, 80, 24, DefaultTheme())
+	if m.Offset != 8 || m.Sel != 8 {
+		t.Errorf("after PgUp past the window top: offset %d sel %d, want 8/8", m.Offset, m.Sel)
+	}
+}
+
+// TestSqueezedColumnsKeepGap: the squeeze path keeps
+// one blank cell between every pair of columns and shrinks Package first.
+func TestSqueezedColumnsKeepGap(t *testing.T) {
+	natural := []int{25, 17, 17, 7}
+	const total = 49
+	offsets, widths := columnLayout(natural, total)
+	for i := range widths {
+		if widths[i] < 1 {
+			t.Fatalf("column %d width = %d, want >= 1", i, widths[i])
+		}
+		if i > 0 && offsets[i] < offsets[i-1]+widths[i-1]+1 {
+			t.Errorf("column %d at %d touches column %d (ends at %d)", i, offsets[i], i-1, offsets[i-1]+widths[i-1])
+		}
+	}
+	if end := offsets[len(offsets)-1] + widths[len(widths)-1]; end > total {
+		t.Errorf("columns end at %d, want <= %d", end, total)
+	}
+	if widths[0] != 8 {
+		t.Errorf("Package width = %d, want the 8-cell floor", widths[0])
+	}
+	if widths[1] != natural[1] || widths[2] != natural[2] {
+		t.Errorf("Old/New widths = %d/%d, want the natural %d/%d", widths[1], widths[2], natural[1], natural[2])
+	}
+}
+
+// TestSqueezedSpansStayInColumn: a version diff wider
+// than its column clips on that column's edge and never paints over the
+// neighbour on its left.
+func TestSqueezedSpansStayInColumn(t *testing.T) {
+	spans := []Span{{Text: "1.2_1", Role: RoleRegular}, {Text: "0", Role: RoleNotice}}
+	for _, align := range []int{1, 2} {
+		buf := NewBuffer(16, 1)
+		buf.DrawText(0, 0, "OLDOLD", ZeroStyle)
+		drawSpansAligned(buf, 6, 0, 4, spans, DefaultTheme(), align)
+		if got := buf.Grid()[0]; got != "OLDOLD1.2_" {
+			t.Errorf("align %d grid = %q, want %q", align, got, "OLDOLD1.2_")
+		}
+	}
+}
+
+// TestSqueezedSpanKeepsOldVersionIntact renders a 60x18 table whose New
+// Version is wider than its squeezed column, and checks the Old Version text
+// on the unselected row survives the diff.
+func TestSqueezedSpanKeepsOldVersionIntact(t *testing.T) {
+	const newVersion = "2.0_1234567890123456789012345678"
+	model := &SummaryModel{
+		Title: "xbpretty Upgrade",
+		Tabs: []Tab{{Label: "Upgrade", Rows: []PkgRow{
+			{Name: "pkg-a", Old: "1.0_1", New: newVersion, Size: "1 MiB", NewSpans: VersionSpans("1.0_1", newVersion)},
+			{Name: "tzdata", Old: "1.0_1", New: newVersion, Size: "1 MiB", NewSpans: VersionSpans("1.0_1", newVersion)},
+		}}},
+		Download:  "2 MiB",
+		DiskLabel: "Disk space required:",
+		Disk:      "2 MiB",
+	}
+	grid := RenderSummary(model, 60, 18, DefaultTheme()).Grid()
+	var row string
+	for _, line := range grid {
+		if strings.Contains(line, "tzdata") {
+			row = line
+		}
+	}
+	if !strings.Contains(row, "1.0_1") {
+		t.Errorf("Old Version of the unselected row was overwritten:\n%s", strings.Join(grid, "\n"))
+	}
+}
+
+// TestHelpKeepsConfirmHintAtFloor: at 60x18 the wrapped help block
+// grows the footer instead of dropping the confirm hint.
+func TestHelpKeepsConfirmHintAtFloor(t *testing.T) {
+	frame := RenderSummary(goldenRealistic60x18(), 60, 18, DefaultTheme()).Text()
+	if !strings.Contains(frame, "(y) start upgrade") {
+		t.Errorf("60x18 frame dropped the confirm hint:\n%s", frame)
+	}
+}
+
+// interiorWords joins a frame's interior (inside the one-cell border) into
+// single-spaced words, so a notice wrapped across rows can be matched.
+func interiorWords(buf *Buffer) string {
+	var parts []string
+	for y := 1; y < buf.H-1; y++ {
+		var sb strings.Builder
+		for x := 1; x < buf.W-1; x++ {
+			sb.WriteRune(buf.Get(x, y).R)
+		}
+		parts = append(parts, sb.String())
+	}
+	return strings.Join(strings.Fields(strings.Join(parts, " ")), " ")
+}
+
+// assertFrameBorder proves the frame's corners and side glyphs survived.
+func assertFrameBorder(t *testing.T, name string, buf *Buffer, tl, tr, bl, br, side rune) {
+	t.Helper()
+	if buf.Get(0, 0).R != tl || buf.Get(buf.W-1, 0).R != tr || buf.Get(0, buf.H-1).R != bl || buf.Get(buf.W-1, buf.H-1).R != br {
+		t.Errorf("%s corners overwritten:\n%s", name, buf.Text())
+	}
+	for y := 1; y < buf.H-1; y++ {
+		if buf.Get(0, y).R != side || buf.Get(buf.W-1, y).R != side {
+			t.Errorf("%s row %d side overwritten:\n%s", name, y, buf.Text())
+			return
+		}
+	}
+}
+
+// TestTooSmallKeepsBorder: the too-small notice wraps inside the
+// border at every narrow width and never paints over it.
+func TestTooSmallKeepsBorder(t *testing.T) {
+	const h = 10
+	for _, w := range []int{30, 40, 46} {
+		want := TooSmall(w, h)
+		info := &PackageInfoModel{Title: "xbpretty Upgrade", Fields: []InfoField{{Label: "Package", Value: "libfoo"}}}
+		summaryBuf := RenderSummary(goldenUpgrade(), w, h, DefaultTheme())
+		assertFrameBorder(t, "summary", summaryBuf, '┏', '┓', '┗', '┛', '┃')
+		if got := interiorWords(summaryBuf); !strings.Contains(got, want) {
+			t.Errorf("%dx%d summary notice = %q, want %q", w, h, got, want)
+		}
+		infoBuf := RenderPackageInfo(info, w, h, DefaultTheme())
+		assertFrameBorder(t, "package info", infoBuf, '┏', '┓', '┗', '┛', '┃')
+		if got := interiorWords(infoBuf); !strings.Contains(got, want) {
+			t.Errorf("%dx%d package-info notice = %q, want %q", w, h, got, want)
+		}
+		fetchBuf := RenderFetch(&FetchModel{Rows: goldenMirrors()}, w, h, DefaultTheme())
+		assertFrameBorder(t, "fetch", fetchBuf, '╭', '╮', '╰', '╯', '│')
+		if got := interiorWords(fetchBuf); !strings.Contains(got, want) {
+			t.Errorf("%dx%d fetch notice = %q, want %q", w, h, got, want)
+		}
+	}
+}
+
+// TestRegularBackgroundCoversFrame: a custom Regular background
+// reaches every interior cell, including the frame's own glyphs.
+func TestRegularBackgroundCoversFrame(t *testing.T) {
+	theme := DefaultTheme()
+	theme.Regular.BG = term.ANSI(4)
+	const w, h = 80, 24
+	frames := map[string]*Buffer{
+		"summary":      RenderSummary(goldenUpgrade(), w, h, theme),
+		"package info": RenderPackageInfo(&PackageInfoModel{Title: "xbpretty Upgrade", Fields: []InfoField{{Label: "Package", Value: "libfoo"}}}, w, h, theme),
+		"fetch":        RenderFetch(&FetchModel{Rows: goldenMirrors()}, w, h, theme),
+	}
+	for name, buf := range frames {
+		for y := 1; y < h-1; y++ {
+			for x := 1; x < w-1; x++ {
+				if got := buf.Get(x, y).S.BG; got != term.ANSI(4) {
+					t.Errorf("%s cell (%d,%d) background = %+v, want ANSI(4)", name, x, y, got)
+					break
+				}
 			}
 		}
 	}

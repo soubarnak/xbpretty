@@ -22,10 +22,10 @@ func RenderPackageInfo(m *PackageInfoModel, w, h int, t Theme) *Buffer {
 	buf := NewBuffer(w, h)
 	buf.Fill(0, 0, w, h, t.Regular)
 	border := &block{X: 0, Y: 0, W: w, H: h}
-	border.fill(buf, t.Primary)
+	border.fill(buf, t.style(RolePrimary))
 	border.title(buf, m.Title, t.style(RoleHighlight))
 	if !Fits(w, h) {
-		centerText(buf, h/2, TooSmall(w, h), t.style(RoleNotice))
+		drawTooSmall(buf, t.style(RoleNotice))
 		return buf
 	}
 

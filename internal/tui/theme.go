@@ -48,8 +48,20 @@ func DefaultTheme() Theme {
 	}
 }
 
-// style returns the role's cell style.
+// style returns the role's cell style. A role that leaves its background at
+// the terminal default takes the Regular background, so a custom Regular
+// colour covers every cell of the frame instead of leaving holes (FR-072).
 func (t Theme) style(r Role) term.Style {
+	s := t.roleStyle(r)
+	if s.BG == term.Default {
+		s.BG = t.Regular.BG
+	}
+	return s
+}
+
+// roleStyle is the role's own cell style before the Regular background
+// fallback.
+func (t Theme) roleStyle(r Role) term.Style {
 	switch r {
 	case RolePrimary:
 		return t.Primary
