@@ -223,6 +223,8 @@ Primary   = { fg = "BrightGreen" }
 Secondary = { fg = "BrightBlue" }
 Highlight = { fg = "Reset" }
 Regular   = { fg = "Reset", modifier = "" }
+ProgressFilled   = { fg = "BrightGreen" }
+ProgressUnfilled = { fg = "BrightRed" }
 Notice    = { fg = "BrightYellow" }
 Warning   = { fg = "BrightYellow" }
 Error     = { fg = "BrightRed" }
