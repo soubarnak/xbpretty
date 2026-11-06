@@ -15,36 +15,37 @@
 
 A modern, friendly front end for [`xbps`](https://github.com/void-linux/xbps), the Void Linux package manager, inspired by [Nala](https://gitlab.com/volian/nala).
 
-`xbpretty` previews transactions in rich Unicode container tables, highlights package version diffs, asks for confirmation before acting, tracks downloads and installations in a live framed progress widget, records transaction history, and explains common xbps errors with actionable hints. It wraps `xbps-install`, `xbps-remove`, and `xbps-query`; it does not replace them.
+`xbpretty` previews transactions as nala's borderless `=`-ruled tables, highlights package version diffs, asks for confirmation before acting, tracks downloads and installations in a live progress widget, records replayable transaction history, and explains common xbps errors with actionable hints. It wraps `xbps-install`, `xbps-remove`, and `xbps-query`; it does not replace them.
 
 Built in pure Go with zero external dependencies, `xbpretty` compiles to a single static binary (`CGO_ENABLED=0`), starts in under 2ms, and remains 100% compatible with offline `xbps-src` packaging.
 
 ```
-╭── Packages To Upgrade (2) ───────────────────────────────────────────────────╮
-│  Package                           Version Delta                        Size │
-├──────────────────────────────────────────────────────────────────────────────┤
-│  curl                              8.21.0_1 → 8.22.0_1              274.5 KiB │
-│  libcurl                           8.21.0_1 → 8.22.0_1              312.8 KiB │
-╰──────────────────────────────────────────────────────────────────────────────╯
+ Upgrade
+================================================================================
+ Package                          Old Version  New Version        Size
+ curl                             8.21.0_1     8.22.0_1        274 KiB
+ libcurl                          8.21.0_1     8.22.0_1        312 KiB
 
-╭── Summary ───────────────────────────────────────────────────────────────────╮
-│  Changes:  2 upgrade                                                         │
-│  Transfer: 587.3 KiB download  •  Disk: +18.4 KiB                            │
-╰──────────────────────────────────────────────────────────────────────────────╯
+ Summary
+================================================================================
+ 2 upgrade
+ Total download size: 587 KiB
+ Disk space required: 18 KiB
 ```
 
 ---
 
 ## Features
 
-- **Nala-Style Boxed Tables**: Encloses package actions into organized container cards (*Packages To Install*, *Packages To Upgrade*, *Packages To Remove*, *Held Packages*) with human-readable sizes and aligned columns.
-- **Version Delta Highlighting**: Displays version transitions (`old → new`) with upgraded components or package revisions highlighted.
-- **Live Framed Progress Widget**: Real-time 5-line terminal widget tracking download speeds, ETA, cyan-over-red progress bars, and unpack/configure spinners powered by a hybrid PTY/pipe execution engine.
-- **Dynamic Resize Support**: Automatically adapts progress box width when the terminal window is resized (`SIGWINCH`).
-- **Zero Dependencies & Blazing Fast**: Pure Go standard library VT100/ANSI rendering engine. No heavy third-party TUI frameworks, sub-2ms startup overhead, and offline packaging friendly.
-- **Script & Pipeline Friendly**: Automatically drops container borders, ANSI escape codes, and interactive widgets when piped (`xbp upgrade --dry-run | grep pkg`) or when `NO_COLOR` is set.
+- **Nala-Style Inline Summary**: Borderless `=`-ruled tables in the fixed operation order (*Remove*, *AutoRemove*, *Purge*, *AutoPurge*, *Install*, *ReInstall*, *Upgrade*, *Configure*, *Held*), with the counts-and-sizes footer.
+- **Version Delta Highlighting**: Displays version transitions (`old → new`) with only the changed components highlighted (`Notice`).
+- **Live Progress Widget**: Real-time Download (7-row), Install, Remove, Update and MirrorScore (6-row) views fed by a hybrid PTY/pipe engine. `[Ui] mode = "Plain"` is the supported off switch.
+- **Full-Screen TUI**: The S1 transaction summary, S2 history detail, S3 mirror picker and package-info view, all gated on `[Ui] mode = "Tui"` and the 60×18 entry floor.
+- **Zero Dependencies & Blazing Fast**: Pure Go standard library VT100/ANSI rendering engine. No third-party TUI frameworks, sub-2ms startup, and offline packaging friendly.
+- **Script & Pipeline Friendly**: stdout carries durable output only; the prompt, widget, hints and forwarded child output go to stderr. `Auto` colour is per stream, and `NO_COLOR` is honoured.
+- **Replayable History**: Every successful change is recorded under `/var/lib/xbpretty/history` and can be inspected, undone or redone with `xbp history`, `xbp undo` and `xbp redo`.
 - **Humanized Error Hints**: Translates cryptic xbps errors (missing packages, stale indexes, locked databases, and reverse dependencies via `xbps-query -X`) into clear, actionable advice.
-- **Transaction History**: Appends every successful change to `$XDG_STATE_HOME/xbpretty/transactions.log`, queryable at any time with `xbp log`.
+- **Transaction Log**: Appends every successful change to the append-only transaction log, queryable at any time with `xbp log`.
 - **Kernel Reboot Reminders**: Automatically prompts a reboot reminder whenever an upgrade touches the Linux kernel or glibc.
 - **Sudo / Doas Aware**: Resolves `SUDO_USER` or `DOAS_USER` when run with root privileges so your user configuration and transaction logs remain in your home directory with correct file ownership.
 
@@ -52,11 +53,10 @@ Built in pure Go with zero external dependencies, `xbpretty` compiles to a singl
 
 ## Visual Showcase
 
-### Live Execution Progress Widget
+### Live Execution Progress
 
-When running interactively, child `xbps` progress is captured and rendered into a smooth, in-place 5-line widget:
+When running interactively, child `xbps` telemetry is captured and rendered into an in-place rounded widget. Download is seven rows; the other views are six.
 
-**Download Phase:**
 ```
 ╭── Downloading... ────────────────────────────────────────────────────────────╮
 │  Total Packages: 2/5                                                         │
@@ -65,19 +65,7 @@ When running interactively, child `xbps` progress is captured and rendered into 
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
-**Unpack & Configure Phase:**
-```
-╭── Running xbps... ───────────────────────────────────────────────────────────╮
-│  Phase:           ⠋ Unpacking packages                                       │
-│  Current Target:  firefox-130.0_1                                            │
-│  Status:          [━━━━━━━━━━━━━━━━━━━━] 100.0% • 5/5 actions                 │
-╰──────────────────────────────────────────────────────────────────────────────╯
-```
-
-**Completion Teardown:**
-```
-✔ Transaction complete: 2 installed, 3 updated, 0 removed in 4.2s
-```
+The summary is nala's inline surface, not a box: `=` rules at the terminal width, borderless tables and a colour-independent footer.
 
 ---
 
@@ -136,9 +124,9 @@ One binary, seven names: the `xbpretty` binary plus six aliases. `xbp` is the pr
 
 | Command | Wraps | Alias | Description |
 |---|---|---|---|
-| `xbp install <pkgs...>` | `xbps-install -S <pkgs...>` | `xbp-install` | Install one or more packages |
+| `xbp install <pkgs...>` | `xbps-install <pkgs...>` (no `-S`) | `xbp-install` | Install one or more packages |
 | `xbp remove <pkgs...>` | `xbps-remove <pkgs...>` | `xbp-remove` | Remove installed packages |
-| `xbp upgrade` | `xbps-install -Su` | `xbp-upgrade` | Full system upgrade |
+| `xbp upgrade` | `xbps-install -Su` (separate `-S` step, then `-u`) | `xbp-upgrade` | Upgrade all installed packages |
 | `xbp autoremove` | `xbps-remove -o` | `xbp-autoremove` | Clean up orphaned packages |
 | `xbp update` | `xbps-install -S` | `xbp-update` | Refresh repository sync index |
 | `xbp log [--limit N] [pkgs...]` | *None* (reads transaction log) | *None* | View past transaction log |
@@ -153,22 +141,23 @@ One binary, seven names: the `xbpretty` binary plus six aliases. `xbp` is the pr
 | `-n`, `--assume-no` | Refuse at the confirmation prompt (exit 1) without changing anything |
 | `-y`, `--yes` | Proceed automatically without confirmation prompt |
 | `-v`, `--verbose` | Print raw command lines and stream unbuffered xbps output directly |
-| `--box-style=STYLE` | Select container border style: `rounded` (default), `classic`, or `ascii` |
-| `--progress-bar` | Force enable in-place execution progress widget |
-| `--no-progress-bar` | Disable in-place progress widget and stream xbps logs line-by-line |
-| `--no-sync` | Do not refresh repository indexes before calculating transaction |
+| `--update` | Run the separate repository sync step (`xbps-install -S`) first |
+| `--no-update`, `--no-sync` | Do not refresh repository indexes before calculating the transaction |
 | `--no-log` | Do not append this execution to the transaction log |
+| `--simple` | Print the simple summary with no rules, table or version diff |
+| `--color=WHEN` | Colour output: `auto` (default), `always`, or `never`; `Auto` is per stream |
+| `--no-color` | Emit no ANSI colour |
+| `--tui` / `--no-tui` | Force or disable the full-screen interface |
 | `--limit N` | With `xbp log`: output only the last `N` matching transaction entries |
-| `--color=WHEN` | Colorize summary: `auto` (default), `always`, or `never` |
 | `--version` | Display version information for xbpretty and underlying xbps |
-| `-- [xbps-flags]` | Forward any arguments following `--` directly to xbps (e.g. `xbp install -- -f pkg`) |
+| `-- [xbps-flags]` | Forward arguments after `--` directly to xbps (e.g. `xbp install -- -f pkg`) |
 
 ### Workflow & Privileges
 
 - **Interactive Root**: Runs `xbps` in dry-run mode (`--dry-run`), renders the summary table, and prompts `[Y/n]` on stderr. Answering `y` proceeds with execution using the live progress widget.
 - **Unprivileged User**: Running install/upgrade commands without root shows the transaction plan and exits with a reminder to execute under `sudo` or `doas`.
 - **Non-Interactive / Scripting**: If stdin is not a TTY and neither `-y` nor `--dry-run` is provided, `xbpretty` prints the summary and exits 1 with a reminder to provide `-y`.
-- **Piping & Grep**: When output is redirected or piped (`xbp upgrade --dry-run | grep pkg`), box characters and ANSI codes are automatically stripped to guarantee clean plaintext parsing.
+- **Piping & Grep**: stdout carries durable output only. With `Auto` colour, a redirected stdout gets no ANSI and the summary keeps natural table widths, so `xbp upgrade --dry-run | grep pkg` stays clean.
 
 ---
 
@@ -200,29 +189,59 @@ See [ADR-0008](docs/adr/0008-transaction-log-line-format.md) for details on log 
 
 ## Configuration
 
-Configuration is loaded from `$XDG_CONFIG_HOME/xbpretty/config.toml` (or `~/.config/xbpretty/config.toml`).
+Configuration is nala's TOML schema: `[Nala]`, `[Ui]`, `[Color]`,
+`[Color.theme]`, plus xbps-only `[Xbps]`. There are two layers,
+`/etc/xbpretty/config.toml` (optional, administrator-created) and
+`$XDG_CONFIG_HOME/xbpretty/config.toml` (or `~/.config/xbpretty/config.toml`).
+The user file wins per key; theme roles merge role by role.
 
-When executed with `sudo` or `doas`, xbpretty resolves the calling user's home directory so your personal settings always apply. Command-line flags take precedence over configuration values.
+When executed with `sudo` or `doas`, xbpretty resolves the calling user's
+passwd home so your personal settings always apply. Command-line flags take
+precedence over configuration values.
 
-Example `config.toml`:
+The canonical example is [`docs/config.toml.example`](docs/config.toml.example),
+which parses to the built-in defaults:
 
 ```toml
-# General preferences
-assume_yes    = false      # Equivalent to -y/--yes
-color         = "auto"     # "auto", "always", or "never"
-verbose       = false      # Stream raw command lines and output
-sync          = true       # Refresh repository indexes by default
-log           = true       # Record successful runs to transaction log
+[Nala]
+auto_remove = true
+auto_update = true
+update_show_packages = false
+full_upgrade = false
+simple = false
+assume_yes = false
 
-# Visual & TUI preferences
-box_style     = "rounded"  # "rounded", "classic", or "ascii"
-progress_bar  = true       # Enable 5-line framed execution widget
+[Ui]
+mode = "Auto"          # Auto, Tui or Plain
+unit = "Binary"        # Binary or Decimal
 
-# Custom binary paths (optional)
-# xbps_install_path = "/usr/bin/xbps-install"
-# xbps_remove_path  = "/usr/bin/xbps-remove"
-# xbps_query_path   = "/usr/bin/xbps-query"
+[Color]
+mode = "Auto"          # Auto, Always or Never
+
+[Color.theme]
+Primary   = { fg = "BrightGreen" }
+Secondary = { fg = "BrightBlue" }
+Highlight = { fg = "Reset" }
+Regular   = { fg = "Reset", modifier = "" }
+Notice    = { fg = "BrightYellow" }
+Warning   = { fg = "BrightYellow" }
+Error     = { fg = "BrightRed" }
+
+[Xbps]
+install_path = "xbps-install"
+remove_path = "xbps-remove"
+query_path = "xbps-query"
+rindex_path = "xbps-rindex"
+uhelper_path = "xbps-uhelper"
+pkgdb_path = "xbps-pkgdb"
+transaction_log = true
 ```
+
+`[Ui] mode = "Plain"` is the supported way to turn off the progress widget and
+the full-screen surfaces. The rev-5 flat keys (`box_style`, `progress_bar`,
+`color`, `sync`, `log`, the `xbps_*_path` names and `verbose`) are accepted with
+one aggregate warning during the rev-6 window and are removed in rev 7; see
+[`docs/migration-rev6.md`](docs/migration-rev6.md).
 
 ---
 
@@ -234,7 +253,9 @@ For in-depth design decisions and specifications, consult the project documentat
 - [GLOSSARY.md](GLOSSARY.md) — Ubiquitous language and domain terminology.
 - [ADR-0005](docs/adr/0005-output-rules-the-code-only-stated.md) — Output formatting and pipeline rules.
 - [ADR-0008](docs/adr/0008-transaction-log-line-format.md) — Append-only transaction log format.
-- [ADR-0011](docs/adr/0011-nala-tui-layout-and-execution-progress.md) — Nala-style TUI layout and hybrid PTY/pipe progress engine.
+- [ADR-0012](docs/adr/0012-nala-visual-system.md) — Nala v0.18.2 visual system: roles, borderless tables and the widget.
+- [ADR-0017](docs/adr/0017-full-screen-surfaces-and-engine.md) — Full-screen surfaces, inline viewport and engine.
+- [docs/migration-rev6.md](docs/migration-rev6.md) — Rev-5 to rev-6 config and behaviour migration.
 
 ---
 
